@@ -1,5 +1,16 @@
 package loka
 
+// DomainRoute maps a subdomain to a session port, enabling public HTTP access
+// to services running inside sessions via the control plane's reverse proxy.
+// e.g. "my-app.loka.example.com" → session abc123, port 5000
+type DomainRoute struct {
+	ID         string `json:"id,omitempty"`
+	Subdomain  string `json:"subdomain"`            // e.g. "my-app" → my-app.{base_domain}
+	SessionID  string `json:"session_id"`
+	RemotePort int    `json:"remote_port"`           // Port inside the VM
+	CreatedAt  string `json:"created_at,omitempty"`
+}
+
 // PortMapping maps a local port to a port inside the session VM.
 type PortMapping struct {
 	LocalPort  int    `json:"local_port"`            // Port on user's machine (0 = auto-assign).

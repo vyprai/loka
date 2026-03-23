@@ -157,6 +157,7 @@ func main() {
 		newProviderCmd(),
 		newTokenCmd(),
 		newStatusCmd(),
+		newDomainsCmd(),
 	)
 
 	rootCmd.AddCommand(&cobra.Command{

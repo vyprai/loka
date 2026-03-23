@@ -13,6 +13,14 @@ type ControlPlaneConfig struct {
 	Auth        AuthConfig        `yaml:"auth"`
 	Logging     LoggingConfig     `yaml:"logging"`
 	TLS         TLSConfig         `yaml:"tls"`
+	Domain      DomainConfig      `yaml:"domain"`
+}
+
+// DomainConfig configures the optional subdomain-based reverse proxy.
+type DomainConfig struct {
+	Enabled    bool   `yaml:"enabled"`     // Enable domain forwarding.
+	BaseDomain string `yaml:"base_domain"` // e.g. "loka.example.com" → {subdomain}.loka.example.com
+	ListenAddr string `yaml:"listen_addr"` // Separate listener for proxied traffic (default ":6843")
 }
 
 // AuthConfig configures API authentication.

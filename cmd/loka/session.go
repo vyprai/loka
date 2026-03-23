@@ -27,6 +27,8 @@ func newSessionCmd() *cobra.Command {
 		newSessionMountLocalCmd(),
 		newSessionPortForwardCmd(),
 		newSessionPortsCmd(),
+		newSessionExposeCmd(),
+		newSessionUnexposeCmd(),
 		newSessionSyncCmd(),
 	)
 	return cmd
@@ -333,6 +335,73 @@ func shortID(id string) string {
 	return id
 }
 
+func newSessionExposeCmd() *cobra.Command {
+	var port int
+
+	cmd := &cobra.Command{
+		Use:   "expose <session-id> <subdomain>",
+		Short: "Expose a session port via subdomain",
+		Long: `Map a subdomain to a port inside a session, making it accessible via HTTP.
+
+The control plane acts as a reverse proxy:
+  <subdomain>.<base-domain> → session VM port
+
+Examples:
+  loka session expose <id> my-app --port 5000
+  loka session expose <id> api --port 8080
+
+Access at: https://my-app.loka.example.com`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sessionID := args[0]
+			subdomain := args[1]
+
+			if port <= 0 {
+				return fmt.Errorf("--port is required")
+			}
+
+			client := newClient()
+			var resp struct {
+				Subdomain string `json:"subdomain"`
+				URL       string `json:"url"`
+				Port      int    `json:"port"`
+			}
+			err := client.Raw(cmd.Context(), "POST", "/api/v1/sessions/"+sessionID+"/expose", map[string]any{
+				"subdomain":   subdomain,
+				"remote_port": port,
+			}, &resp)
+			if err != nil {
+				return err
+			}
+
+			fmt.Printf("Exposed: %s → session %s port %d\n", resp.URL, shortID(sessionID), resp.Port)
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVarP(&port, "port", "p", 0, "Port inside the VM to expose (required)")
+	return cmd
+}
+
+func newSessionUnexposeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unexpose <session-id> <subdomain>",
+		Short: "Remove a subdomain exposure",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sessionID := args[0]
+			subdomain := args[1]
+
+			client := newClient()
+			if err := client.Raw(cmd.Context(), "DELETE", "/api/v1/sessions/"+sessionID+"/expose/"+subdomain, nil, nil); err != nil {
+				return err
+			}
+			fmt.Printf("Removed: %s\n", subdomain)
+			return nil
+		},
+	}
+}
+
 func newSessionPortsCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "ports <session-id>",
@@ -359,6 +428,43 @@ func newSessionPortsCmd() *cobra.Command {
 				}
 				fmt.Printf("  %d → %d (%s)\n", p.LocalPort, p.RemotePort, proto)
 			}
+			return nil
+		},
+	}
+}
+
+func newDomainsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "domains",
+		Short: "List all domain routes",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client := newClient()
+			var resp struct {
+				Routes []struct {
+					Subdomain  string `json:"subdomain"`
+					SessionID  string `json:"session_id"`
+					RemotePort int    `json:"remote_port"`
+				} `json:"routes"`
+				BaseDomain string `json:"base_domain"`
+			}
+			if err := client.Raw(cmd.Context(), "GET", "/api/v1/domains", nil, &resp); err != nil {
+				return err
+			}
+			if outputFmt == "json" {
+				return printJSON(resp)
+			}
+			if len(resp.Routes) == 0 {
+				fmt.Println("No domain routes.")
+				fmt.Println("Expose a session: loka session expose <id> my-app --port 5000")
+				return nil
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "SUBDOMAIN\tSESSION\tPORT\tURL")
+			for _, r := range resp.Routes {
+				fmt.Fprintf(w, "%s\t%s\t%d\t%s.%s\n",
+					r.Subdomain, shortID(r.SessionID), r.RemotePort, r.Subdomain, resp.BaseDomain)
+			}
+			w.Flush()
 			return nil
 		},
 	}
