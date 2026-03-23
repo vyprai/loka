@@ -1637,3 +1637,193 @@ func TestProvisioningSession_WithImageManager(t *testing.T) {
 		t.Errorf("ImageID = %q, want %q", s.ImageID, "ubuntu-img-id")
 	}
 }
+
+// ─── Artifact tests ─────────────────────────────────────────────
+
+func TestListArtifacts_LiveSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "artifacts-live", Mode: loka.ModeExecute})
+
+	artifacts, err := te.manager.ListArtifacts(ctx, s.ID, "")
+	if err != nil {
+		t.Fatalf("ListArtifacts: %v", err)
+	}
+	if artifacts == nil {
+		t.Fatal("expected non-nil artifacts slice")
+	}
+	if len(artifacts) != 0 {
+		t.Errorf("expected 0 artifacts (placeholder), got %d", len(artifacts))
+	}
+
+	// Verify list_artifacts command was dispatched to the worker.
+	cmds := te.drainWorkerCommands(t)
+	found := false
+	for _, cmd := range cmds {
+		if cmd.Type == "list_artifacts" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected list_artifacts command sent to worker")
+	}
+}
+
+func TestListArtifacts_WithCheckpoint(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "artifacts-cp", Mode: loka.ModeExecute})
+
+	// Create and complete a checkpoint.
+	_, err := te.manager.CreateCheckpoint(ctx, s.ID, "cp-art-1", loka.CheckpointLight, "")
+	if err != nil {
+		t.Fatalf("CreateCheckpoint: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	err = te.manager.CompleteCheckpoint(ctx, "cp-art-1", true, "overlays/cp-art-1.tar.zst", "")
+	if err != nil {
+		t.Fatalf("CompleteCheckpoint: %v", err)
+	}
+
+	// List artifacts for the checkpoint.
+	artifacts, err := te.manager.ListArtifacts(ctx, s.ID, "cp-art-1")
+	if err != nil {
+		t.Fatalf("ListArtifacts with checkpoint: %v", err)
+	}
+	if artifacts == nil {
+		t.Fatal("expected non-nil artifacts slice")
+	}
+	// The placeholder implementation returns an empty list.
+	if len(artifacts) != 0 {
+		t.Errorf("expected 0 artifacts (placeholder), got %d", len(artifacts))
+	}
+}
+
+func TestListArtifacts_CheckpointWrongSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s1 := te.createRunningSession(t, CreateOpts{Name: "artifacts-s1", Mode: loka.ModeExecute})
+	s2 := te.createRunningSession(t, CreateOpts{Name: "artifacts-s2", Mode: loka.ModeExecute})
+
+	// Create a checkpoint on session 1.
+	_, err := te.manager.CreateCheckpoint(ctx, s1.ID, "cp-wrong-sess", loka.CheckpointLight, "")
+	if err != nil {
+		t.Fatalf("CreateCheckpoint: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	err = te.manager.CompleteCheckpoint(ctx, "cp-wrong-sess", true, "overlays/cp.tar.zst", "")
+	if err != nil {
+		t.Fatalf("CompleteCheckpoint: %v", err)
+	}
+
+	// Try to list artifacts for session 2 using session 1's checkpoint.
+	_, err = te.manager.ListArtifacts(ctx, s2.ID, "cp-wrong-sess")
+	if err == nil {
+		t.Fatal("expected error when checkpoint does not belong to session")
+	}
+}
+
+func TestListArtifacts_AutoWakesIdle(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "artifacts-autowake", Mode: loka.ModeExecute})
+
+	// Idle the session.
+	_, err := te.manager.Idle(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Idle: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	// ListArtifacts on idle session should auto-wake.
+	artifacts, err := te.manager.ListArtifacts(ctx, s.ID, "")
+	if err != nil {
+		t.Fatalf("ListArtifacts on idle session: %v", err)
+	}
+	if artifacts == nil {
+		t.Fatal("expected non-nil artifacts slice")
+	}
+
+	// Verify the session is now running.
+	got, err := te.manager.Get(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != loka.SessionStatusRunning {
+		t.Errorf("session Status = %q, want %q after auto-wake via ListArtifacts", got.Status, loka.SessionStatusRunning)
+	}
+	te.drainWorkerCommands(t)
+}
+
+func TestDownloadArtifact_LiveSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "download-live", Mode: loka.ModeExecute})
+
+	data, err := te.manager.DownloadArtifact(ctx, s.ID, "/workspace/output.csv")
+	if err != nil {
+		t.Fatalf("DownloadArtifact: %v", err)
+	}
+	if data == nil {
+		t.Fatal("expected non-nil data")
+	}
+
+	// Verify read_file command was dispatched.
+	cmds := te.drainWorkerCommands(t)
+	found := false
+	for _, cmd := range cmds {
+		if cmd.Type == "read_file" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected read_file command sent to worker")
+	}
+}
+
+func TestDownloadArtifactsTar(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "download-tar", Mode: loka.ModeExecute})
+
+	data, err := te.manager.DownloadArtifactsTar(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("DownloadArtifactsTar: %v", err)
+	}
+	if data == nil {
+		t.Fatal("expected non-nil data")
+	}
+
+	// Verify download_artifacts_tar command was dispatched.
+	cmds := te.drainWorkerCommands(t)
+	found := false
+	for _, cmd := range cmds {
+		if cmd.Type == "download_artifacts_tar" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected download_artifacts_tar command sent to worker")
+	}
+}
+
+func TestDownloadArtifact_SessionNotFound(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	_, err := te.manager.DownloadArtifact(ctx, "nonexistent-id", "/file.txt")
+	if err == nil {
+		t.Fatal("expected error for non-existent session")
+	}
+}

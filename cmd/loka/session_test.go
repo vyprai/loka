@@ -268,3 +268,50 @@ func TestParseMount_AzureBlobWithSASToken(t *testing.T) {
 		t.Errorf("sas_token = %q, want %q", m.Credentials["sas_token"], "sv=2021-06-08")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Artifact CLI command structure tests
+// ---------------------------------------------------------------------------
+
+func TestNewSessionArtifactsCmd(t *testing.T) {
+	cmd := newSessionArtifactsCmd()
+
+	if cmd.Use != "artifacts <session-id>" {
+		t.Errorf("Use = %q, want %q", cmd.Use, "artifacts <session-id>")
+	}
+
+	// Verify --checkpoint flag exists.
+	f := cmd.Flags().Lookup("checkpoint")
+	if f == nil {
+		t.Fatal("expected --checkpoint flag to exist")
+	}
+	if f.DefValue != "" {
+		t.Errorf("checkpoint default = %q, want empty", f.DefValue)
+	}
+}
+
+func TestNewSessionDownloadCmd(t *testing.T) {
+	cmd := newSessionDownloadCmd()
+
+	if cmd.Use != "download <session-id> <vm-path> [local-path]" {
+		t.Errorf("Use = %q, want %q", cmd.Use, "download <session-id> <vm-path> [local-path]")
+	}
+
+	// Verify --all flag exists.
+	allFlag := cmd.Flags().Lookup("all")
+	if allFlag == nil {
+		t.Fatal("expected --all flag to exist")
+	}
+	if allFlag.DefValue != "false" {
+		t.Errorf("all default = %q, want %q", allFlag.DefValue, "false")
+	}
+
+	// Verify --checkpoint flag exists.
+	cpFlag := cmd.Flags().Lookup("checkpoint")
+	if cpFlag == nil {
+		t.Fatal("expected --checkpoint flag to exist")
+	}
+	if cpFlag.DefValue != "" {
+		t.Errorf("checkpoint default = %q, want empty", cpFlag.DefValue)
+	}
+}

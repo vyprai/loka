@@ -554,3 +554,156 @@ func TestGRPCClientInvalidAddress(t *testing.T) {
 
 // Ensure unused import is consumed.
 var _ = insecure.NewCredentials
+
+// ---------------------------------------------------------------------------
+// Artifact tests
+// ---------------------------------------------------------------------------
+
+func TestArtifactJSONRoundTrip(t *testing.T) {
+	a := Artifact{
+		ID:           "art-1",
+		SessionID:    "sess-1",
+		CheckpointID: "cp-1",
+		Path:         "/workspace/output.csv",
+		Size:         4096,
+		Hash:         "sha256:abc123",
+		Type:         "added",
+		IsDir:        false,
+	}
+
+	data, err := json.Marshal(a)
+	if err != nil {
+		t.Fatalf("Marshal Artifact: %v", err)
+	}
+
+	var got Artifact
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal Artifact: %v", err)
+	}
+
+	if got.ID != a.ID {
+		t.Errorf("ID: expected %q, got %q", a.ID, got.ID)
+	}
+	if got.SessionID != a.SessionID {
+		t.Errorf("SessionID: expected %q, got %q", a.SessionID, got.SessionID)
+	}
+	if got.CheckpointID != a.CheckpointID {
+		t.Errorf("CheckpointID: expected %q, got %q", a.CheckpointID, got.CheckpointID)
+	}
+	if got.Path != a.Path {
+		t.Errorf("Path: expected %q, got %q", a.Path, got.Path)
+	}
+	if got.Size != a.Size {
+		t.Errorf("Size: expected %d, got %d", a.Size, got.Size)
+	}
+	if got.Hash != a.Hash {
+		t.Errorf("Hash: expected %q, got %q", a.Hash, got.Hash)
+	}
+	if got.Type != a.Type {
+		t.Errorf("Type: expected %q, got %q", a.Type, got.Type)
+	}
+	if got.IsDir != a.IsDir {
+		t.Errorf("IsDir: expected %v, got %v", a.IsDir, got.IsDir)
+	}
+
+	// Verify JSON field names.
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	for _, key := range []string{"id", "session_id", "checkpoint_id", "path", "size", "hash", "type"} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("expected JSON key %q", key)
+		}
+	}
+
+	// Verify omitempty: is_dir=false should be omitted.
+	if _, ok := raw["is_dir"]; ok {
+		t.Error("is_dir should be omitted when false")
+	}
+}
+
+func TestListArtifacts_URLConstruction(t *testing.T) {
+	tests := []struct {
+		name         string
+		checkpointID string
+		wantPath     string
+	}{
+		{
+			name:         "without checkpoint",
+			checkpointID: "",
+			wantPath:     "/api/v1/sessions/sess-123/artifacts",
+		},
+		{
+			name:         "with checkpoint",
+			checkpointID: "cp-456",
+			wantPath:     "/api/v1/sessions/sess-123/artifacts",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath string
+			var gotQuery string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath = r.URL.Path
+				gotQuery = r.URL.RawQuery
+				json.NewEncoder(w).Encode(map[string]any{
+					"artifacts": []any{},
+				})
+			}))
+			defer srv.Close()
+
+			c := NewClient(srv.URL, "")
+			_, err := c.ListArtifacts(context.Background(), "sess-123", tt.checkpointID)
+			if err != nil {
+				t.Fatalf("ListArtifacts: %v", err)
+			}
+
+			if gotPath != tt.wantPath {
+				t.Errorf("path: got %q, want %q", gotPath, tt.wantPath)
+			}
+			if tt.checkpointID != "" {
+				expectedQuery := "checkpoint=" + tt.checkpointID
+				if gotQuery != expectedQuery {
+					t.Errorf("query: got %q, want %q", gotQuery, expectedQuery)
+				}
+			} else {
+				if gotQuery != "" {
+					t.Errorf("query: got %q, want empty", gotQuery)
+				}
+			}
+		})
+	}
+}
+
+func TestDownloadArtifact_RawBytes(t *testing.T) {
+	binaryData := []byte{0x00, 0x01, 0x02, 0xFF, 0xFE, 0xFD, 0x89, 0x50, 0x4E, 0x47}
+
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path + "?" + r.URL.RawQuery
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write(binaryData)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token")
+	data, err := c.DownloadArtifact(context.Background(), "sess-789", "?path=/workspace/image.png")
+	if err != nil {
+		t.Fatalf("DownloadArtifact: %v", err)
+	}
+
+	expectedPath := "/api/v1/sessions/sess-789/artifacts/download?path=/workspace/image.png"
+	if gotPath != expectedPath {
+		t.Errorf("path: got %q, want %q", gotPath, expectedPath)
+	}
+
+	if len(data) != len(binaryData) {
+		t.Fatalf("data length: got %d, want %d", len(data), len(binaryData))
+	}
+	for i, b := range data {
+		if b != binaryData[i] {
+			t.Errorf("data[%d]: got 0x%02X, want 0x%02X", i, b, binaryData[i])
+		}
+	}
+}
