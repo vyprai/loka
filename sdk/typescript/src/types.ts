@@ -1,7 +1,7 @@
 // ── Session ─────────────────────────────────────────────
 
 export type SessionStatus = 'creating' | 'running' | 'paused' | 'terminating' | 'terminated' | 'error';
-export type ExecMode = 'inspect' | 'plan' | 'execute' | 'commit' | 'ask';
+export type ExecMode = 'explore' | 'execute' | 'ask';
 export type ExecStatus = 'pending' | 'pending_approval' | 'running' | 'success' | 'failed' | 'canceled' | 'rejected';
 export type CheckpointType = 'light' | 'full';
 
@@ -17,9 +17,29 @@ export interface Session {
   VCPUs: number;
   MemoryMB: number;
   Labels: Record<string, string>;
+  Mounts: StorageMount[];
   ExecPolicy: ExecPolicy;
   CreatedAt: string;
   UpdatedAt: string;
+}
+
+export interface StorageMount {
+  /** Storage provider: "s3", "gcs", "azure-blob", "local" */
+  provider: string;
+  /** Bucket or container name */
+  bucket: string;
+  /** Where the storage appears inside the VM */
+  mount_path: string;
+  /** Limit to a key prefix within the bucket */
+  prefix?: string;
+  /** Make the mount read-only */
+  read_only?: boolean;
+  /** Region for the bucket */
+  region?: string;
+  /** Custom endpoint for S3-compatible stores (MinIO, R2) */
+  endpoint?: string;
+  /** Credentials: access_key_id, secret_access_key, service_account_json, account_name, account_key, sas_token */
+  credentials?: Record<string, string>;
 }
 
 export interface CreateSessionOpts {
@@ -34,6 +54,7 @@ export interface CreateSessionOpts {
   blocked_commands?: string[];
   network_policy?: NetworkPolicy;
   exec_policy?: ExecPolicy;
+  mounts?: StorageMount[];
 }
 
 // ── Execution ───────────────────────────────────────────

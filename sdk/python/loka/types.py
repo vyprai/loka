@@ -6,6 +6,56 @@ from typing import Any
 
 
 @dataclass
+class StorageMount:
+    """Object storage bucket mounted into a session VM."""
+    provider: str = ""         # "s3", "gcs", "azure-blob", "local"
+    bucket: str = ""
+    mount_path: str = ""
+    prefix: str = ""
+    read_only: bool = False
+    region: str = ""
+    endpoint: str = ""         # For S3-compatible (MinIO, R2)
+    credentials: dict[str, str] = field(default_factory=dict)
+
+    @staticmethod
+    def s3(bucket: str, mount_path: str, *, access_key_id: str = "", secret_access_key: str = "",
+           prefix: str = "", read_only: bool = False, region: str = "", endpoint: str = "") -> "StorageMount":
+        """Create an S3 mount."""
+        creds = {}
+        if access_key_id:
+            creds["access_key_id"] = access_key_id
+        if secret_access_key:
+            creds["secret_access_key"] = secret_access_key
+        return StorageMount(provider="s3", bucket=bucket, mount_path=mount_path,
+                            prefix=prefix, read_only=read_only, region=region,
+                            endpoint=endpoint, credentials=creds)
+
+    @staticmethod
+    def gcs(bucket: str, mount_path: str, *, service_account_json: str = "",
+            prefix: str = "", read_only: bool = False) -> "StorageMount":
+        """Create a GCS mount."""
+        creds = {}
+        if service_account_json:
+            creds["service_account_json"] = service_account_json
+        return StorageMount(provider="gcs", bucket=bucket, mount_path=mount_path,
+                            prefix=prefix, read_only=read_only, credentials=creds)
+
+    @staticmethod
+    def azure(container: str, mount_path: str, *, account_name: str = "", account_key: str = "",
+              sas_token: str = "", prefix: str = "", read_only: bool = False) -> "StorageMount":
+        """Create an Azure Blob mount."""
+        creds = {}
+        if account_name:
+            creds["account_name"] = account_name
+        if account_key:
+            creds["account_key"] = account_key
+        if sas_token:
+            creds["sas_token"] = sas_token
+        return StorageMount(provider="azure-blob", bucket=container, mount_path=mount_path,
+                            prefix=prefix, read_only=read_only, credentials=creds)
+
+
+@dataclass
 class Session:
     ID: str = ""
     Name: str = ""
@@ -18,6 +68,7 @@ class Session:
     VCPUs: int = 0
     MemoryMB: int = 0
     Labels: dict[str, str] = field(default_factory=dict)
+    Mounts: list[Any] = field(default_factory=list)
     CreatedAt: str = ""
     UpdatedAt: str = ""
 
