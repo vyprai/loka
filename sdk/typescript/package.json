@@ -4,14 +4,23 @@
   "description": "LOKA TypeScript SDK — Session-based microVM execution for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["loka", "microvm", "firecracker", "sandbox", "ai-agents"],
+  "keywords": [
+    "loka",
+    "microvm",
+    "firecracker",
+    "sandbox",
+    "ai-agents"
+  ],
   "license": "Apache-2.0",
   "devDependencies": {
+    "@types/node": "^25.5.0",
     "typescript": "^5.5.0"
   }
 }

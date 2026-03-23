@@ -134,7 +134,7 @@ export class LokaClient {
   }
 
   /** Shorthand: run a single command and wait for result. */
-  async runCommand(sessionId: string, command: string, args: string[] = {}, opts: { workdir?: string; env?: Record<string, string> } = {}): Promise<Execution> {
+  async runCommand(sessionId: string, command: string, args: string[] = [], opts: { workdir?: string; env?: Record<string, string> } = {}): Promise<Execution> {
     const ex = await this.run(sessionId, { command, args, ...opts });
     return this.waitForExecution(sessionId, ex.ID);
   }
@@ -317,7 +317,7 @@ export class LokaClient {
       if (!resp.ok) {
         let msg = `HTTP ${resp.status}`;
         try {
-          const data = await resp.json();
+          const data = await resp.json() as Record<string, string>;
           if (data.error) msg = data.error;
         } catch {}
         throw new Error(msg);
@@ -410,7 +410,7 @@ export class LokaClient {
 
       if (resp.status === 204) return undefined as T;
 
-      const data = await resp.json();
+      const data = await resp.json() as Record<string, any>;
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
       return data as T;
     } finally {
