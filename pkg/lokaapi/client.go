@@ -115,18 +115,20 @@ func (c *Client) do(ctx context.Context, method, path string, body any, result a
 // ─── Sessions ───────────────────────────────────────────
 
 type Session struct {
-	ID        string            `json:"ID"`
-	Name      string            `json:"Name"`
-	Status    string            `json:"Status"`
-	Mode      string            `json:"Mode"`
-	WorkerID  string            `json:"WorkerID"`
-	ImageRef  string            `json:"ImageRef"`
-	VCPUs     int               `json:"VCPUs"`
-	MemoryMB  int               `json:"MemoryMB"`
-	Labels    map[string]string `json:"Labels"`
-	Ports     []PortMapping     `json:"Ports,omitempty"`
-	CreatedAt time.Time         `json:"CreatedAt"`
-	UpdatedAt time.Time         `json:"UpdatedAt"`
+	ID            string            `json:"ID"`
+	Name          string            `json:"Name"`
+	Status        string            `json:"Status"`
+	Mode          string            `json:"Mode"`
+	WorkerID      string            `json:"WorkerID"`
+	ImageRef      string            `json:"ImageRef"`
+	VCPUs         int               `json:"VCPUs"`
+	MemoryMB      int               `json:"MemoryMB"`
+	Labels        map[string]string `json:"Labels"`
+	Ports         []PortMapping     `json:"Ports,omitempty"`
+	Ready         bool              `json:"Ready"`
+	StatusMessage string            `json:"StatusMessage,omitempty"`
+	CreatedAt     time.Time         `json:"CreatedAt"`
+	UpdatedAt     time.Time         `json:"UpdatedAt"`
 }
 
 // StorageMount defines an object storage bucket to mount into a session.

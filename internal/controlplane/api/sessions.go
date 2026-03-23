@@ -66,6 +66,16 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// If ?wait=true, block until the session is ready.
+	if r.URL.Query().Get("wait") == "true" && !sess.Ready {
+		sess, err = s.sessionManager.WaitForReady(r.Context(), sess.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+
 	writeJSON(w, http.StatusCreated, sess)
 }
 

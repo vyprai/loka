@@ -6,13 +6,14 @@ import "time"
 type SessionStatus string
 
 const (
-	SessionStatusCreating    SessionStatus = "creating"
-	SessionStatusRunning     SessionStatus = "running"
-	SessionStatusIdle        SessionStatus = "idle" // VM suspended, auto-warms on access.
-	SessionStatusPaused      SessionStatus = "paused"
-	SessionStatusTerminating SessionStatus = "terminating"
-	SessionStatusTerminated  SessionStatus = "terminated"
-	SessionStatusError       SessionStatus = "error"
+	SessionStatusCreating     SessionStatus = "creating"
+	SessionStatusProvisioning SessionStatus = "provisioning" // Image pull + rootfs + snapshot.
+	SessionStatusRunning      SessionStatus = "running"
+	SessionStatusIdle         SessionStatus = "idle" // VM suspended, auto-warms on access.
+	SessionStatusPaused       SessionStatus = "paused"
+	SessionStatusTerminating  SessionStatus = "terminating"
+	SessionStatusTerminated   SessionStatus = "terminated"
+	SessionStatusError        SessionStatus = "error"
 )
 
 // Session represents a single LOKA microVM session.
@@ -30,8 +31,10 @@ type Session struct {
 	Labels     map[string]string
 	Mounts     []StorageMount `json:"Mounts,omitempty"` // Object storage mounts.
 	Ports       []PortMapping  `json:"Ports,omitempty"`  // Port forwarding declarations.
-	ExecPolicy  ExecPolicy     `json:"ExecPolicy"`       // Command/package restrictions.
-	IdleTimeout int            `json:"IdleTimeout,omitempty"` // Seconds of inactivity before auto-idle (0 = never).
+	ExecPolicy    ExecPolicy     `json:"ExecPolicy"`                  // Command/package restrictions.
+	IdleTimeout   int            `json:"IdleTimeout,omitempty"`       // Seconds of inactivity before auto-idle (0 = never).
+	Ready         bool           `json:"Ready"`                       // True once supervisor is confirmed alive.
+	StatusMessage string         `json:"StatusMessage,omitempty"`     // Human-readable progress (e.g. "pulling image...").
 	LastActivity time.Time     `json:"LastActivity,omitempty"`
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -39,8 +42,9 @@ type Session struct {
 
 // ValidTransitions defines the allowed state transitions for a session.
 var ValidSessionTransitions = map[SessionStatus][]SessionStatus{
-	SessionStatusCreating:    {SessionStatusRunning, SessionStatusError},
-	SessionStatusRunning:     {SessionStatusIdle, SessionStatusPaused, SessionStatusTerminating, SessionStatusError},
+	SessionStatusCreating:     {SessionStatusProvisioning, SessionStatusRunning, SessionStatusError},
+	SessionStatusProvisioning: {SessionStatusRunning, SessionStatusError},
+	SessionStatusRunning:      {SessionStatusIdle, SessionStatusPaused, SessionStatusTerminating, SessionStatusError},
 	SessionStatusIdle:        {SessionStatusRunning, SessionStatusTerminating, SessionStatusError},
 	SessionStatusPaused:      {SessionStatusRunning, SessionStatusTerminating, SessionStatusError},
 	SessionStatusTerminating: {SessionStatusTerminated, SessionStatusError},

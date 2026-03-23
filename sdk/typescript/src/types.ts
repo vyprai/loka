@@ -19,6 +19,8 @@ export interface Session {
   Labels: Record<string, string>;
   Mounts: StorageMount[];
   Ports: PortMapping[];
+  Ready: boolean;
+  StatusMessage?: string;
   ExecPolicy: ExecPolicy;
   CreatedAt: string;
   UpdatedAt: string;
@@ -63,6 +65,10 @@ export interface CreateSessionOpts {
   exec_policy?: ExecPolicy;
   mounts?: StorageMount[];
   ports?: PortMapping[];
+  /** Wait for session to be ready (default true). */
+  wait?: boolean;
+  /** Max seconds to wait (default 120). */
+  timeout?: number;
 }
 
 // ── Sync ────────────────────────────────────────────────

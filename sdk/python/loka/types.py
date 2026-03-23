@@ -78,6 +78,8 @@ class Session:
     Labels: dict[str, str] = field(default_factory=dict)
     Mounts: list[Any] = field(default_factory=list)
     Ports: list[Any] = field(default_factory=list)
+    Ready: bool = False
+    StatusMessage: str = ""
     CreatedAt: str = ""
     UpdatedAt: str = ""
 

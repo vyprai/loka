@@ -23,7 +23,23 @@ export class LokaClient {
   // ── Sessions ────────────────────────────────────────
 
   async createSession(opts: CreateSessionOpts = {}): Promise<Session> {
-    return this.post('/api/v1/sessions', opts);
+    const { wait = true, timeout = 120, ...createOpts } = opts;
+    let session: Session = await this.post('/api/v1/sessions', createOpts);
+
+    if (!wait || session.Ready) return session;
+
+    const deadline = Date.now() + timeout * 1000;
+    while (!session.Ready && session.Status !== 'error') {
+      if (Date.now() > deadline) {
+        throw new Error(`Session ${session.ID} not ready after ${timeout}s (status: ${session.Status})`);
+      }
+      await new Promise(r => setTimeout(r, 500));
+      session = await this.getSession(session.ID);
+    }
+    if (session.Status === 'error') {
+      throw new Error(`Session failed: ${session.StatusMessage || 'unknown error'}`);
+    }
+    return session;
   }
 
   async getSession(id: string): Promise<Session> {

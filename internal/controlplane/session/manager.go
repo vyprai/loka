@@ -103,10 +103,12 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 		// No workers available — still mark as running for dev mode.
 		m.logger.Warn("no workers available, session will run without worker", "id", s.ID)
 		s.Status = loka.SessionStatusRunning
+		s.Ready = true
 	} else {
 		s.WorkerID = wConn.Worker.ID
 
-		// Resolve image — get rootfs and warm snapshot paths.
+		// Check if image is cached — if not, we go to provisioning first.
+		imageReady := false
 		launchData := worker.LaunchSessionData{
 			SessionID:  s.ID,
 			ImageRef:   s.ImageRef,
@@ -121,7 +123,19 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 				launchData.RootfsPath = img.RootfsPath
 				launchData.SnapshotMemPath = img.SnapshotMem
 				launchData.SnapshotVMStatePath = img.SnapshotVMState
+				imageReady = true
 			}
+		}
+
+		if imageReady || s.ImageRef == "" || m.images == nil {
+			// Image cached or no image specified — go straight to running.
+			s.Status = loka.SessionStatusRunning
+			s.Ready = true
+			s.StatusMessage = ""
+		} else {
+			// Image needs pulling — go to provisioning.
+			s.Status = loka.SessionStatusProvisioning
+			s.StatusMessage = "pulling image"
 		}
 
 		m.registry.SendCommand(wConn.Worker.ID, worker.WorkerCommand{
@@ -129,8 +143,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 			Type: "launch_session",
 			Data: launchData,
 		})
-		s.Status = loka.SessionStatusRunning
-		m.logger.Info("session scheduled to worker", "session", s.ID, "worker", wConn.Worker.ID)
+		m.logger.Info("session scheduled to worker", "session", s.ID, "worker", wConn.Worker.ID, "image_ready", imageReady)
 	}
 
 	s.UpdatedAt = time.Now()
@@ -139,6 +152,59 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 	}
 
 	return s, nil
+}
+
+// MarkReady is called by the worker when the supervisor confirms the VM is alive.
+func (m *Manager) MarkReady(ctx context.Context, sessionID string) error {
+	s, err := m.store.Sessions().Get(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	s.Ready = true
+	s.Status = loka.SessionStatusRunning
+	s.StatusMessage = ""
+	s.LastActivity = time.Now()
+	s.UpdatedAt = time.Now()
+	return m.store.Sessions().Update(ctx, s)
+}
+
+// UpdateStatusMessage updates the provisioning progress message.
+func (m *Manager) UpdateStatusMessage(ctx context.Context, sessionID, message string) error {
+	s, err := m.store.Sessions().Get(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	s.StatusMessage = message
+	s.UpdatedAt = time.Now()
+	return m.store.Sessions().Update(ctx, s)
+}
+
+// WaitForReady blocks until the session is ready or the context is cancelled.
+func (m *Manager) WaitForReady(ctx context.Context, sessionID string) (*loka.Session, error) {
+	for {
+		s, err := m.store.Sessions().Get(ctx, sessionID)
+		if err != nil {
+			return nil, err
+		}
+		if s.Ready {
+			return s, nil
+		}
+		if s.Status == loka.SessionStatusError {
+			msg := s.StatusMessage
+			if msg == "" {
+				msg = "session failed"
+			}
+			return s, fmt.Errorf("%s", msg)
+		}
+		if s.Status == loka.SessionStatusTerminated {
+			return s, fmt.Errorf("session terminated before becoming ready")
+		}
+		select {
+		case <-ctx.Done():
+			return s, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // Get retrieves a session by ID.

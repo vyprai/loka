@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/vyprai/loka/pkg/lokaapi"
@@ -90,13 +91,40 @@ func newSessionCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Wait for session to be ready (polls until ready or error).
+			if !sess.Ready {
+				if sess.StatusMessage != "" {
+					fmt.Printf("  %s...", sess.StatusMessage)
+				} else {
+					fmt.Print("  Starting...")
+				}
+				for !sess.Ready && sess.Status != "error" {
+					time.Sleep(500 * time.Millisecond)
+					updated, err := client.GetSession(cmd.Context(), sess.ID)
+					if err != nil {
+						fmt.Println()
+						return err
+					}
+					if updated.StatusMessage != "" && updated.StatusMessage != sess.StatusMessage {
+						fmt.Printf("\n  %s...", updated.StatusMessage)
+					} else {
+						fmt.Print(".")
+					}
+					sess = updated
+				}
+				fmt.Println(" ready!")
+			}
+
 			if outputFmt == "json" {
 				return printJSON(sess)
 			}
 			fmt.Printf("Session created: %s\n", sess.ID)
-			fmt.Printf("  Name:     %s\n", sess.Name)
 			fmt.Printf("  Status:   %s\n", sess.Status)
 			fmt.Printf("  Mode:     %s\n", sess.Mode)
+			if sess.Name != "" {
+				fmt.Printf("  Name:     %s\n", sess.Name)
+			}
 			return nil
 		},
 	}

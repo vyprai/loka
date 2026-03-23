@@ -201,6 +201,11 @@ func (m *Manager) Get(id string) (*loka.Image, bool) {
 	return img, ok
 }
 
+// Register adds an image directly (used for testing and pre-cached images).
+func (m *Manager) Register(img *loka.Image) {
+	m.images[img.ID] = img
+}
+
 // GetByRef returns an image by Docker reference.
 func (m *Manager) GetByRef(reference string) (*loka.Image, bool) {
 	for _, img := range m.images {

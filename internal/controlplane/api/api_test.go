@@ -60,6 +60,15 @@ func setupTestServer(t *testing.T, opts ...ServerOpts) *testServer {
 	}
 	imgMgr := image.NewManager(objStore, tmpDir, logger)
 
+	// Pre-register common test images so sessions go straight to running.
+	for _, ref := range []string{"alpine:latest", "ubuntu:22.04", "python:3.12-slim"} {
+		imgMgr.Register(&loka.Image{
+			ID:        ref,
+			Reference: ref,
+			Status:    loka.ImageStatusReady,
+		})
+	}
+
 	mgr := session.NewManager(db, reg, sched, imgMgr, logger)
 
 	provReg := provider.NewRegistry()

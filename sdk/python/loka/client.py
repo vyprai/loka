@@ -40,10 +40,14 @@ class LokaClient:
 
     # ── Sessions ─────────────────────────────────────────
 
-    def create_session(self, **kwargs) -> Session:
+    def create_session(self, wait: bool = True, timeout: float = 120, **kwargs) -> Session:
         """Create a new session.
 
+        Blocks until the session is ready by default. Set wait=False to return immediately.
+
         Args:
+            wait: Wait for session to be ready (default True).
+            timeout: Max seconds to wait (default 120).
             name: Session name.
             image: Docker image reference (e.g., "python:3.12-slim").
             snapshot_id: Optional snapshot ID to restore from.
@@ -52,9 +56,22 @@ class LokaClient:
             memory_mb: Memory in MB.
             allowed_commands: Command whitelist.
             blocked_commands: Command blacklist.
-            mounts: List of storage mounts (dicts with provider, bucket, mount_path, etc.).
+            mounts: List of storage mounts.
+            ports: List of port mappings.
         """
-        return self._as(Session, self._post("/api/v1/sessions", kwargs))
+        import time as _time
+        sess = self._as(Session, self._post("/api/v1/sessions", kwargs))
+        if not wait or sess.Ready:
+            return sess
+        deadline = _time.monotonic() + timeout
+        while not sess.Ready and sess.Status != "error":
+            if _time.monotonic() > deadline:
+                raise TimeoutError(f"session {sess.ID} not ready after {timeout}s (status: {sess.Status})")
+            _time.sleep(0.5)
+            sess = self.get_session(sess.ID)
+        if sess.Status == "error":
+            raise RuntimeError(f"session failed: {sess.StatusMessage or 'unknown error'}")
+        return sess
 
     def get_session(self, session_id: str) -> Session:
         return self._as(Session, self._get(f"/api/v1/sessions/{session_id}"))
