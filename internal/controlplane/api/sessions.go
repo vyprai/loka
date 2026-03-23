@@ -132,6 +132,16 @@ func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sess)
 }
 
+func (s *Server) idleSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	sess, err := s.sessionManager.Idle(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, sess)
+}
+
 type setModeReq struct {
 	Mode string `json:"mode"`
 }

@@ -82,6 +82,7 @@ func (s *Server) routes() {
 		r.Post("/sessions/{id}/pause", s.pauseSession)
 		r.Post("/sessions/{id}/resume", s.resumeSession)
 		r.Post("/sessions/{id}/mode", s.setSessionMode)
+		r.Post("/sessions/{id}/idle", s.idleSession)
 		r.Get("/sessions/{id}/whitelist", s.getWhitelist)
 		r.Put("/sessions/{id}/whitelist", s.updateWhitelist)
 

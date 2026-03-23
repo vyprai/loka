@@ -38,6 +38,11 @@ type LaunchSessionData struct {
 	SnapshotVMStatePath string // Warm snapshot VM state.
 }
 
+// StopSessionData is the payload for stopping/suspending a session.
+type StopSessionData struct {
+	SessionID string
+}
+
 // ExecCommandData is the payload for executing commands in a session.
 type ExecCommandData struct {
 	SessionID string

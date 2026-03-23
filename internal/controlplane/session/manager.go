@@ -29,6 +29,7 @@ type CreateOpts struct {
 	ExecPolicy   *loka.ExecPolicy     // Command restrictions. Nil = default policy.
 	Mounts       []loka.StorageMount  // Object storage mounts.
 	Ports        []loka.PortMapping   // Port forwarding declarations.
+	IdleTimeout  int                  // Seconds before auto-idle (0 = never).
 }
 
 // Manager orchestrates session lifecycle.
@@ -78,8 +79,9 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 		MemoryMB:   opts.MemoryMB,
 		Labels:     opts.Labels,
 		Mounts:     opts.Mounts,
-		Ports:      opts.Ports,
-		ExecPolicy: execPolicy,
+		Ports:       opts.Ports,
+		ExecPolicy:  execPolicy,
+		IdleTimeout: opts.IdleTimeout,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
@@ -210,6 +212,76 @@ func (m *Manager) Resume(ctx context.Context, id string) (*loka.Session, error) 
 	return s, nil
 }
 
+// Idle puts a running session into idle state — the VM is suspended to save
+// resources but can be auto-warmed when accessed (exec, port-forward, sync).
+func (m *Manager) Idle(ctx context.Context, id string) (*loka.Session, error) {
+	s, err := m.store.Sessions().Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !s.CanTransitionTo(loka.SessionStatusIdle) {
+		return nil, fmt.Errorf("cannot idle session in status %s", s.Status)
+	}
+
+	// Tell worker to suspend the VM (snapshot memory + pause).
+	if s.WorkerID != "" {
+		if wc, ok := m.registry.Get(s.WorkerID); ok {
+			wc.CmdChan <- worker.WorkerCommand{Type: "pause_session", Data: worker.StopSessionData{SessionID: id}}
+		}
+	}
+
+	s.Status = loka.SessionStatusIdle
+	s.UpdatedAt = time.Now()
+	if err := m.store.Sessions().Update(ctx, s); err != nil {
+		return nil, err
+	}
+	m.logger.Info("session idled", "session", id)
+	return s, nil
+}
+
+// Wake brings an idle session back to running. Called automatically when the
+// session is accessed (exec, port-forward, sync, domain proxy).
+func (m *Manager) Wake(ctx context.Context, id string) (*loka.Session, error) {
+	s, err := m.store.Sessions().Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if s.Status != loka.SessionStatusIdle {
+		if s.Status == loka.SessionStatusRunning {
+			return s, nil // Already running.
+		}
+		return nil, fmt.Errorf("cannot wake session in status %s", s.Status)
+	}
+
+	// Tell worker to resume the VM.
+	if s.WorkerID != "" {
+		if wc, ok := m.registry.Get(s.WorkerID); ok {
+			wc.CmdChan <- worker.WorkerCommand{Type: "resume_session", Data: worker.LaunchSessionData{SessionID: id}}
+		}
+	}
+
+	s.Status = loka.SessionStatusRunning
+	s.LastActivity = time.Now()
+	s.UpdatedAt = time.Now()
+	if err := m.store.Sessions().Update(ctx, s); err != nil {
+		return nil, err
+	}
+	m.logger.Info("session woken from idle", "session", id)
+	return s, nil
+}
+
+// ensureRunning wakes an idle session if needed. Returns error if session
+// is not running and cannot be woken.
+func (m *Manager) ensureRunning(ctx context.Context, s *loka.Session) (*loka.Session, error) {
+	if s.Status == loka.SessionStatusRunning {
+		return s, nil
+	}
+	if s.Status == loka.SessionStatusIdle {
+		return m.Wake(ctx, s.ID)
+	}
+	return nil, fmt.Errorf("session is %s, must be running", s.Status)
+}
+
 // SetMode changes the execution mode of a session.
 func (m *Manager) SetMode(ctx context.Context, id string, mode loka.ExecMode) (*loka.Session, error) {
 	s, err := m.store.Sessions().Get(ctx, id)
@@ -245,8 +317,10 @@ func (m *Manager) Exec(ctx context.Context, sessionID string, commands []loka.Co
 	if err != nil {
 		return nil, err
 	}
-	if s.Status != loka.SessionStatusRunning {
-		return nil, fmt.Errorf("session is not running (status: %s)", s.Status)
+	// Auto-wake idle sessions.
+	s, err = m.ensureRunning(ctx, s)
+	if err != nil {
+		return nil, err
 	}
 
 	// Pre-flight check: basic validation at API layer.
@@ -582,6 +656,11 @@ func (m *Manager) SyncMount(ctx context.Context, sessionID string, req loka.Sync
 	sess, err := m.store.Sessions().Get(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session not found: %w", err)
+	}
+	// Auto-wake idle sessions.
+	sess, err = m.ensureRunning(ctx, sess)
+	if err != nil {
+		return nil, err
 	}
 
 	if sess.WorkerID == "" {

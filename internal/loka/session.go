@@ -8,6 +8,7 @@ type SessionStatus string
 const (
 	SessionStatusCreating    SessionStatus = "creating"
 	SessionStatusRunning     SessionStatus = "running"
+	SessionStatusIdle        SessionStatus = "idle" // VM suspended, auto-warms on access.
 	SessionStatusPaused      SessionStatus = "paused"
 	SessionStatusTerminating SessionStatus = "terminating"
 	SessionStatusTerminated  SessionStatus = "terminated"
@@ -28,16 +29,19 @@ type Session struct {
 	MemoryMB   int
 	Labels     map[string]string
 	Mounts     []StorageMount `json:"Mounts,omitempty"` // Object storage mounts.
-	Ports      []PortMapping  `json:"Ports,omitempty"`  // Port forwarding declarations.
-	ExecPolicy ExecPolicy     `json:"ExecPolicy"`       // Command/package restrictions.
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	Ports       []PortMapping  `json:"Ports,omitempty"`  // Port forwarding declarations.
+	ExecPolicy  ExecPolicy     `json:"ExecPolicy"`       // Command/package restrictions.
+	IdleTimeout int            `json:"IdleTimeout,omitempty"` // Seconds of inactivity before auto-idle (0 = never).
+	LastActivity time.Time     `json:"LastActivity,omitempty"`
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 // ValidTransitions defines the allowed state transitions for a session.
 var ValidSessionTransitions = map[SessionStatus][]SessionStatus{
 	SessionStatusCreating:    {SessionStatusRunning, SessionStatusError},
-	SessionStatusRunning:     {SessionStatusPaused, SessionStatusTerminating, SessionStatusError},
+	SessionStatusRunning:     {SessionStatusIdle, SessionStatusPaused, SessionStatusTerminating, SessionStatusError},
+	SessionStatusIdle:        {SessionStatusRunning, SessionStatusTerminating, SessionStatusError},
 	SessionStatusPaused:      {SessionStatusRunning, SessionStatusTerminating, SessionStatusError},
 	SessionStatusTerminating: {SessionStatusTerminated, SessionStatusError},
 	SessionStatusError:       {SessionStatusTerminating},

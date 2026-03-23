@@ -24,6 +24,7 @@ func newSessionCmd() *cobra.Command {
 		newSessionPauseCmd(),
 		newSessionResumeCmd(),
 		newSessionModeCmd(),
+		newSessionIdleCmd(),
 		newSessionMountLocalCmd(),
 		newSessionPortForwardCmd(),
 		newSessionPortsCmd(),
@@ -46,6 +47,7 @@ func newSessionCreateCmd() *cobra.Command {
 		blockedCommands string
 		mounts          []string
 		ports           []string
+		idleTimeout     int
 	)
 
 	cmd := &cobra.Command{
@@ -116,6 +118,7 @@ func newSessionCreateCmd() *cobra.Command {
     --mount azure-blob://container@/az?account_name=...&account_key=...
     --mount s3://my-bucket@/data?endpoint=http://minio:9000&access_key_id=minioadmin&secret_access_key=minioadmin`)
 	cmd.Flags().StringArrayVar(&ports, "port", nil, "Port forwarding (repeatable, format: local:remote, e.g. --port 8080:5000)")
+	cmd.Flags().IntVar(&idleTimeout, "idle-timeout", 0, "Auto-idle after N seconds of inactivity (0 = never)")
 	return cmd
 }
 
@@ -333,6 +336,31 @@ func shortID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+func newSessionIdleCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "idle <session-id>",
+		Short: "Suspend a session (auto-wakes on access)",
+		Long: `Put a session into idle state. The VM is suspended to save resources.
+The session automatically wakes when accessed (exec, port-forward, sync, domain proxy).
+
+Examples:
+  loka session idle <id>`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client := newClient()
+			var sess struct {
+				ID     string `json:"ID"`
+				Status string `json:"Status"`
+			}
+			if err := client.Raw(cmd.Context(), "POST", "/api/v1/sessions/"+args[0]+"/idle", nil, &sess); err != nil {
+				return err
+			}
+			fmt.Printf("Session %s is now idle (auto-wakes on access)\n", shortID(sess.ID))
+			return nil
+		},
+	}
 }
 
 func newSessionExposeCmd() *cobra.Command {
