@@ -1,6 +1,6 @@
 [project]
 name = "loka-sdk"
-version = "0.3.3"
+version = "0.3.4"
 description = "LOKA Python SDK — Session-based microVM execution for AI agents"
 requires-python = ">=3.9"
 dependencies = ["httpx>=0.25"]
