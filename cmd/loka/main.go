@@ -33,6 +33,7 @@ func main() {
 	rootCmd.AddCommand(
 		newVersionCmd(),
 		newDeployCmd(),
+		newUseCmd(),
 		newSessionCmd(),
 		newExecCmd(),
 		newCheckpointCmd(),

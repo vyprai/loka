@@ -26,7 +26,7 @@ loka deploy aws --name prod --region us-east-1 --workers 3
 loka deploy gcp --name staging --project my-proj --workers 2
 
 loka deploy list                        # List all deployments (* = active)
-loka deploy use prod                    # Switch active deployment
+loka use prod                    # Switch active deployment
 loka deploy rename staging qa           # Rename
 loka deploy status                      # Status of active deployment
 loka deploy status prod                 # Status of specific deployment
