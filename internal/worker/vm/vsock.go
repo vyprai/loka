@@ -6,7 +6,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 // VsockClient communicates with the supervisor inside a Firecracker VM

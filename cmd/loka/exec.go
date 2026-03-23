@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/rizqme/loka/pkg/lokaapi"
+	"github.com/vyprai/loka/pkg/lokaapi"
 )
 
 func newExecCmd() *cobra.Command {

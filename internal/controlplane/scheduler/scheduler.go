@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/rizqme/loka/internal/controlplane/worker"
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/controlplane/worker"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 // Strategy defines the scheduling strategy.

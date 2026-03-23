@@ -6,7 +6,7 @@ import (
 	"log/slog"
 
 	"github.com/google/uuid"
-	"github.com/rizqme/loka/internal/provider"
+	"github.com/vyprai/loka/internal/provider"
 )
 
 // Config holds OVH provider configuration.

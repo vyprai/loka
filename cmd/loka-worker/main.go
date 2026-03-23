@@ -9,12 +9,12 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/rizqme/loka/internal/config"
-	"github.com/rizqme/loka/internal/loka"
-	localobjstore "github.com/rizqme/loka/internal/objstore/local"
-	"github.com/rizqme/loka/internal/worker"
-	"github.com/rizqme/loka/internal/worker/vm"
-	"github.com/rizqme/loka/pkg/version"
+	"github.com/vyprai/loka/internal/config"
+	"github.com/vyprai/loka/internal/loka"
+	localobjstore "github.com/vyprai/loka/internal/objstore/local"
+	"github.com/vyprai/loka/internal/worker"
+	"github.com/vyprai/loka/internal/worker/vm"
+	"github.com/vyprai/loka/pkg/version"
 )
 
 func main() {

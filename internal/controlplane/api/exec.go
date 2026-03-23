@@ -5,8 +5,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store"
 )
 
 type execReq struct {

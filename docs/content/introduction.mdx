@@ -13,7 +13,7 @@ Sessions start from Docker images and boot in ~28ms from a warm snapshot. The ag
 ## Install
 
 ```bash
-curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 ```
 
 
@@ -39,11 +39,11 @@ client.destroy_session(session.ID)
 
 
 ```bash
-npm install @rizqme/loka-sdk
+npm install @vyprai/loka-sdk
 ```
 
 ```typescript
-import { LokaClient } from '@rizqme/loka-sdk';
+import { LokaClient } from '@vyprai/loka-sdk';
 
 const loka = new LokaClient();
 const session = await loka.createSession({ image: 'python:3.12-slim', mode: 'execute' });

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────
 #  LOKA Installer
-#  Usage: curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+#  Usage: curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 # ──────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -84,9 +84,9 @@ install_loka() {
 
   local url
   if [ "$VERSION" = "latest" ]; then
-    url="https://github.com/rizqme/loka/releases/latest/download/loka-${PLATFORM}.tar.gz"
+    url="https://github.com/vyprai/loka/releases/latest/download/loka-${PLATFORM}.tar.gz"
   else
-    url="https://github.com/rizqme/loka/releases/download/${VERSION}/loka-${PLATFORM}.tar.gz"
+    url="https://github.com/vyprai/loka/releases/download/${VERSION}/loka-${PLATFORM}.tar.gz"
   fi
 
   local tmp
@@ -104,7 +104,7 @@ install_loka() {
     need_cmd git
 
     if [ ! -d "$tmp/loka-src" ]; then
-      git clone --depth 1 https://github.com/rizqme/loka "$tmp/loka-src" 2>/dev/null
+      git clone --depth 1 https://github.com/vyprai/loka "$tmp/loka-src" 2>/dev/null
     fi
     cd "$tmp/loka-src"
     GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags "-s -w" -o "$tmp/lokad" ./cmd/lokad

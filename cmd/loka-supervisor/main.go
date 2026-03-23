@@ -6,9 +6,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/supervisor"
-	"github.com/rizqme/loka/pkg/version"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/supervisor"
+	"github.com/vyprai/loka/pkg/version"
 )
 
 // loka-supervisor runs inside the Firecracker microVM as the init process (PID 1).

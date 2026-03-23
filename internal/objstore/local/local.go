@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/rizqme/loka/internal/objstore"
+	"github.com/vyprai/loka/internal/objstore"
 )
 
 // Store implements objstore.ObjectStore using the local filesystem.

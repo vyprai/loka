@@ -8,8 +8,8 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/rizqme/loka/pkg/lokaapi"
-	"github.com/rizqme/loka/pkg/version"
+	"github.com/vyprai/loka/pkg/lokaapi"
+	"github.com/vyprai/loka/pkg/version"
 )
 
 var (

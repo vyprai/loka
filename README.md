@@ -5,12 +5,12 @@ LOKA is a controlled execution environment for AI agents. It runs agent-generate
 ## Install
 
 ```bash
-curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 ```
 
 ```bash
 pip install loka-sdk        # Python
-npm install @rizqme/loka-sdk     # TypeScript
+npm install @vyprai/loka-sdk     # TypeScript
 ```
 
 ## How it works

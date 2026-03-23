@@ -6,8 +6,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store"
 )
 
 // MigrateFunc is a callback to migrate a session to another worker.

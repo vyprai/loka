@@ -11,8 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/objstore"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/objstore"
 )
 
 const imageBucket = "images"

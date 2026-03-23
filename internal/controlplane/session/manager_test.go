@@ -6,11 +6,11 @@ import (
 	"os"
 	"testing"
 
-	"github.com/rizqme/loka/internal/controlplane/scheduler"
-	"github.com/rizqme/loka/internal/controlplane/worker"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/store"
-	"github.com/rizqme/loka/internal/store/sqlite"
+	"github.com/vyprai/loka/internal/controlplane/scheduler"
+	"github.com/vyprai/loka/internal/controlplane/worker"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store"
+	"github.com/vyprai/loka/internal/store/sqlite"
 )
 
 // testEnv holds all dependencies for session Manager tests.

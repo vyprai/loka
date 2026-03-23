@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 // Sandbox enforces execution policy at the OS level inside the microVM.

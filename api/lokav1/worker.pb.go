@@ -1395,7 +1395,7 @@ const file_worker_proto_rawDesc = "" +
 	"\tHeartbeat\x12\x1d.loka.api.v1.HeartbeatMessage\x1a\x1a.loka.api.v1.WorkerCommand(\x010\x01\x12O\n" +
 	"\x13ReportSessionStatus\x12 .loka.api.v1.SessionStatusReport\x1a\x16.google.protobuf.Empty\x12Q\n" +
 	"\x18ReportCheckpointComplete\x12\x1d.loka.api.v1.CheckpointReport\x1a\x16.google.protobuf.Empty\x12E\n" +
-	"\x12ReportExecComplete\x12\x17.loka.api.v1.ExecReport\x1a\x16.google.protobuf.EmptyB#Z!github.com/rizqme/loka/api/lokav1b\x06proto3"
+	"\x12ReportExecComplete\x12\x17.loka.api.v1.ExecReport\x1a\x16.google.protobuf.EmptyB#Z!github.com/vyprai/loka/api/lokav1b\x06proto3"
 
 var (
 	file_worker_proto_rawDescOnce sync.Once

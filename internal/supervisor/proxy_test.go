@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 func newTestProxy(opts ...func(*loka.ExecPolicy)) *CommandProxy {

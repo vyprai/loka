@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────
 #  LOKA Installer
-#  Usage: curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+#  Usage: curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 #
 #  On Linux:  installs binaries, Firecracker, kernel, configs
 #  On macOS:  installs CLI + sets up a Lima VM with KVM for LOKA
@@ -88,9 +88,9 @@ download_binaries() {
 
   local url
   if [ "$VERSION" = "latest" ]; then
-    url="https://github.com/rizqme/loka/releases/latest/download/loka-${platform}.tar.gz"
+    url="https://github.com/vyprai/loka/releases/latest/download/loka-${platform}.tar.gz"
   else
-    url="https://github.com/rizqme/loka/releases/download/${VERSION}/loka-${platform}.tar.gz"
+    url="https://github.com/vyprai/loka/releases/download/${VERSION}/loka-${platform}.tar.gz"
   fi
 
   local tmp
@@ -105,7 +105,7 @@ download_binaries() {
     need_cmd go
     need_cmd git
 
-    git clone --depth 1 https://github.com/rizqme/loka "$tmp/loka-src" 2>/dev/null
+    git clone --depth 1 https://github.com/vyprai/loka "$tmp/loka-src" 2>/dev/null
     cd "$tmp/loka-src"
     GOOS=$target_os GOARCH=$target_arch go build -trimpath -ldflags "-s -w" -o "$tmp/lokad" ./cmd/lokad
     GOOS=$target_os GOARCH=$target_arch go build -trimpath -ldflags "-s -w" -o "$tmp/loka-worker" ./cmd/loka-worker
@@ -428,7 +428,7 @@ provision:
       fi
 
       # Install LOKA inside the VM.
-      curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+      curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 
       echo "LOKA is ready inside the Lima VM."
 LIMAEOF

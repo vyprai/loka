@@ -11,12 +11,12 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	pb "github.com/rizqme/loka/api/lokav1"
-	"github.com/rizqme/loka/internal/controlplane/scheduler"
-	"github.com/rizqme/loka/internal/controlplane/session"
-	"github.com/rizqme/loka/internal/controlplane/worker"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/store/sqlite"
+	pb "github.com/vyprai/loka/api/lokav1"
+	"github.com/vyprai/loka/internal/controlplane/scheduler"
+	"github.com/vyprai/loka/internal/controlplane/session"
+	"github.com/vyprai/loka/internal/controlplane/worker"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store/sqlite"
 )
 
 // testEnv holds a gRPC server, client, and backing services for tests.

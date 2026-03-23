@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rizqme/loka/pkg/lokaapi"
+	"github.com/vyprai/loka/pkg/lokaapi"
 	"github.com/spf13/cobra"
 )
 

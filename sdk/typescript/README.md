@@ -1,17 +1,17 @@
-# @rizqme/loka-sdk
+# @vyprai/loka-sdk
 
 TypeScript SDK for LOKA.
 
 ## Install
 
 ```bash
-npm install @rizqme/loka-sdk
+npm install @vyprai/loka-sdk
 ```
 
 ## Usage
 
 ```typescript
-import { LokaClient } from '@rizqme/loka-sdk';
+import { LokaClient } from '@vyprai/loka-sdk';
 
 const loka = new LokaClient({ baseUrl: 'http://localhost:6840' });
 

@@ -8,7 +8,7 @@ description: Install LOKA and the SDKs
 ## One-line install
 
 ```bash
-curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 ```
 
 On **Linux**: installs all binaries (`lokad`, `loka`, `loka-worker`, `loka-supervisor`), Firecracker, Linux kernel, default config, and data directories.
@@ -19,13 +19,13 @@ On **macOS**: installs the `loka` CLI locally and sets up a [Lima](https://lima-
 
 ```bash
 # Specific version
-LOKA_VERSION=v0.1.0 curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+LOKA_VERSION=v0.1.0 curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 
 # Custom install directory
-LOKA_INSTALL_DIR=/opt/loka/bin curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+LOKA_INSTALL_DIR=/opt/loka/bin curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 
 # Custom data directory
-LOKA_DATA_DIR=/opt/loka/data curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+LOKA_DATA_DIR=/opt/loka/data curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 ```
 
 ## Verify
@@ -53,7 +53,7 @@ pip install loka-sdk
 
 
 ```bash
-npm install @rizqme/loka-sdk
+npm install @vyprai/loka-sdk
 ```
 
 
@@ -73,7 +73,7 @@ npm install @rizqme/loka-sdk
 ## Alternative: Build from source
 
 ```bash
-git clone https://github.com/rizqme/loka && cd loka
+git clone https://github.com/vyprai/loka && cd loka
 make build              # Build all 4 binaries
 make fetch-firecracker  # Download Firecracker + kernel
 make build-rootfs       # Build guest rootfs with supervisor
@@ -154,7 +154,7 @@ logging:
 Firecracker requires Linux + KVM. The install script handles this automatically using [Lima](https://lima-vm.io) — a lightweight Linux VM for macOS.
 
 ```bash
-curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 ```
 
 This will:

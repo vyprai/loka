@@ -10,11 +10,11 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	pb "github.com/rizqme/loka/api/lokav1"
-	"github.com/rizqme/loka/internal/controlplane/session"
-	"github.com/rizqme/loka/internal/controlplane/worker"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/store"
+	pb "github.com/vyprai/loka/api/lokav1"
+	"github.com/vyprai/loka/internal/controlplane/session"
+	"github.com/vyprai/loka/internal/controlplane/worker"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store"
 )
 
 // GRPCServer implements the ControlService gRPC server.

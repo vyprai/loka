@@ -13,7 +13,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 // CPClient communicates with the control plane's HTTP API.

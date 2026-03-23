@@ -12,7 +12,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pb "github.com/rizqme/loka/api/lokav1"
+	pb "github.com/vyprai/loka/api/lokav1"
 )
 
 // GRPCClient wraps a gRPC connection to the LOKA control plane.

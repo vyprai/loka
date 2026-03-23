@@ -9,7 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/rizqme/loka/pkg/lokaapi"
+	"github.com/vyprai/loka/pkg/lokaapi"
 	"github.com/spf13/cobra"
 )
 
@@ -90,7 +90,7 @@ On macOS: runs lokad inside a Lima VM (ports forwarded to localhost).
 
 The Lima VM is created automatically by the install script. If it doesn't
 exist yet, run the installer first:
-  curl -fsSL https://rizqme.github.io/loka/install.sh | bash`,
+  curl -fsSL https://vyprai.github.io/loka/install.sh | bash`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if name == "" { name = "local" }
 
@@ -139,7 +139,7 @@ func deployLocalMacOS(name string, foreground bool) error {
 	// Check Lima is installed.
 	limactl, err := exec.LookPath("limactl")
 	if err != nil {
-		return fmt.Errorf("Lima not found. Install it first:\n  curl -fsSL https://rizqme.github.io/loka/install.sh | bash")
+		return fmt.Errorf("Lima not found. Install it first:\n  curl -fsSL https://vyprai.github.io/loka/install.sh | bash")
 	}
 
 	// Check if the loka Lima instance exists.
@@ -152,7 +152,7 @@ func deployLocalMacOS(name string, foreground bool) error {
 		}
 	}
 	if !instanceExists {
-		return fmt.Errorf("Lima VM 'loka' not found. Create it first:\n  curl -fsSL https://rizqme.github.io/loka/install.sh | bash")
+		return fmt.Errorf("Lima VM 'loka' not found. Create it first:\n  curl -fsSL https://vyprai.github.io/loka/install.sh | bash")
 	}
 
 	// Ensure the VM is running.

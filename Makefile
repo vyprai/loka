@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
-LDFLAGS := -ldflags "-s -w -X github.com/rizqme/loka/pkg/version.Version=$(VERSION) -X github.com/rizqme/loka/pkg/version.Commit=$(COMMIT) -X github.com/rizqme/loka/pkg/version.BuildTime=$(BUILD_TIME)"
+LDFLAGS := -ldflags "-s -w -X github.com/vyprai/loka/pkg/version.Version=$(VERSION) -X github.com/vyprai/loka/pkg/version.Commit=$(COMMIT) -X github.com/vyprai/loka/pkg/version.BuildTime=$(BUILD_TIME)"
 
 # Binaries
 BIN_DIR := bin

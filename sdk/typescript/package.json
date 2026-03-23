@@ -1,5 +1,5 @@
 {
-  "name": "@rizqme/loka-sdk",
+  "name": "@vyprai/loka-sdk",
   "version": "0.1.0",
   "description": "LOKA TypeScript SDK — Session-based microVM execution for AI agents",
   "main": "dist/index.js",

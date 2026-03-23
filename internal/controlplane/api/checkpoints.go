@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 type createCheckpointReq struct {

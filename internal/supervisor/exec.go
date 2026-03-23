@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 // Executor spawns and manages real OS processes.

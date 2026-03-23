@@ -24,7 +24,7 @@ Workers authenticate with the control plane using a **registration token**. You 
 On every machine (control plane + workers), run:
 
 ```bash
-curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+curl -fsSL https://vyprai.github.io/loka/install.sh | bash
 ```
 
 This installs `lokad`, `loka-worker`, `loka-supervisor`, and the `loka` CLI.
@@ -243,7 +243,7 @@ See [Deploy to VMs](/docs/deploy-vm) for the YAML schema.
 
 **Manual approach** — if you prefer full control over each machine:
 
-1. Install LOKA: `curl -fsSL https://rizqme.github.io/loka/install.sh | bash`
+1. Install LOKA: `curl -fsSL https://vyprai.github.io/loka/install.sh | bash`
 2. Verify `/dev/kvm` exists
 3. Create `/etc/loka/worker.yaml` with your control plane address and the token from Step 3
 4. Start: `loka-worker --config /etc/loka/worker.yaml`

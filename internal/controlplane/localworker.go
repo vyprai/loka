@@ -4,12 +4,12 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/rizqme/loka/internal/controlplane/session"
-	cpworker "github.com/rizqme/loka/internal/controlplane/worker"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/objstore"
-	"github.com/rizqme/loka/internal/worker"
-	"github.com/rizqme/loka/internal/worker/vm"
+	"github.com/vyprai/loka/internal/controlplane/session"
+	cpworker "github.com/vyprai/loka/internal/controlplane/worker"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/objstore"
+	"github.com/vyprai/loka/internal/worker"
+	"github.com/vyprai/loka/internal/worker/vm"
 )
 
 // LocalWorker runs an embedded worker inside the control plane process.

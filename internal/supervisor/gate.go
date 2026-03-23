@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 // ApprovalGate manages suspended commands waiting for approval.

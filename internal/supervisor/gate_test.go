@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 func TestGate_ApproveResumes(t *testing.T) {

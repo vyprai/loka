@@ -1136,7 +1136,7 @@ const file_supervisor_proto_rawDesc = "" +
 	"\aSetMode\x12,.loka.supervisor.v1.SupervisorSetModeRequest\x1a-.loka.supervisor.v1.SupervisorSetModeResponse\x12U\n" +
 	"\bReadFile\x12#.loka.supervisor.v1.ReadFileRequest\x1a$.loka.supervisor.v1.ReadFileResponse\x12I\n" +
 	"\tWriteFile\x12$.loka.supervisor.v1.WriteFileRequest\x1a\x16.google.protobuf.Empty\x12R\n" +
-	"\aListDir\x12\".loka.supervisor.v1.ListDirRequest\x1a#.loka.supervisor.v1.ListDirResponseB)Z'github.com/rizqme/loka/api/supervisorv1b\x06proto3"
+	"\aListDir\x12\".loka.supervisor.v1.ListDirRequest\x1a#.loka.supervisor.v1.ListDirResponseB)Z'github.com/vyprai/loka/api/supervisorv1b\x06proto3"
 
 var (
 	file_supervisor_proto_rawDescOnce sync.Once

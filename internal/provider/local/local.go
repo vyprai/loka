@@ -3,7 +3,7 @@ package local
 import (
 	"context"
 
-	"github.com/rizqme/loka/internal/provider"
+	"github.com/vyprai/loka/internal/provider"
 )
 
 // Provider is a no-op provider for local development.

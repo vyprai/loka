@@ -32,7 +32,7 @@ set -euo pipefail
 echo "==> Installing LOKA worker agent..."
 
 # Install loka-worker binary
-curl -fsSL https://rizqme.github.io/loka/install.sh/worker | bash -s -- --version %s
+curl -fsSL https://vyprai.github.io/loka/install.sh/worker | bash -s -- --version %s
 
 # Create configuration
 mkdir -p /etc/loka

@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/rizqme/loka/internal/provider"
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/provider"
+	"github.com/vyprai/loka/internal/store"
 )
 
 // Provider handles self-managed workers that connect inbound.

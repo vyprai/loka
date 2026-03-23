@@ -1,6 +1,6 @@
 package worker
 
-import "github.com/rizqme/loka/internal/loka"
+import "github.com/vyprai/loka/internal/loka"
 
 // CreateCheckpointData is the payload for creating a checkpoint on a worker.
 type CreateCheckpointData struct {

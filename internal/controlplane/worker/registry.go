@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store"
 )
 
 // WorkerConn represents a connected worker with its command channel.

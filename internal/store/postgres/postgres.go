@@ -7,7 +7,7 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/store"
 )
 
 func init() {

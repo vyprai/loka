@@ -2098,7 +2098,7 @@ const file_control_proto_rawDesc = "" +
 	"\vListWorkers\x12\x1f.loka.api.v1.ListWorkersRequest\x1a .loka.api.v1.ListWorkersResponse\x12?\n" +
 	"\tGetWorker\x12\x1d.loka.api.v1.GetWorkerRequest\x1a\x13.loka.api.v1.Worker\x12C\n" +
 	"\vDrainWorker\x12\x1f.loka.api.v1.DrainWorkerRequest\x1a\x13.loka.api.v1.Worker\x12H\n" +
-	"\fRemoveWorker\x12 .loka.api.v1.RemoveWorkerRequest\x1a\x16.google.protobuf.EmptyB#Z!github.com/rizqme/loka/api/lokav1b\x06proto3"
+	"\fRemoveWorker\x12 .loka.api.v1.RemoveWorkerRequest\x1a\x16.google.protobuf.EmptyB#Z!github.com/vyprai/loka/api/lokav1b\x06proto3"
 
 var (
 	file_control_proto_rawDescOnce sync.Once

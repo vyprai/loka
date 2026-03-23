@@ -42,7 +42,7 @@ jobs:
       - name: Build binaries
         run: |
           PLATFORM="${GOOS}-${GOARCH}"
-          LDFLAGS="-s -w -X github.com/rizqme/loka/pkg/version.Version=${REF_NAME}"
+          LDFLAGS="-s -w -X github.com/vyprai/loka/pkg/version.Version=${REF_NAME}"
 
           mkdir -p dist
 

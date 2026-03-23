@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	pb "github.com/rizqme/loka/api/lokav1"
+	pb "github.com/vyprai/loka/api/lokav1"
 )
 
 func TestNewClientBaseURL(t *testing.T) {

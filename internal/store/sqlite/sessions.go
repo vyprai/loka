@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store"
 )
 
 type sessionRepo struct {

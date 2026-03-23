@@ -10,15 +10,15 @@ import (
 	"os"
 	"testing"
 
-	"github.com/rizqme/loka/internal/controlplane/image"
-	"github.com/rizqme/loka/internal/controlplane/scheduler"
-	"github.com/rizqme/loka/internal/controlplane/session"
-	"github.com/rizqme/loka/internal/controlplane/worker"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/objstore/local"
-	"github.com/rizqme/loka/internal/provider"
-	"github.com/rizqme/loka/internal/store"
-	"github.com/rizqme/loka/internal/store/sqlite"
+	"github.com/vyprai/loka/internal/controlplane/image"
+	"github.com/vyprai/loka/internal/controlplane/scheduler"
+	"github.com/vyprai/loka/internal/controlplane/session"
+	"github.com/vyprai/loka/internal/controlplane/worker"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/objstore/local"
+	"github.com/vyprai/loka/internal/provider"
+	"github.com/vyprai/loka/internal/store"
+	"github.com/vyprai/loka/internal/store/sqlite"
 )
 
 // testServer bundles all the dependencies created during setup so tests

@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 // Store is the top-level interface for all data access.

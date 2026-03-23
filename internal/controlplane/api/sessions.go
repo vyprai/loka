@@ -5,9 +5,9 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/rizqme/loka/internal/controlplane/session"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/controlplane/session"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store"
 )
 
 type createSessionReq struct {

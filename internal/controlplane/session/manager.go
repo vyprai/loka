@@ -8,12 +8,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rizqme/loka/internal/controlplane/image"
-	"github.com/rizqme/loka/internal/controlplane/metrics"
-	"github.com/rizqme/loka/internal/controlplane/scheduler"
-	"github.com/rizqme/loka/internal/controlplane/worker"
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/controlplane/image"
+	"github.com/vyprai/loka/internal/controlplane/metrics"
+	"github.com/vyprai/loka/internal/controlplane/scheduler"
+	"github.com/vyprai/loka/internal/controlplane/worker"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store"
 )
 
 // CreateOpts holds options for creating a new session.

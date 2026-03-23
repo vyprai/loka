@@ -8,8 +8,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/rizqme/loka/internal/loka"
-	"github.com/rizqme/loka/internal/worker/vm"
+	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/worker/vm"
 )
 
 // Server is the supervisor process that runs inside the Firecracker VM.

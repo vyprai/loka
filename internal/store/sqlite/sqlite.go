@@ -7,7 +7,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/store"
 )
 
 func init() {

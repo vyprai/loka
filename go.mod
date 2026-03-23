@@ -1,4 +1,4 @@
-module github.com/rizqme/loka
+module github.com/vyprai/loka
 
 go 1.25.6
 

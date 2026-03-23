@@ -8,7 +8,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
-	"github.com/rizqme/loka/pkg/lokaapi"
+	"github.com/vyprai/loka/pkg/lokaapi"
 )
 
 func newSessionCmd() *cobra.Command {

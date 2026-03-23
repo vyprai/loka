@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package loka.api.v1;
 
-option go_package = "github.com/rizqme/loka/api/lokav1";
+option go_package = "github.com/vyprai/loka/api/lokav1";
 
 import "google/protobuf/timestamp.proto";
 

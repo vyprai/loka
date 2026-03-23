@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/rizqme/loka/internal/controlplane/metrics"
-	"github.com/rizqme/loka/internal/store"
+	"github.com/vyprai/loka/internal/controlplane/metrics"
+	"github.com/vyprai/loka/internal/store"
 )
 
 // metricsMiddleware records request count and latency per route.

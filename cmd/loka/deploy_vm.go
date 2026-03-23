@@ -197,7 +197,7 @@ func sshArgs(host, user, keyPath string) []string {
 }
 
 func installScript() string {
-	return "curl -fsSL https://rizqme.github.io/loka/install.sh | bash"
+	return "curl -fsSL https://vyprai.github.io/loka/install.sh | bash"
 }
 
 func extractToken(jsonResp string) string {

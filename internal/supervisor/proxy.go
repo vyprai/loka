@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/rizqme/loka/internal/loka"
+	"github.com/vyprai/loka/internal/loka"
 )
 
 // CommandProxy is the in-VM execution gateway. ALL commands flow through it.

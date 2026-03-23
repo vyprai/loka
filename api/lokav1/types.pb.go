@@ -1527,7 +1527,7 @@ const file_types_proto_rawDesc = "" +
 	"\x12WORKER_STATUS_BUSY\x10\x03\x12\x1a\n" +
 	"\x16WORKER_STATUS_DRAINING\x10\x04\x12\x19\n" +
 	"\x15WORKER_STATUS_SUSPECT\x10\x05\x12\x16\n" +
-	"\x12WORKER_STATUS_DEAD\x10\x06B#Z!github.com/rizqme/loka/api/lokav1b\x06proto3"
+	"\x12WORKER_STATUS_DEAD\x10\x06B#Z!github.com/vyprai/loka/api/lokav1b\x06proto3"
 
 var (
 	file_types_proto_rawDescOnce sync.Once
