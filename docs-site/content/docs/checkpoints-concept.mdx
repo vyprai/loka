@@ -1,0 +1,105 @@
+---
+title: Checkpoints
+description: Overlay diffs from base image
+---
+
+# Checkpoints
+
+A checkpoint captures the complete state of a session: filesystem, memory, and running processes. Checkpoints are stored as overlay diffs on top of the base image, making them lightweight and fast to create.
+
+## How checkpoints work
+
+Each checkpoint stores only the changes (diff) since the parent checkpoint or base image. Checkpoints form a directed acyclic graph (DAG), not a linear history.
+
+```
+base image
+  ├── chk_a (install python)
+  │     ├── chk_b (add app code)
+  │     └── chk_c (add test data)
+  └── chk_d (install node)
+```
+
+You can branch from any checkpoint, creating parallel timelines.
+
+## Light vs full checkpoints
+
+| Type | Captures | Speed | Size | Use case |
+|---|---|---|---|---|
+| Light | Filesystem diff only | ~5ms | Small | Quick save points |
+| Full | Filesystem + memory + CPU state | ~50ms | Larger | Resume exact process state |
+
+By default, `create_checkpoint` creates a full checkpoint.
+
+## Create a checkpoint
+
+
+
+```python
+from loka import LokaClient
+
+client = LokaClient()
+session = client.create_session(image="python:3.12-slim")
+
+cp = client.create_checkpoint(session.id, label="clean-state")
+```
+
+
+```typescript
+import { LokaClient } from '@rizqme/loka-sdk';
+
+const loka = new LokaClient();
+const session = await loka.createSession({ image: 'python:3.12-slim' });
+
+const cp = await loka.createCheckpoint(session.id, { label: 'clean-state' });
+```
+
+
+## List checkpoints
+
+
+
+```python
+checkpoints = client.list_checkpoints(session.id)
+for c in checkpoints:
+    print(f"{c.id}  {c.label}  parent={c.parent_id}")
+```
+
+
+```typescript
+const checkpoints = await loka.listCheckpoints(session.id);
+checkpoints.forEach(c => console.log(`${c.id}  ${c.label}  parent=${c.parentId}`));
+```
+
+
+## Restore a checkpoint
+
+
+
+```python
+client.restore_checkpoint(session.id, cp.id)
+```
+
+
+```typescript
+await loka.restoreCheckpoint(session.id, cp.id);
+```
+
+
+
+## Delete a checkpoint
+
+
+
+```python
+client.delete_checkpoint(cp.id)
+```
+
+
+```typescript
+await loka.deleteCheckpoint(cp.id);
+```
+
+
+
+## Next steps
+

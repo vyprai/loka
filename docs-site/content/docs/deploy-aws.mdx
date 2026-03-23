@@ -1,0 +1,68 @@
+---
+title: Deploy to AWS
+description: EC2 bare-metal instances
+---
+
+# Deploy to AWS
+
+Run LOKA on AWS with EC2 bare-metal instances for KVM support.
+
+## Quick deploy
+
+```bash
+loka deploy aws --region us-east-1 --workers 3
+```
+
+## Architecture
+
+```
+VPC (us-east-1)
+├── Control Plane: 1x t3.medium
+│   └── lokad + PostgreSQL + Redis
+└── Workers: 3x i3.metal
+    └── loka-worker + Firecracker VMs
+```
+
+## Manual setup
+
+### 1. Control plane instance
+
+Launch a `t3.medium` (or larger) instance with Ubuntu 22.04.
+
+```bash
+# On the control plane instance:
+curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+
+# Edit config for production:
+cat > /etc/loka/controlplane.yaml  /etc/loka/worker.yaml :9090"
+data_dir: /var/loka/worker
+provider: aws
+token: "loka_a2d9fb8f..."
+YAML
+
+loka-worker
+```
+
+### 3. Verify
+
+```bash
+loka deploy status
+loka worker list
+```
+
+## Instance types
+
+| Instance | Use case |
+|----------|----------|
+| `i3.metal` | Best for Firecracker — bare-metal KVM, NVMe storage |
+| `m5.metal` | Alternative bare-metal |
+| `c5.metal` | CPU-heavy workloads |
+
+
+## Security groups
+
+| Rule | Port | Source |
+|------|------|--------|
+| Control plane API | 8080 | Your IP / agent IPs |
+| Worker gRPC | 9090 | Control plane SG |
+| SSH | 22 | Your IP |

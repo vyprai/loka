@@ -1,0 +1,85 @@
+---
+title: Network Policy
+description: IP, port, domain rules
+---
+
+# Network Policy
+
+Network policies control outbound and inbound traffic from the VM.
+
+## Rule Structure
+
+```json
+{
+  "network_policy": {
+    "outbound": [
+      {"action": "allow", "target": "pypi.org", "ports": [443]},
+      {"action": "allow", "target": "*.amazonaws.com", "ports": [443]},
+      {"action": "allow", "target": "10.0.0.0/8", "ports": [5432, 6379]},
+      {"action": "deny", "target": "169.254.169.254", "ports": "*"}
+    ],
+    "inbound": [
+      {"action": "deny", "target": "*", "ports": "*"}
+    ],
+    "default_outbound": "deny",
+    "default_inbound": "deny"
+  }
+}
+```
+
+## Target Types
+
+| Type | Example | Description |
+|---|---|---|
+| IP | `10.0.1.5` | Single IP address |
+| CIDR | `10.0.0.0/8` | Network range |
+| Domain | `pypi.org` | Resolved at rule application time |
+| Wildcard | `*.amazonaws.com` | Suffix match on domain |
+
+## Port Specification
+
+| Format | Example | Description |
+|---|---|---|
+| Single | `443` | One port |
+| Range | `8000-8100` | Inclusive port range |
+| List | `[80, 443, 8080]` | Multiple specific ports |
+| Wildcard | `"*"` | All ports |
+
+## Per-Mode Defaults
+
+| Mode | Default Outbound | Default Inbound |
+|---|---|---|
+| `auto` | Policy-defined | `deny` |
+| `supervised` | Policy-defined | `deny` |
+| `locked` | `deny` (all traffic blocked) | `deny` |
+
+## iptables Generation
+
+The supervisor translates rules into iptables commands at boot and on policy update:
+
+```bash
+# Default deny
+iptables -P OUTPUT DROP
+iptables -P INPUT DROP
+
+# Allow loopback
+iptables -A OUTPUT -o lo -j ACCEPT
+iptables -A INPUT -i lo -j ACCEPT
+
+# Allow established connections
+iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+# Per-rule allow
+iptables -A OUTPUT -d 151.101.0.0/16 -p tcp --dport 443 -j ACCEPT  # pypi.org
+iptables -A OUTPUT -d 10.0.0.0/8 -p tcp --dport 5432 -j ACCEPT
+iptables -A OUTPUT -d 10.0.0.0/8 -p tcp --dport 6379 -j ACCEPT
+
+# Block metadata service
+iptables -A OUTPUT -d 169.254.169.254 -j DROP
+```
+
+Domain targets are resolved to IPs at rule application time and periodically refreshed (default 60s). DNS resolution itself is allowed to the configured DNS server only.
+
+## DNS Proxy
+
+The supervisor runs a minimal DNS proxy on `127.0.0.1:53` that filters queries against the policy. Queries for non-allowed domains return `NXDOMAIN`.

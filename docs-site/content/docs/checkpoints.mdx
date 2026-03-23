@@ -1,0 +1,125 @@
+---
+title: Checkpoints & Rollback
+description: Snapshot, branch, undo
+---
+
+# Checkpoints & Rollback
+
+Snapshot your session at any point and roll back instantly. Checkpoints capture the full VM state: filesystem, memory, running processes.
+
+
+
+### 1. Create a session and make changes
+
+
+
+```python
+from loka import LokaClient
+
+client = LokaClient()
+session = client.create_session(image="python:3.12-slim")
+
+client.run_and_wait(session.id, "echo 'version 1' > /tmp/state.txt")
+```
+
+
+```typescript
+import { LokaClient } from '@rizqme/loka-sdk';
+
+const loka = new LokaClient();
+const session = await loka.createSession({ image: 'python:3.12-slim' });
+
+await loka.runCommand(session.id, "echo 'version 1' > /tmp/state.txt");
+```
+
+
+
+
+### 2. Create a checkpoint
+
+
+
+```python
+cp = client.create_checkpoint(session.id, label="after-v1")
+print(cp.id)  # chk_7b2f...
+```
+
+
+```typescript
+const cp = await loka.createCheckpoint(session.id, { label: 'after-v1' });
+console.log(cp.id); // chk_7b2f...
+```
+
+
+
+
+### 3. Make more changes
+
+
+
+```python
+client.run_and_wait(session.id, "echo 'version 2' > /tmp/state.txt")
+result = client.run_and_wait(session.id, "cat /tmp/state.txt")
+print(result.stdout)  # version 2
+```
+
+
+```typescript
+await loka.runCommand(session.id, "echo 'version 2' > /tmp/state.txt");
+const result = await loka.runCommand(session.id, 'cat /tmp/state.txt');
+console.log(result.stdout); // version 2
+```
+
+
+
+
+### 4. Restore the checkpoint
+
+Roll back to the exact state when the checkpoint was created.
+
+
+
+```python
+client.restore_checkpoint(session.id, cp.id)
+
+result = client.run_and_wait(session.id, "cat /tmp/state.txt")
+print(result.stdout)  # version 1
+```
+
+
+```typescript
+await loka.restoreCheckpoint(session.id, cp.id);
+
+const restored = await loka.runCommand(session.id, 'cat /tmp/state.txt');
+console.log(restored.stdout); // version 1
+```
+
+
+
+
+### 5. View the checkpoint tree
+
+List all checkpoints for a session to see the full history.
+
+
+
+```python
+checkpoints = client.list_checkpoints(session.id)
+for c in checkpoints:
+    print(f"{c.id}  {c.label}  parent={c.parent_id}")
+```
+
+
+```typescript
+const checkpoints = await loka.listCheckpoints(session.id);
+checkpoints.forEach(c =>
+    console.log(`${c.id}  ${c.label}  parent=${c.parentId}`)
+);
+```
+
+
+
+
+
+## Next steps
+

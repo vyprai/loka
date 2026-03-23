@@ -1,0 +1,115 @@
+---
+title: Docker Images
+description: Start from any image
+---
+
+# Use Docker Images
+
+Pull any Docker image, create sessions from it, customize it, checkpoint it, and reuse it.
+
+
+
+### 1. Pull an image
+
+
+
+```python
+from loka import LokaClient
+
+client = LokaClient()
+image = client.pull_image("ubuntu:22.04")
+print(image.id)  # img_a91c...
+```
+
+
+```typescript
+import { LokaClient } from '@rizqme/loka-sdk';
+
+const loka = new LokaClient();
+const image = await loka.pullImage('ubuntu:22.04');
+console.log(image.id); // img_a91c...
+```
+
+
+
+
+
+### 2. Create a session from the image
+
+
+
+```python
+session = client.create_session(image="ubuntu:22.04")
+```
+
+
+```typescript
+const session = await loka.createSession({ image: 'ubuntu:22.04' });
+```
+
+
+
+
+### 3. Install packages inside the session
+
+
+
+```python
+client.run_and_wait(session.id, "apt-get update -qq")
+client.run_and_wait(session.id, "apt-get install -y python3 git")
+```
+
+
+```typescript
+await loka.runCommand(session.id, 'apt-get update -qq');
+await loka.runCommand(session.id, 'apt-get install -y python3 git');
+```
+
+
+
+
+### 4. Checkpoint the customized session
+
+Save a labeled checkpoint so you can reuse this environment later.
+
+
+
+```python
+cp = client.create_checkpoint(session.id, label="with-tools")
+print(cp.id)  # chk_e44d...
+```
+
+
+```typescript
+const cp = await loka.createCheckpoint(session.id, { label: 'with-tools' });
+console.log(cp.id); // chk_e44d...
+```
+
+
+
+
+### 5. Create a new session from the checkpoint
+
+Start a fresh session that already has Python and Git installed.
+
+
+
+```python
+new_session = client.create_session(checkpoint=cp.id)
+result = client.run_and_wait(new_session.id, "python3 --version")
+print(result.stdout)  # Python 3.10.12
+```
+
+
+```typescript
+const newSession = await loka.createSession({ checkpoint: cp.id });
+const result = await loka.runCommand(newSession.id, 'python3 --version');
+console.log(result.stdout); // Python 3.10.12
+```
+
+
+
+
+
+## Next steps
+

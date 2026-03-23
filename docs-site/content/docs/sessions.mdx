@@ -1,0 +1,101 @@
+---
+title: Sessions
+description: 1 session = 1 Firecracker microVM
+---
+
+# Sessions
+
+A session is a single Firecracker microVM. It provides an isolated Linux environment with its own filesystem, network, and process tree.
+
+## Lifecycle
+
+Every session moves through these states:
+
+| State | Description |
+|---|---|
+| `creating` | VM is booting from a snapshot or image |
+| `running` | VM is ready to accept commands |
+| `paused` | VM is suspended; memory is preserved on disk |
+| `terminated` | VM is destroyed; resources are freed |
+
+```
+creating → running ⇄ paused → terminated
+```
+
+## Create a session
+
+
+
+```python
+from loka import LokaClient
+
+client = LokaClient()
+session = client.create_session(
+    image="python:3.12-slim",
+    mode="execute",
+)
+```
+
+
+```typescript
+import { LokaClient } from '@rizqme/loka-sdk';
+
+const loka = new LokaClient();
+const session = await loka.createSession({
+    image: 'python:3.12-slim',
+    mode: 'execute',
+});
+```
+
+
+## Pause and resume
+
+Pausing suspends the VM and writes memory to disk. Resuming restores it in milliseconds.
+
+
+
+```python
+client.pause_session(session.id)
+# ... later
+client.resume_session(session.id)
+```
+
+
+```typescript
+await loka.pauseSession(session.id);
+// ... later
+await loka.resumeSession(session.id);
+```
+
+
+## Destroy a session
+
+
+
+```python
+client.destroy_session(session.id)
+```
+
+
+```typescript
+await loka.destroySession(session.id);
+```
+
+
+
+## Execution modes
+
+Each session runs in a mode that controls what commands can do.
+
+| Mode | Filesystem | Network | Use case |
+|---|---|---|---|
+| `inspect` | Read-only | Blocked | Safe code review |
+| `plan` | Read-only | Blocked | Generate plans without side effects |
+| `execute` | Read-write | Allowed | Run builds, tests, scripts |
+| `commit` | Full access | Allowed | Deploy, push, write anywhere |
+| `ask` | Read-write | Allowed | Like execute but every command needs approval |
+
+See [Execution Modes](/concepts/modes.md) for details.
+
+## Next steps
+

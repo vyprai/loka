@@ -1,0 +1,60 @@
+---
+title: Deploy Locally
+description: Single machine setup
+---
+
+# Deploy Locally
+
+Run LOKA on a single machine. No cloud account needed.
+
+## One command
+
+```bash
+curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+lokad
+```
+
+Or with the CLI:
+
+```bash
+loka deploy local
+```
+
+This starts `lokad` with an embedded worker, SQLite database, and local object store. Everything runs in one process.
+
+## What you get
+
+| Component | Details |
+|-----------|---------|
+| Control plane | `localhost:8080` |
+| Database | SQLite (`/var/loka/loka.db`) |
+| Object store | Local filesystem (`/var/loka/artifacts/`) |
+| Worker | Embedded (same process as control plane) |
+| Coordinator | In-process (no Redis) |
+
+## Requirements
+
+- Linux with KVM (`/dev/kvm`)
+- Docker (for `loka image pull`)
+
+## Verify
+
+```bash
+loka status
+# Control Plane:  ok
+# Workers:        1 ready / 1 total
+```
+
+## Configuration
+
+Edit `/etc/loka/controlplane.yaml` or set `LOKA_CONFIG`:
+
+```yaml
+mode: single
+listen_addr: ":8080"
+database:
+  driver: sqlite
+  dsn: "/var/loka/loka.db"
+```
+
+See [Installation](installation.md) for full config reference.

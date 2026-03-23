@@ -1,0 +1,91 @@
+---
+title: Images & Snapshots
+description: Docker to Firecracker pipeline
+---
+
+# Images & Snapshots
+
+Loka converts Docker images into Firecracker-ready snapshots that boot in ~28ms.
+
+## Image pipeline
+
+```
+Docker image → rootfs.ext4 → Firecracker boot → warm snapshot → instant sessions
+```
+
+1. **Pull** -- Loka pulls the Docker image and extracts the filesystem layers.
+2. **Convert** -- The layers are flattened into a single `rootfs.ext4` ext4 disk image.
+3. **Boot** -- Firecracker boots a microVM using the rootfs and a minimal kernel.
+4. **Snapshot** -- Once the VM reaches a ready state, Loka takes a warm snapshot (memory + disk). This is a one-time cost.
+5. **Serve** -- Every new session restores from the warm snapshot. Boot time: ~28ms.
+
+
+## Pull an image
+
+
+
+```python
+from loka import LokaClient
+
+client = LokaClient()
+image = client.pull_image("python:3.12-slim")
+print(f"{image.id}  size={image.size_mb}MB")
+```
+
+
+```typescript
+import { LokaClient } from '@rizqme/loka-sdk';
+
+const loka = new LokaClient();
+const image = await loka.pullImage('python:3.12-slim');
+console.log(`${image.id}  size=${image.sizeMb}MB`);
+```
+
+
+## List available images
+
+
+
+```python
+images = client.list_images()
+for img in images:
+    print(f"{img.name}:{img.tag}  {img.id}")
+```
+
+
+```typescript
+const images = await loka.listImages();
+images.forEach(img => console.log(`${img.name}:${img.tag}  ${img.id}`));
+```
+
+
+## Create a session from an image
+
+
+
+```python
+session = client.create_session(image="python:3.12-slim")
+```
+
+
+```typescript
+const session = await loka.createSession({ image: 'python:3.12-slim' });
+```
+
+
+If the image hasn't been pulled yet, Loka pulls and converts it automatically. Use `pull_image` ahead of time to avoid the delay.
+
+## Supported images
+
+Loka supports any Docker image that runs on `linux/amd64`. Commonly used base images:
+
+| Image | Size | Notes |
+|---|---|---|
+| `python:3.12-slim` | ~150MB | Python with pip |
+| `node:20-slim` | ~200MB | Node.js with npm |
+| `ubuntu:22.04` | ~75MB | Minimal Ubuntu |
+| `golang:1.22` | ~800MB | Go toolchain |
+| `alpine:3.19` | ~8MB | Minimal Linux |
+
+## Next steps
+

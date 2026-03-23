@@ -1,0 +1,114 @@
+---
+title: Your First Session
+description: Create a VM, run commands, destroy it
+---
+
+# Your First Session
+
+Create a Loka session, run a command inside a microVM, and tear it down.
+
+## Prerequisites
+
+You need a running Loka control plane. See [Installation](/installation.md) if you haven't set one up yet.
+
+
+
+### 1. Install the SDK
+
+
+
+```bash
+pip install loka
+```
+
+
+```bash
+npm install @rizqme/loka-sdk
+```
+
+
+
+
+### 2. Create a session
+
+Start a microVM from the `python:3.12-slim` Docker image.
+
+
+
+```python
+from loka import LokaClient
+
+client = LokaClient()
+session = client.create_session(image="python:3.12-slim")
+print(session.id)  # ses_3f8a...
+```
+
+
+```typescript
+import { LokaClient } from '@rizqme/loka-sdk';
+
+const loka = new LokaClient();
+const session = await loka.createSession({ image: 'python:3.12-slim' });
+console.log(session.id); // ses_3f8a...
+```
+
+
+
+
+### 3. Run a shell command
+
+
+
+```python
+result = client.run_and_wait(session.id, "echo hello")
+print(result.stdout)  # hello
+```
+
+
+```typescript
+const result = await loka.runCommand(session.id, 'echo hello');
+console.log(result.stdout); // hello
+```
+
+
+
+
+### 4. Run Python inside the VM
+
+
+
+```python
+result = client.run_and_wait(session.id, "python3 -c 'print(42)'")
+print(result.stdout)  # 42
+```
+
+
+```typescript
+const result = await loka.runCommand(session.id, "python3 -c 'print(42)'");
+console.log(result.stdout); // 42
+```
+
+
+
+
+### 5. Destroy the session
+
+When you're done, destroy the session to free resources.
+
+
+
+```python
+client.destroy_session(session.id)
+```
+
+
+```typescript
+await loka.destroySession(session.id);
+```
+
+
+
+
+
+## Next steps
+
