@@ -145,7 +145,7 @@ func newWorkerLabelCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "label <worker-id> key=value [key=value...]",
 		Short: "Add or remove labels (empty value removes label)",
-		Long:  "Examples:\n  lokactl worker label <id> gpu=true tier=premium\n  lokactl worker label <id> gpu=  (removes gpu label)",
+		Long:  "Examples:\n  loka worker label <id> gpu=true tier=premium\n  loka worker label <id> gpu=  (removes gpu label)",
 		Args:  cobra.MinimumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := newClient()

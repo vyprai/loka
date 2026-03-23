@@ -49,9 +49,9 @@ jobs:
           go build -trimpath -ldflags "$LDFLAGS" -o "dist/lokad" ./cmd/lokad
           go build -trimpath -ldflags "$LDFLAGS" -o "dist/loka-worker" ./cmd/loka-worker
           go build -trimpath -ldflags "$LDFLAGS" -o "dist/loka-supervisor" ./cmd/loka-supervisor
-          go build -trimpath -ldflags "$LDFLAGS" -o "dist/lokactl" ./cmd/lokactl
+          go build -trimpath -ldflags "$LDFLAGS" -o "dist/loka" ./cmd/loka
 
-          tar -czf "dist/loka-${PLATFORM}.tar.gz" -C dist lokad loka-worker loka-supervisor lokactl
+          tar -czf "dist/loka-${PLATFORM}.tar.gz" -C dist lokad loka-worker loka-supervisor loka
 
       - uses: actions/upload-artifact@v4
         with:

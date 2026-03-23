@@ -73,7 +73,7 @@ check_prereqs() {
   if command -v docker &>/dev/null; then
     ok "Docker available"
   else
-    warn "Docker not found — needed for 'lokactl image pull'"
+    warn "Docker not found — needed for 'loka image pull'"
   fi
 }
 
@@ -110,12 +110,12 @@ install_loka() {
     GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags "-s -w" -o "$tmp/lokad" ./cmd/lokad
     GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags "-s -w" -o "$tmp/loka-worker" ./cmd/loka-worker
     GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags "-s -w" -o "$tmp/loka-supervisor" ./cmd/loka-supervisor
-    GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags "-s -w" -o "$tmp/lokactl" ./cmd/lokactl
+    GOOS=$OS GOARCH=$ARCH go build -trimpath -ldflags "-s -w" -o "$tmp/loka" ./cmd/loka
     cd - >/dev/null
   fi
 
   # Install binaries.
-  local bins=("lokad" "loka-worker" "loka-supervisor" "lokactl")
+  local bins=("lokad" "loka-worker" "loka-supervisor" "loka")
   for bin in "${bins[@]}"; do
     if [ -f "$tmp/$bin" ]; then
       sudo install -m 755 "$tmp/$bin" "${INSTALL_DIR}/$bin"
@@ -204,12 +204,12 @@ YAML
 # ── Shell completion ────────────────────────────────────
 
 setup_completion() {
-  if command -v lokactl &>/dev/null; then
+  if command -v loka &>/dev/null; then
     if [ -d /etc/bash_completion.d ]; then
-      lokactl completion bash | sudo tee /etc/bash_completion.d/lokactl >/dev/null 2>&1 && ok "bash completion"
+      loka completion bash | sudo tee /etc/bash_completion.d/loka >/dev/null 2>&1 && ok "bash completion"
     fi
     if [ -d /usr/local/share/zsh/site-functions ]; then
-      lokactl completion zsh | sudo tee /usr/local/share/zsh/site-functions/_lokactl >/dev/null 2>&1 && ok "zsh completion"
+      loka completion zsh | sudo tee /usr/local/share/zsh/site-functions/_loka >/dev/null 2>&1 && ok "zsh completion"
     fi
   fi
 }
@@ -245,9 +245,9 @@ main() {
   echo "  Quick start:"
   echo ""
   echo -e "    ${CYAN}lokad${NC}                                    # Start the server"
-  echo -e "    ${CYAN}lokactl image pull python:3.12-slim${NC}      # Pull an image"
-  echo -e "    ${CYAN}lokactl session create --image python:3.12-slim${NC}"
-  echo -e "    ${CYAN}lokactl exec <id> -- python3 -c \"print(42)\"${NC}"
+  echo -e "    ${CYAN}loka image pull python:3.12-slim${NC}      # Pull an image"
+  echo -e "    ${CYAN}loka session create --image python:3.12-slim${NC}"
+  echo -e "    ${CYAN}loka exec <id> -- python3 -c \"print(42)\"${NC}"
   echo ""
   echo "  Docs: https://docs.loka.dev"
   echo ""

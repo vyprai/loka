@@ -21,9 +21,9 @@ func newClient() *lokaapi.Client {
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "lokactl",
-		Short: "LOKA CLI - manage sessions, executions, and checkpoints",
-		Long:  "lokactl is the command-line interface for the LOKA control plane.",
+		Use:   "loka",
+		Short: "LOKA — controlled execution environment for AI agents",
+		Long:  "Deploy, manage, and interact with LOKA sessions, workers, and infrastructure.",
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&serverAddr, "server", "s", "http://localhost:8080", "Control plane address")
@@ -32,6 +32,7 @@ func main() {
 
 	rootCmd.AddCommand(
 		newVersionCmd(),
+		newDeployCmd(),
 		newSessionCmd(),
 		newExecCmd(),
 		newCheckpointCmd(),
@@ -69,7 +70,7 @@ func newVersionCmd() *cobra.Command {
 		Use:   "version",
 		Short: "Show version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("lokactl %s (%s) built %s\n", version.Version, version.Commit, version.BuildTime)
+			fmt.Printf("loka %s (%s) built %s\n", version.Version, version.Commit, version.BuildTime)
 		},
 	}
 }
@@ -110,14 +111,6 @@ func newStatusCmd() *cobra.Command {
 					}
 				}
 				fmt.Printf("Sessions:       %d running, %d paused, %d terminated\n", running, paused, terminated)
-			}
-
-			// Packages.
-			var pkgResp struct {
-				Packages []struct{ Name string } `json:"packages"`
-			}
-			if err := client.Raw(cmd.Context(), "GET", "/api/v1/packages", nil, &pkgResp); err == nil {
-				fmt.Printf("Packages:       %d installed\n", len(pkgResp.Packages))
 			}
 
 			// Providers.

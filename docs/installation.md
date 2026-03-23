@@ -6,7 +6,7 @@
 curl -fsSL https://rizqme.github.io/loka/install.sh | bash
 ```
 
-This installs everything: `lokad`, `lokactl`, `loka-worker`, `loka-supervisor`, Firecracker, and the Linux kernel. It also creates the default config and data directories.
+This installs everything: `lokad`, `loka`, `loka-worker`, `loka-supervisor`, Firecracker, and the Linux kernel. It also creates the default config and data directories.
 
 <div class="info"><strong>What it does:</strong> Downloads LOKA binaries, installs Firecracker + kernel, creates <code>/etc/loka/controlplane.yaml</code> and <code>/var/loka/</code>.</div>
 
@@ -27,16 +27,16 @@ LOKA_DATA_DIR=/opt/loka/data curl -fsSL https://rizqme.github.io/loka/install.sh
 
 ```bash
 lokad --version
-lokactl version
+loka version
 ```
 
 ## Start
 
 ```bash
 lokad                                         # Start the server
-lokactl image pull python:3.12-slim          # Pull an image
-lokactl session create --image python:3.12-slim --mode execute
-lokactl exec <session-id> -- echo "it works"
+loka image pull python:3.12-slim          # Pull an image
+loka session create --image python:3.12-slim --mode execute
+loka exec <session-id> -- echo "it works"
 ```
 
 ## Install the SDKs
@@ -64,7 +64,7 @@ npm install @rizqme/loka-sdk
 | Requirement | Why |
 |-------------|-----|
 | **Linux with KVM** | Firecracker requires `/dev/kvm` |
-| **Docker** | To pull base images (`lokactl image pull`) |
+| **Docker** | To pull base images (`loka image pull`) |
 
 <div class="tip"><strong>macOS?</strong> The installer puts the binaries on your path, but you need Lima for KVM: <code>curl -fsSL https://rizqme.github.io/loka/install.sh | bash && make setup-lima</code></div>
 
@@ -86,7 +86,7 @@ make build-rootfs       # Build guest rootfs with supervisor
 | `lokad` | Control plane — API server, scheduler, session manager |
 | `loka-worker` | Worker agent — manages Firecracker VMs |
 | `loka-supervisor` | Runs inside VM as PID 1 — command proxy, sandbox |
-| `lokactl` | CLI client |
+| `loka` | CLI client |
 
 ## Alternative: Docker
 

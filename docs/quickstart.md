@@ -30,18 +30,18 @@ make build-rootfs        # Guest rootfs with supervisor
 
 ```bash
 # Pull image, create session, run commands
-lokactl image pull ubuntu:22.04
-lokactl session create --image ubuntu:22.04 --name demo
-lokactl exec <session-id> -- echo "Hello from LOKA"
-lokactl exec <session-id> -- python3 -c "print(2+2)"
+loka image pull ubuntu:22.04
+loka session create --image ubuntu:22.04 --name demo
+loka exec <session-id> -- echo "Hello from LOKA"
+loka exec <session-id> -- python3 -c "print(2+2)"
 
 # Checkpoint and restore
-lokactl checkpoint create <session-id> --label "initial"
-lokactl exec <session-id> -- touch /workspace/newfile
-lokactl checkpoint restore <session-id> <checkpoint-id>
+loka checkpoint create <session-id> --label "initial"
+loka exec <session-id> -- touch /workspace/newfile
+loka checkpoint restore <session-id> <checkpoint-id>
 # newfile is gone — restored to checkpoint state
 
-lokactl session destroy <session-id>
+loka session destroy <session-id>
 ```
 
 ## macOS

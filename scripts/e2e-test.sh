@@ -5,7 +5,7 @@
 set -euo pipefail
 
 LOKAD="${LOKAD:-/tmp/lokad}"
-LOKACTL="${LOKACTL:-/tmp/lokactl}"
+LOKACTL="${LOKACTL:-/tmp/loka}"
 SERVER="http://localhost:8080"
 
 PASS=0
@@ -533,7 +533,7 @@ bold "16. CLI SMOKE TEST"
 echo "──────────────────────────────────────────────────────────"
 
 CLI_VER=$("$LOKACTL" version 2>&1)
-assert_contains "cli version output" "lokactl" "$CLI_VER"
+assert_contains "cli version output" "loka" "$CLI_VER"
 
 CLI_STATUS=$("$LOKACTL" status 2>&1)
 assert_contains "cli status shows control plane" "Control Plane" "$CLI_STATUS"

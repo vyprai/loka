@@ -14,13 +14,13 @@ BIN_DIR := bin
 LOKAD := $(BIN_DIR)/lokad
 LOKA_WORKER := $(BIN_DIR)/loka-worker
 LOKA_SUPERVISOR := $(BIN_DIR)/loka-supervisor
-LOKACTL := $(BIN_DIR)/lokactl
+LOKA_CLI := $(BIN_DIR)/loka
 
 # Default target
 all: build
 
 # Build all binaries for current platform
-build: $(LOKAD) $(LOKA_WORKER) $(LOKA_SUPERVISOR) $(LOKACTL)
+build: $(LOKAD) $(LOKA_WORKER) $(LOKA_SUPERVISOR) $(LOKA_CLI)
 
 $(LOKAD):
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $@ ./cmd/lokad
@@ -31,15 +31,15 @@ $(LOKA_WORKER):
 $(LOKA_SUPERVISOR):
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $@ ./cmd/loka-supervisor
 
-$(LOKACTL):
-	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $@ ./cmd/lokactl
+$(LOKA_CLI):
+	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $@ ./cmd/loka
 
 # Build for Linux (cross-compile from macOS)
 build-linux:
 	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/lokad ./cmd/lokad
 	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/loka-worker ./cmd/loka-worker
 	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/loka-supervisor ./cmd/loka-supervisor
-	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/lokactl ./cmd/lokactl
+	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/loka ./cmd/loka
 
 # Build all platforms
 build-all: build build-linux

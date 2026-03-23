@@ -26,9 +26,9 @@ func newExecCmd() *cobra.Command {
 		Long: `Execute a single command or multiple commands in parallel.
 
 Examples:
-  lokactl exec <session-id> -- python script.py
-  lokactl exec <session-id> --workdir /workspace -- npm test
-  lokactl exec <session-id> --parallel --cmd "python analyze.py" --cmd "npm test"`,
+  loka exec <session-id> -- python script.py
+  loka exec <session-id> --workdir /workspace -- npm test
+  loka exec <session-id> --parallel --cmd "python analyze.py" --cmd "npm test"`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := newClient()
