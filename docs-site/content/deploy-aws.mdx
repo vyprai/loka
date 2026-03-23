@@ -1,68 +1,148 @@
 ---
 title: Deploy to AWS
-description: EC2 bare-metal instances
+description: EC2 bare-metal instances with KVM
 ---
 
 # Deploy to AWS
 
-Run LOKA on AWS with EC2 bare-metal instances for KVM support.
+## Prerequisites
 
-## Quick deploy
+You need AWS credentials configured:
+
+```bash
+# Option 1: AWS CLI
+aws configure
+# Enter: Access Key ID, Secret Access Key, Region
+
+# Option 2: Environment variables
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_DEFAULT_REGION=us-east-1
+
+# Option 3: Pass directly
+loka deploy aws --access-key AKIA... --secret-key ... --region us-east-1
+```
+
+## Deploy
 
 ```bash
 loka deploy aws --region us-east-1 --workers 3
 ```
 
-## Architecture
+This creates:
 
+| Resource | Spec | Purpose |
+|----------|------|---------|
+| 1x `t3.medium` | 2 vCPU, 4GB | Control plane (lokad + SQLite) |
+| 3x `i3.metal` | 36 vCPU, 512GB, KVM | Workers (Firecracker VMs) |
+| VPC + subnets | | Networking |
+| Security groups | 8080, 9090, 22 | API, gRPC, SSH |
+
+## Options
+
+```bash
+loka deploy aws \
+  --region us-east-1 \
+  --workers 3 \
+  --instance-type i3.metal \
+  --ssh-key my-keypair \
+  --vpc-id vpc-abc123          # Use existing VPC
 ```
-VPC (us-east-1)
-├── Control Plane: 1x t3.medium
-│   └── lokad + PostgreSQL + Redis
-└── Workers: 3x i3.metal
-    └── loka-worker + Firecracker VMs
-```
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--region` | `us-east-1` | AWS region |
+| `--workers` | `1` | Number of worker instances |
+| `--instance-type` | `i3.metal` | Worker instance type (must support KVM) |
+| `--ssh-key` | | EC2 key pair name for SSH access |
+| `--vpc-id` | | Use existing VPC (creates new if omitted) |
+| `--access-key` | | AWS access key (or use `AWS_ACCESS_KEY_ID`) |
+| `--secret-key` | | AWS secret key (or use `AWS_SECRET_ACCESS_KEY`) |
+
+## Instance types
+
+| Instance | KVM | Notes |
+|----------|-----|-------|
+| `i3.metal` | Yes | Best choice — bare-metal, NVMe storage |
+| `m5.metal` | Yes | General purpose bare-metal |
+| `c5.metal` | Yes | Compute-optimized bare-metal |
+| `m5.xlarge` | No | Regular instances don't have `/dev/kvm` |
+
+Only `.metal` instances expose KVM. Regular instances won't work.
+
+## Security groups
+
+The deploy creates two security groups:
+
+**Control plane:**
+
+| Port | Protocol | Source | Purpose |
+|------|----------|--------|---------|
+| 8080 | TCP | Your IP | REST API |
+| 22 | TCP | Your IP | SSH |
+
+**Workers:**
+
+| Port | Protocol | Source | Purpose |
+|------|----------|--------|---------|
+| 9090 | TCP | Control plane SG | gRPC (worker registration) |
+| 22 | TCP | Your IP | SSH |
 
 ## Manual setup
 
-### 1. Control plane instance
+If you prefer to set up manually instead of using `loka deploy`:
 
-Launch a `t3.medium` (or larger) instance with Ubuntu 22.04.
+### 1. Launch instances
 
 ```bash
-# On the control plane instance:
-curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+# Control plane
+aws ec2 run-instances \
+  --image-id ami-0c7217cdde317cfec \
+  --instance-type t3.medium \
+  --key-name my-key \
+  --security-groups loka-cp
 
-# Edit config for production:
-cat > /etc/loka/controlplane.yaml  /etc/loka/worker.yaml :9090"
-data_dir: /var/loka/worker
-provider: aws
-token: "loka_a2d9fb8f..."
+# Workers (bare-metal for KVM)
+aws ec2 run-instances \
+  --image-id ami-0c7217cdde317cfec \
+  --instance-type i3.metal \
+  --key-name my-key \
+  --security-groups loka-worker \
+  --count 3
+```
+
+### 2. Install on each instance
+
+```bash
+ssh ubuntu@<ip>
+curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+```
+
+### 3. Start control plane
+
+```bash
+# On the CP instance:
+loka deploy local -f
+```
+
+### 4. Register workers
+
+```bash
+# On the CP — create a token:
+loka token create --name worker-1
+
+# On each worker:
+cat > /etc/loka/worker.yaml << YAML
+control_plane:
+  address: "<cp-private-ip>:9090"
+token: "loka_..."
 YAML
 
 loka-worker
 ```
 
-### 3. Verify
+## Tear down
 
 ```bash
-loka deploy status
-loka worker list
+loka deploy destroy
 ```
-
-## Instance types
-
-| Instance | Use case |
-|----------|----------|
-| `i3.metal` | Best for Firecracker — bare-metal KVM, NVMe storage |
-| `m5.metal` | Alternative bare-metal |
-| `c5.metal` | CPU-heavy workloads |
-
-
-## Security groups
-
-| Rule | Port | Source |
-|------|------|--------|
-| Control plane API | 8080 | Your IP / agent IPs |
-| Worker gRPC | 9090 | Control plane SG |
-| SSH | 22 | Your IP |

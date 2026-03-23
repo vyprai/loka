@@ -1,43 +1,58 @@
 ---
 title: Deploy to GCP
-description: Nested virtualization
+description: Compute Engine with nested virtualization
 ---
 
 # Deploy to GCP
 
-Run LOKA on Google Cloud with nested virtualization for KVM support.
+## Prerequisites
 
-## Quick deploy
+```bash
+# Option 1: gcloud CLI (recommended)
+gcloud auth login
+gcloud config set project my-project-id
+
+# Option 2: Service account key
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+
+# Option 3: Pass directly
+loka deploy gcp --project my-project-id --credentials /path/to/key.json
+```
+
+## Deploy
 
 ```bash
 loka deploy gcp --project my-project --zone us-central1-a --workers 2
 ```
 
-## Manual setup
+## Options
 
-### 1. Create instances with nested virtualization
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--project` | | GCP project ID (required) |
+| `--zone` | `us-central1-a` | Compute zone |
+| `--workers` | `1` | Number of worker VMs |
+| `--instance-type` | `n2-standard-8` | Worker machine type |
+| `--credentials` | | Path to service account JSON |
+
+## Nested virtualization
+
+GCP requires nested virtualization to be enabled explicitly. `loka deploy gcp` handles this. For manual setup:
 
 ```bash
-# Control plane
-gcloud compute instances create loka-cp \
-  --zone=us-central1-a \
-  --machine-type=e2-standard-2 \
-  --image-family=ubuntu-2204-lts --image-project=ubuntu-os-cloud
-
-# Workers (nested virt required)
 gcloud compute instances create loka-worker-1 \
-  --zone=us-central1-a \
-  --machine-type=n2-standard-8 \
-  --min-cpu-platform="Intel Haswell" \
+  --zone us-central1-a \
+  --machine-type n2-standard-8 \
+  --min-cpu-platform "Intel Haswell" \
   --enable-nested-virtualization \
-  --image-family=ubuntu-2204-lts --image-project=ubuntu-os-cloud
+  --image-family ubuntu-2204-lts \
+  --image-project ubuntu-os-cloud
 ```
 
-### 2. Install and configure
+`--enable-nested-virtualization` and `--min-cpu-platform "Intel Haswell"` are both required.
 
-Same as AWS — run the install script, configure, start.
+## Tear down
 
 ```bash
-curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+loka deploy destroy
 ```
-
