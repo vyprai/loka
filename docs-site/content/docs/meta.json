@@ -1,5 +1,6 @@
 {
-  "root": true,
+  "title": "Docs",
+  "defaultOpen": true,
   "pages": [
     "index",
     "installation",
