@@ -87,6 +87,25 @@ class LokaClient:
             "dry_run": dry_run,
         })
 
+    def port_forward(self, session_id: str, local_port: int, remote_port: int) -> None:
+        """Forward a local port to a port inside the session VM.
+
+        Opens a local TCP listener and tunnels connections via gRPC streaming.
+        This is a blocking call — runs until interrupted.
+
+        Args:
+            session_id: Session ID.
+            local_port: Port on your machine.
+            remote_port: Port inside the VM.
+
+        Note: Requires gRPC streaming. Use the CLI:
+            loka session port-forward <id> <local>:<remote>
+        """
+        raise NotImplementedError(
+            "port_forward requires gRPC streaming. Use the CLI: "
+            f"loka session port-forward {session_id} {local_port}:{remote_port}"
+        )
+
     def mount_local(self, session_id: str, local_path: str, vm_path: str,
                     read_only: bool = False) -> None:
         """Mount a local directory into a session via gRPC tunnel.

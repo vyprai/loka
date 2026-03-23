@@ -6,6 +6,14 @@ from typing import Any
 
 
 @dataclass
+class PortMapping:
+    """Port forwarding from local machine to session VM."""
+    local_port: int = 0
+    remote_port: int = 0
+    protocol: str = "tcp"
+
+
+@dataclass
 class StorageMount:
     """Object storage bucket mounted into a session VM."""
     provider: str = ""         # "s3", "gcs", "azure-blob", "local"
@@ -69,6 +77,7 @@ class Session:
     MemoryMB: int = 0
     Labels: dict[str, str] = field(default_factory=dict)
     Mounts: list[Any] = field(default_factory=list)
+    Ports: list[Any] = field(default_factory=list)
     CreatedAt: str = ""
     UpdatedAt: str = ""
 

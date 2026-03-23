@@ -1,5 +1,12 @@
 package loka
 
+// PortMapping maps a local port to a port inside the session VM.
+type PortMapping struct {
+	LocalPort  int    `json:"local_port"`            // Port on user's machine (0 = auto-assign).
+	RemotePort int    `json:"remote_port"`           // Port inside the VM.
+	Protocol   string `json:"protocol,omitempty"`    // "tcp" (default) or "udp".
+}
+
 // StorageMount defines an object storage bucket mounted into a session's VM.
 type StorageMount struct {
 	// Name is a human-readable identifier for this mount.

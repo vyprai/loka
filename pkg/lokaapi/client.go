@@ -124,6 +124,7 @@ type Session struct {
 	VCPUs     int               `json:"VCPUs"`
 	MemoryMB  int               `json:"MemoryMB"`
 	Labels    map[string]string `json:"Labels"`
+	Ports     []PortMapping     `json:"Ports,omitempty"`
 	CreatedAt time.Time         `json:"CreatedAt"`
 	UpdatedAt time.Time         `json:"UpdatedAt"`
 }
@@ -141,6 +142,13 @@ type StorageMount struct {
 	Credentials map[string]string `json:"credentials,omitempty"` // access_key_id, secret_access_key, etc.
 }
 
+// PortMapping maps a local port to a port inside the session VM.
+type PortMapping struct {
+	LocalPort  int    `json:"local_port"`
+	RemotePort int    `json:"remote_port"`
+	Protocol   string `json:"protocol,omitempty"`
+}
+
 type CreateSessionReq struct {
 	Name            string            `json:"name"`
 	Image           string            `json:"image,omitempty"`
@@ -152,6 +160,7 @@ type CreateSessionReq struct {
 	AllowedCommands []string          `json:"allowed_commands,omitempty"`
 	BlockedCommands []string          `json:"blocked_commands,omitempty"`
 	Mounts          []StorageMount    `json:"mounts,omitempty"`
+	Ports           []PortMapping     `json:"ports,omitempty"`
 }
 
 func (c *Client) CreateSession(ctx context.Context, req CreateSessionReq) (*Session, error) {

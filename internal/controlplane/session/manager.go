@@ -28,6 +28,7 @@ type CreateOpts struct {
 	WorkerLabels map[string]string    // Scheduling affinity labels.
 	ExecPolicy   *loka.ExecPolicy     // Command restrictions. Nil = default policy.
 	Mounts       []loka.StorageMount  // Object storage mounts.
+	Ports        []loka.PortMapping   // Port forwarding declarations.
 }
 
 // Manager orchestrates session lifecycle.
@@ -77,6 +78,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 		MemoryMB:   opts.MemoryMB,
 		Labels:     opts.Labels,
 		Mounts:     opts.Mounts,
+		Ports:      opts.Ports,
 		ExecPolicy: execPolicy,
 		CreatedAt:  now,
 		UpdatedAt:  now,

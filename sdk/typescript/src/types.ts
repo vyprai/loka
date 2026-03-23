@@ -18,6 +18,7 @@ export interface Session {
   MemoryMB: number;
   Labels: Record<string, string>;
   Mounts: StorageMount[];
+  Ports: PortMapping[];
   ExecPolicy: ExecPolicy;
   CreatedAt: string;
   UpdatedAt: string;
@@ -42,6 +43,12 @@ export interface StorageMount {
   credentials?: Record<string, string>;
 }
 
+export interface PortMapping {
+  local_port: number;
+  remote_port: number;
+  protocol?: string;
+}
+
 export interface CreateSessionOpts {
   name?: string;
   image?: string;
@@ -55,6 +62,7 @@ export interface CreateSessionOpts {
   network_policy?: NetworkPolicy;
   exec_policy?: ExecPolicy;
   mounts?: StorageMount[];
+  ports?: PortMapping[];
 }
 
 // ── Sync ────────────────────────────────────────────────

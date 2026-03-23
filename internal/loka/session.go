@@ -28,6 +28,7 @@ type Session struct {
 	MemoryMB   int
 	Labels     map[string]string
 	Mounts     []StorageMount `json:"Mounts,omitempty"` // Object storage mounts.
+	Ports      []PortMapping  `json:"Ports,omitempty"`  // Port forwarding declarations.
 	ExecPolicy ExecPolicy     `json:"ExecPolicy"`       // Command/package restrictions.
 	CreatedAt  time.Time
 	UpdatedAt  time.Time

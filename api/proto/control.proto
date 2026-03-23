@@ -60,8 +60,11 @@ service ControlService {
 
   // ─── File Tunnel ─────────────────────────────────────────
   // Bidirectional stream for mounting local files into a session.
-  // CLI sends local file data; CP relays to the worker VM.
   rpc FileTunnel(stream FileTunnelMessage) returns (stream FileTunnelMessage);
+
+  // ─── Port Forward ────────────────────────────────────────
+  // Bidirectional stream for tunneling TCP connections to a session VM.
+  rpc PortForward(stream PortForwardMessage) returns (stream PortForwardMessage);
 }
 
 // ─── Session messages ──────────────────────────────────────
@@ -337,4 +340,35 @@ message TunnelStatResp {
 message TunnelError {
   string message = 1;
   string path    = 2;
+}
+
+// ─── Port forward messages ──────────────────────────────────
+
+message PortForwardMessage {
+  string session_id = 1;
+  oneof payload {
+    PortForwardInit init     = 2;
+    PortForwardData data     = 3;
+    PortForwardClose close   = 4;
+    PortForwardError error   = 5;
+  }
+}
+
+message PortForwardInit {
+  int32 local_port  = 1;
+  int32 remote_port = 2;
+}
+
+message PortForwardData {
+  uint32 connection_id = 1;
+  bytes data           = 2;
+}
+
+message PortForwardClose {
+  uint32 connection_id = 1;
+}
+
+message PortForwardError {
+  uint32 connection_id = 1;
+  string message       = 2;
 }

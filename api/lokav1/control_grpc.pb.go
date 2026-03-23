@@ -50,6 +50,7 @@ const (
 	ControlService_DrainWorker_FullMethodName       = "/loka.api.v1.ControlService/DrainWorker"
 	ControlService_RemoveWorker_FullMethodName      = "/loka.api.v1.ControlService/RemoveWorker"
 	ControlService_FileTunnel_FullMethodName        = "/loka.api.v1.ControlService/FileTunnel"
+	ControlService_PortForward_FullMethodName       = "/loka.api.v1.ControlService/PortForward"
 )
 
 // ControlServiceClient is the client API for ControlService service.
@@ -90,8 +91,10 @@ type ControlServiceClient interface {
 	RemoveWorker(ctx context.Context, in *RemoveWorkerRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// ─── File Tunnel ─────────────────────────────────────────
 	// Bidirectional stream for mounting local files into a session.
-	// CLI sends local file data; CP relays to the worker VM.
 	FileTunnel(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[FileTunnelMessage, FileTunnelMessage], error)
+	// ─── Port Forward ────────────────────────────────────────
+	// Bidirectional stream for tunneling TCP connections to a session VM.
+	PortForward(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PortForwardMessage, PortForwardMessage], error)
 }
 
 type controlServiceClient struct {
@@ -414,6 +417,19 @@ func (c *controlServiceClient) FileTunnel(ctx context.Context, opts ...grpc.Call
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControlService_FileTunnelClient = grpc.BidiStreamingClient[FileTunnelMessage, FileTunnelMessage]
 
+func (c *controlServiceClient) PortForward(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[PortForwardMessage, PortForwardMessage], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ControlService_ServiceDesc.Streams[2], ControlService_PortForward_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PortForwardMessage, PortForwardMessage]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlService_PortForwardClient = grpc.BidiStreamingClient[PortForwardMessage, PortForwardMessage]
+
 // ControlServiceServer is the server API for ControlService service.
 // All implementations must embed UnimplementedControlServiceServer
 // for forward compatibility.
@@ -452,8 +468,10 @@ type ControlServiceServer interface {
 	RemoveWorker(context.Context, *RemoveWorkerRequest) (*emptypb.Empty, error)
 	// ─── File Tunnel ─────────────────────────────────────────
 	// Bidirectional stream for mounting local files into a session.
-	// CLI sends local file data; CP relays to the worker VM.
 	FileTunnel(grpc.BidiStreamingServer[FileTunnelMessage, FileTunnelMessage]) error
+	// ─── Port Forward ────────────────────────────────────────
+	// Bidirectional stream for tunneling TCP connections to a session VM.
+	PortForward(grpc.BidiStreamingServer[PortForwardMessage, PortForwardMessage]) error
 	mustEmbedUnimplementedControlServiceServer()
 }
 
@@ -553,6 +571,9 @@ func (UnimplementedControlServiceServer) RemoveWorker(context.Context, *RemoveWo
 }
 func (UnimplementedControlServiceServer) FileTunnel(grpc.BidiStreamingServer[FileTunnelMessage, FileTunnelMessage]) error {
 	return status.Error(codes.Unimplemented, "method FileTunnel not implemented")
+}
+func (UnimplementedControlServiceServer) PortForward(grpc.BidiStreamingServer[PortForwardMessage, PortForwardMessage]) error {
+	return status.Error(codes.Unimplemented, "method PortForward not implemented")
 }
 func (UnimplementedControlServiceServer) mustEmbedUnimplementedControlServiceServer() {}
 func (UnimplementedControlServiceServer) testEmbeddedByValue()                        {}
@@ -1097,6 +1118,13 @@ func _ControlService_FileTunnel_Handler(srv interface{}, stream grpc.ServerStrea
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type ControlService_FileTunnelServer = grpc.BidiStreamingServer[FileTunnelMessage, FileTunnelMessage]
 
+func _ControlService_PortForward_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ControlServiceServer).PortForward(&grpc.GenericServerStream[PortForwardMessage, PortForwardMessage]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlService_PortForwardServer = grpc.BidiStreamingServer[PortForwardMessage, PortForwardMessage]
+
 // ControlService_ServiceDesc is the grpc.ServiceDesc for ControlService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1226,6 +1254,12 @@ var ControlService_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "FileTunnel",
 			Handler:       _ControlService_FileTunnel_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "PortForward",
+			Handler:       _ControlService_PortForward_Handler,
 			ServerStreams: true,
 			ClientStreams: true,
 		},

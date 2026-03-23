@@ -61,6 +61,18 @@ export class LokaClient {
     );
   }
 
+  /**
+   * Forward a local port to a port inside the session VM.
+   * Opens a local TCP listener and tunnels connections via gRPC streaming.
+   * Requires gRPC streaming — use the CLI for this:
+   *   loka session port-forward <id> <local>:<remote>
+   */
+  async portForward(_sessionId: string, _localPort: number, _remotePort: number): Promise<void> {
+    throw new Error(
+      'portForward requires gRPC streaming. Use the CLI: loka session port-forward <id> <local>:<remote>'
+    );
+  }
+
   async pauseSession(id: string): Promise<Session> {
     return this.post(`/api/v1/sessions/${id}/pause`, {});
   }

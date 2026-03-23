@@ -25,6 +25,8 @@ func newSessionCmd() *cobra.Command {
 		newSessionResumeCmd(),
 		newSessionModeCmd(),
 		newSessionMountLocalCmd(),
+		newSessionPortForwardCmd(),
+		newSessionPortsCmd(),
 		newSessionSyncCmd(),
 	)
 	return cmd
@@ -41,6 +43,7 @@ func newSessionCreateCmd() *cobra.Command {
 		allowedCommands string
 		blockedCommands string
 		mounts          []string
+		ports           []string
 	)
 
 	cmd := &cobra.Command{
@@ -68,6 +71,16 @@ func newSessionCreateCmd() *cobra.Command {
 					return err
 				}
 				req.Mounts = append(req.Mounts, mount)
+			}
+			for _, p := range ports {
+				pm, err := parsePortMap(p)
+				if err != nil {
+					return err
+				}
+				req.Ports = append(req.Ports, lokaapi.PortMapping{
+					LocalPort:  pm.local,
+					RemotePort: pm.remote,
+				})
 			}
 			sess, err := client.CreateSession(cmd.Context(), req)
 			if err != nil {
@@ -100,6 +113,7 @@ func newSessionCreateCmd() *cobra.Command {
     --mount gcs://my-bucket@/gcs-data?service_account_json=@/path/to/key.json
     --mount azure-blob://container@/az?account_name=...&account_key=...
     --mount s3://my-bucket@/data?endpoint=http://minio:9000&access_key_id=minioadmin&secret_access_key=minioadmin`)
+	cmd.Flags().StringArrayVar(&ports, "port", nil, "Port forwarding (repeatable, format: local:remote, e.g. --port 8080:5000)")
 	return cmd
 }
 
@@ -317,6 +331,37 @@ func shortID(id string) string {
 		return id[:8]
 	}
 	return id
+}
+
+func newSessionPortsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "ports <session-id>",
+		Short: "List port mappings for a session",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client := newClient()
+			sess, err := client.GetSession(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			if outputFmt == "json" {
+				return printJSON(sess.Ports)
+			}
+			if len(sess.Ports) == 0 {
+				fmt.Println("No port mappings.")
+				fmt.Println("Add ports: loka session port-forward <id> 8080:5000")
+				return nil
+			}
+			for _, p := range sess.Ports {
+				proto := p.Protocol
+				if proto == "" {
+					proto = "tcp"
+				}
+				fmt.Printf("  %d → %d (%s)\n", p.LocalPort, p.RemotePort, proto)
+			}
+			return nil
+		},
+	}
 }
 
 func printJSON(v any) error {
