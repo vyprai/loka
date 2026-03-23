@@ -634,17 +634,17 @@ func TestExecPolicyBlockedCommand(t *testing.T) {
 	te.drainWorkerCommands(t)
 }
 
-func TestExecExploreModeBlocskWriteCommands(t *testing.T) {
+func TestExecExploreModeAllowsAllCommands(t *testing.T) {
 	te := setupTestManager(t)
 	ctx := context.Background()
 
-	s := te.createRunningSession(t, CreateOpts{Name: "explore-block", Mode: loka.ModeExplore})
+	s := te.createRunningSession(t, CreateOpts{Name: "explore-allow", Mode: loka.ModeExplore})
 
-	// "mkdir" is not a read-only command and not in the explore allowlist.
+	// All commands are allowed in explore mode — filesystem is read-only (enforced by supervisor).
 	commands := []loka.Command{{ID: "cmd-1", Command: "mkdir", Args: []string{"test"}}}
 	_, err := te.manager.Exec(ctx, s.ID, commands, false)
-	if err == nil {
-		t.Fatal("expected error for non-read-only command in explore mode")
+	if err != nil {
+		t.Fatalf("all commands should be allowed in explore mode (filesystem is read-only): %v", err)
 	}
 	te.drainWorkerCommands(t)
 }

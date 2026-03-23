@@ -132,9 +132,11 @@ func newClient() *lokaapi.Client {
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "loka",
-		Short: "LOKA — controlled execution environment for AI agents",
-		Long:  "Deploy, manage, and interact with LOKA sessions, workers, and infrastructure.",
+		Use:           "loka",
+		Short:         "LOKA — controlled execution environment for AI agents",
+		Long:          "Deploy, manage, and interact with LOKA sessions, workers, and infrastructure.",
+		SilenceUsage:  true,
+		SilenceErrors: true,
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&serverAddr, "server", "s", "http://localhost:6840", "Control plane address")
@@ -176,6 +178,7 @@ func main() {
 	})
 
 	if err := rootCmd.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}
 }

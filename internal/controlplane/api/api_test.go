@@ -732,20 +732,20 @@ func TestRESTResponseContentType(t *testing.T) {
 // Exec in explore mode rejects write commands
 // ---------------------------------------------------------------------------
 
-func TestRESTExecCommand_ExploreMode_RejectsNonReadOnly(t *testing.T) {
+func TestRESTExecCommand_ExploreMode_AllowsAllCommands(t *testing.T) {
 	ts := setupTestServer(t)
 	ts.registerTestWorker(t)
 
 	createRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions",
-		map[string]any{"name": "explore-restrict", "image": "alpine:latest", "mode": "explore"}, nil)
+		map[string]any{"name": "explore-allow", "image": "alpine:latest", "mode": "explore"}, nil)
 	var created loka.Session
 	decodeBody(t, createRec, &created)
 
-	// "rm" is not a read-only command; it should be rejected in explore mode.
+	// All commands are allowed in explore mode — filesystem is read-only (enforced by supervisor).
 	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+created.ID+"/exec",
-		map[string]any{"command": "rm", "args": []string{"-rf", "/"}}, nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for non-read-only command in explore mode, got %d: %s",
+		map[string]any{"command": "python3", "args": []string{"-c", "print(42)"}}, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for command in explore mode, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
 }

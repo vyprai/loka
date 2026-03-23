@@ -62,17 +62,18 @@ func TestValidateCommand_GlobPatterns(t *testing.T) {
 func TestValidateCommand_ModeRestrictions(t *testing.T) {
 	policy := DefaultExecPolicy()
 
-	// Inspect mode: ls should work (read-only).
+	// Explore mode: all commands allowed (filesystem is read-only, enforced by supervisor).
 	if err := policy.ValidateCommand(Command{Command: "ls"}, ModeExplore); err != nil {
-		t.Errorf("ls should be allowed in inspect: %v", err)
+		t.Errorf("ls should be allowed in explore: %v", err)
+	}
+	if err := policy.ValidateCommand(Command{Command: "python3"}, ModeExplore); err != nil {
+		t.Errorf("python3 should be allowed in explore: %v", err)
+	}
+	if err := policy.ValidateCommand(Command{Command: "rm"}, ModeExplore); err != nil {
+		t.Errorf("rm should be allowed in explore (filesystem is read-only): %v", err)
 	}
 
-	// Inspect mode: rm should be blocked (not read-only).
-	if err := policy.ValidateCommand(Command{Command: "rm"}, ModeExplore); err == nil {
-		t.Error("rm should be blocked in inspect mode")
-	}
-
-	// Execute mode: rm should be allowed.
+	// Execute mode: all commands allowed.
 	if err := policy.ValidateCommand(Command{Command: "rm"}, ModeExecute); err != nil {
 		t.Errorf("rm should be allowed in execute: %v", err)
 	}

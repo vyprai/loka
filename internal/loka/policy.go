@@ -3,7 +3,7 @@ package loka
 import (
 	"fmt"
 	"path/filepath"
-	"strings"
+
 )
 
 // ExecPolicy defines what commands and packages are allowed in a session.
@@ -63,11 +63,7 @@ func DefaultExecPolicy() ExecPolicy {
 		ModeRestrictions: map[ExecMode]ModeExecPolicy{
 			ModeExplore: {
 				ReadOnly: true,
-				AllowedCommands: []string{
-					"cat", "ls", "find", "grep", "rg", "head", "tail", "wc",
-					"file", "stat", "du", "df", "tree", "which", "env", "echo",
-					"python3", "python", "node", "ruby", "php",
-				},
+				// All commands can run — filesystem is read-only (enforced by supervisor).
 			},
 			ModeExecute: {
 				// Full access.
@@ -109,19 +105,14 @@ func (p *ExecPolicy) ValidateCommand(cmd Command, mode ExecMode) error {
 	}
 
 	// 3. Check mode-specific restrictions.
+	// Note: ReadOnly is enforced at the filesystem level by the in-VM supervisor
+	// (Landlock, mount flags), not by blocking commands. Any command can run in
+	// explore mode — it just can't write to the filesystem.
 	if modePolicy, ok := p.ModeRestrictions[mode]; ok {
-		// 3a. Check read-only enforcement first — applies regardless of allowlist.
-		if modePolicy.ReadOnly {
-			if !isReadOnlyCommand(binary) {
-				return fmt.Errorf("command %q not allowed in read-only %s mode", binary, mode)
-			}
-		}
-
-		// 3b. Check mode-specific allowed commands.
+		// 3a. Check mode-specific allowed commands.
 		if len(modePolicy.AllowedCommands) > 0 {
 			if !matchesAny(binary, modePolicy.AllowedCommands) {
-				return fmt.Errorf("command %q not allowed in %s mode (allowed: %s)",
-					binary, mode, strings.Join(modePolicy.AllowedCommands, ", "))
+				return fmt.Errorf("command %q not allowed in %s mode", binary, mode)
 			}
 		}
 	}
