@@ -95,4 +95,14 @@ func (r *executionRepo) ListBySession(ctx context.Context, sessionID string, f s
 	return execs, rows.Err()
 }
 
+func (r *executionRepo) DeleteCompletedBefore(ctx context.Context, before time.Time) (int, error) {
+	result, err := r.db.ExecContext(ctx,
+		`DELETE FROM executions WHERE status IN ('success', 'failed', 'canceled') AND updated_at < $1`, before)
+	if err != nil {
+		return 0, fmt.Errorf("delete completed executions: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
 var _ store.ExecutionRepository = (*executionRepo)(nil)

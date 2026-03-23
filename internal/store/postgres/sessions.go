@@ -125,4 +125,14 @@ func (r *sessionRepo) ListByWorker(ctx context.Context, workerID string) ([]*lok
 	return r.List(ctx, store.SessionFilter{WorkerID: &workerID})
 }
 
+func (r *sessionRepo) DeleteTerminatedBefore(ctx context.Context, before time.Time) (int, error) {
+	result, err := r.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE status = 'terminated' AND updated_at < $1`, before)
+	if err != nil {
+		return 0, fmt.Errorf("delete terminated sessions: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
 var _ store.SessionRepository = (*sessionRepo)(nil)

@@ -14,6 +14,17 @@ type ControlPlaneConfig struct {
 	Logging     LoggingConfig     `yaml:"logging"`
 	TLS         TLSConfig         `yaml:"tls"`
 	Domain      DomainConfig      `yaml:"domain"`
+	Retention   RetentionConfig   `yaml:"retention"`
+}
+
+// RetentionConfig controls garbage collection TTLs.
+type RetentionConfig struct {
+	SessionTTL      string `yaml:"session_ttl"`      // Default "168h" (7 days)
+	CheckpointTTL   string `yaml:"checkpoint_ttl"`    // Default "168h"
+	ExecutionTTL    string `yaml:"execution_ttl"`     // Default "72h" (3 days)
+	TokenTTL        string `yaml:"token_ttl"`         // Default "24h"
+	ImageTTL        string `yaml:"image_ttl"`         // Default "720h" (30 days)
+	CleanupInterval string `yaml:"cleanup_interval"`  // Default "1h"
 }
 
 // DomainConfig configures the optional subdomain-based reverse proxy.
@@ -105,5 +116,23 @@ func (c *ControlPlaneConfig) Defaults() {
 	}
 	if c.Scheduler.Strategy == "" {
 		c.Scheduler.Strategy = "spread"
+	}
+	if c.Retention.SessionTTL == "" {
+		c.Retention.SessionTTL = "168h"
+	}
+	if c.Retention.CheckpointTTL == "" {
+		c.Retention.CheckpointTTL = "168h"
+	}
+	if c.Retention.ExecutionTTL == "" {
+		c.Retention.ExecutionTTL = "72h"
+	}
+	if c.Retention.TokenTTL == "" {
+		c.Retention.TokenTTL = "24h"
+	}
+	if c.Retention.ImageTTL == "" {
+		c.Retention.ImageTTL = "720h"
+	}
+	if c.Retention.CleanupInterval == "" {
+		c.Retention.CleanupInterval = "1h"
 	}
 }

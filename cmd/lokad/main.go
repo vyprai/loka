@@ -277,7 +277,8 @@ func main() {
 
 	// ── Initialize API server ───────────────────────────────
 	srv := api.NewServer(sm, registry, providerRegistry, imgMgr, drainer, db, logger, api.ServerOpts{
-		APIKey: cfg.Auth.APIKey,
+		APIKey:    cfg.Auth.APIKey,
+		Retention: cfg.Retention,
 	})
 
 	httpServer := &http.Server{

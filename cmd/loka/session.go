@@ -288,20 +288,32 @@ func newSessionGetCmd() *cobra.Command {
 }
 
 func newSessionDestroyCmd() *cobra.Command {
-	return &cobra.Command{
+	var purge bool
+
+	cmd := &cobra.Command{
 		Use:     "destroy <session-id>",
 		Short:   "Destroy a session",
 		Aliases: []string{"rm", "delete"},
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := newClient()
-			if err := client.DestroySession(cmd.Context(), args[0]); err != nil {
-				return err
+			if purge {
+				if err := client.Raw(cmd.Context(), "DELETE", "/api/v1/sessions/"+args[0]+"?purge=true", nil, nil); err != nil {
+					return err
+				}
+				fmt.Printf("Session %s purged (all data removed)\n", shortID(args[0]))
+			} else {
+				if err := client.DestroySession(cmd.Context(), args[0]); err != nil {
+					return err
+				}
+				fmt.Printf("Session %s destroyed\n", shortID(args[0]))
 			}
-			fmt.Printf("Session %s destroyed\n", shortID(args[0]))
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&purge, "purge", false, "Delete all session data (checkpoints, executions) permanently")
+	return cmd
 }
 
 func newSessionPauseCmd() *cobra.Command {

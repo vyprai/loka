@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/vyprai/loka/internal/loka"
 )
@@ -35,6 +36,7 @@ type SessionRepository interface {
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, filter SessionFilter) ([]*loka.Session, error)
 	ListByWorker(ctx context.Context, workerID string) ([]*loka.Session, error)
+	DeleteTerminatedBefore(ctx context.Context, before time.Time) (int, error)
 }
 
 // ExecutionFilter controls execution list queries.
@@ -51,6 +53,7 @@ type ExecutionRepository interface {
 	Get(ctx context.Context, id string) (*loka.Execution, error)
 	Update(ctx context.Context, exec *loka.Execution) error
 	ListBySession(ctx context.Context, sessionID string, filter ExecutionFilter) ([]*loka.Execution, error)
+	DeleteCompletedBefore(ctx context.Context, before time.Time) (int, error)
 }
 
 // CheckpointRepository manages checkpoint persistence.
@@ -92,4 +95,5 @@ type TokenRepository interface {
 	MarkUsed(ctx context.Context, id, workerID string) error
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context) ([]*loka.WorkerToken, error)
+	DeleteExpiredBefore(ctx context.Context, before time.Time) (int, error)
 }

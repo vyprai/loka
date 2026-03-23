@@ -244,6 +244,58 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	return nil
 }
 
+// Purge fully removes a session and all associated data (checkpoints,
+// executions) from the database and sends a cleanup command to the worker.
+func (m *Manager) Purge(ctx context.Context, id string) error {
+	s, err := m.store.Sessions().Get(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	// Send cleanup command to worker if assigned.
+	if s.WorkerID != "" {
+		m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+			ID:   uuid.New().String(),
+			Type: "cleanup_session",
+			Data: worker.CleanupSessionData{SessionID: s.ID},
+		})
+	}
+
+	// Delete all checkpoints for this session.
+	cps, err := m.store.Checkpoints().ListBySession(ctx, id)
+	if err != nil {
+		m.logger.Warn("failed to list checkpoints for purge", "session", id, "error", err)
+	} else {
+		for _, cp := range cps {
+			if err := m.store.Checkpoints().Delete(ctx, cp.ID); err != nil {
+				m.logger.Warn("failed to delete checkpoint during purge", "checkpoint", cp.ID, "error", err)
+			}
+		}
+	}
+
+	// Delete all executions for this session.
+	execs, err := m.store.Executions().ListBySession(ctx, id, store.ExecutionFilter{})
+	if err != nil {
+		m.logger.Warn("failed to list executions for purge", "session", id, "error", err)
+	} else {
+		for _, exec := range execs {
+			exec.Status = "purged"
+			if err := m.store.Executions().Update(ctx, exec); err != nil {
+				m.logger.Warn("failed to update execution during purge", "exec", exec.ID, "error", err)
+			}
+		}
+	}
+
+	// Delete the session from the database.
+	if err := m.store.Sessions().Delete(ctx, id); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+
+	metrics.SessionsDestroyed.Inc()
+	m.logger.Info("session purged", "id", id)
+	return nil
+}
+
 // Pause pauses a running session.
 func (m *Manager) Pause(ctx context.Context, id string) (*loka.Session, error) {
 	s, err := m.store.Sessions().Get(ctx, id)

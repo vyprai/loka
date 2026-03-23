@@ -115,7 +115,14 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) destroySession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.sessionManager.Destroy(r.Context(), id); err != nil {
+	purge := r.URL.Query().Get("purge") == "true"
+	var err error
+	if purge {
+		err = s.sessionManager.Purge(r.Context(), id)
+	} else {
+		err = s.sessionManager.Destroy(r.Context(), id)
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

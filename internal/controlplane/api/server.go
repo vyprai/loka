@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/vyprai/loka/internal/config"
 	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/internal/controlplane/session"
 	"github.com/vyprai/loka/internal/controlplane/worker"
@@ -26,18 +27,22 @@ type Server struct {
 	store            store.Store
 	logger           *slog.Logger
 	apiKey           string
+	gc               GCRunner
+	retention        config.RetentionConfig
 }
 
 // ServerOpts holds optional configuration for the API server.
 type ServerOpts struct {
-	APIKey string // If set, require this key for API access.
+	APIKey    string              // If set, require this key for API access.
+	GC        GCRunner            // Garbage collector (optional).
+	Retention config.RetentionConfig // Retention configuration.
 }
 
 // NewServer creates a new API server.
 func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Registry, imgMgr *image.Manager, drainer *worker.Drainer, s store.Store, logger *slog.Logger, opts ...ServerOpts) *Server {
-	var apiKey string
+	var o ServerOpts
 	if len(opts) > 0 {
-		apiKey = opts[0].APIKey
+		o = opts[0]
 	}
 	srv := &Server{
 		router:           chi.NewRouter(),
@@ -48,7 +53,9 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		drainer:          drainer,
 		store:            s,
 		logger:           logger,
-		apiKey:           apiKey,
+		apiKey:           o.APIKey,
+		gc:               o.GC,
+		retention:        o.Retention,
 	}
 	srv.routes()
 	srv.registerInternalRoutes()
@@ -139,6 +146,9 @@ func (s *Server) routes() {
 		r.Post("/worker-tokens", s.createWorkerToken)
 		r.Get("/worker-tokens", s.listWorkerTokens)
 		r.Delete("/worker-tokens/{tokenId}", s.revokeWorkerToken)
+
+		// Admin
+		s.registerAdminRoutes(r)
 
 		// Health
 		r.Get("/health", s.health)

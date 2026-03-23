@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/vyprai/loka/internal/loka"
 	"github.com/vyprai/loka/internal/store"
@@ -78,6 +79,16 @@ func (r *tokenRepo) List(ctx context.Context) ([]*loka.WorkerToken, error) {
 		tokens = append(tokens, &t)
 	}
 	return tokens, rows.Err()
+}
+
+func (r *tokenRepo) DeleteExpiredBefore(ctx context.Context, before time.Time) (int, error) {
+	result, err := r.db.ExecContext(ctx,
+		`DELETE FROM worker_tokens WHERE expires_at IS NOT NULL AND expires_at < $1`, before)
+	if err != nil {
+		return 0, fmt.Errorf("delete expired tokens: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
 }
 
 var _ store.TokenRepository = (*tokenRepo)(nil)

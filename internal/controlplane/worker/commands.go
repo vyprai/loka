@@ -45,6 +45,11 @@ type DenyOnGateData struct {
 	Reason    string
 }
 
+// CleanupSessionData is the payload for cleaning up all session data on a worker.
+type CleanupSessionData struct {
+	SessionID string
+}
+
 // SyncMountData is the payload for syncing a storage mount on a worker.
 type SyncMountData struct {
 	SessionID string

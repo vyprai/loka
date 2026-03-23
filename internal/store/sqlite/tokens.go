@@ -99,4 +99,15 @@ func (r *tokenRepo) List(ctx context.Context) ([]*loka.WorkerToken, error) {
 	return tokens, rows.Err()
 }
 
+func (r *tokenRepo) DeleteExpiredBefore(ctx context.Context, before time.Time) (int, error) {
+	result, err := r.db.ExecContext(ctx,
+		`DELETE FROM worker_tokens WHERE expires_at != '' AND expires_at < ?`,
+		before.UTC().Format(time.RFC3339))
+	if err != nil {
+		return 0, fmt.Errorf("delete expired tokens: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), nil
+}
+
 var _ store.TokenRepository = (*tokenRepo)(nil)
