@@ -138,6 +138,85 @@ func TestManager_Delete_Success(t *testing.T) {
 	}
 }
 
+func TestRegister(t *testing.T) {
+	m := newTestManager(t)
+
+	img := &loka.Image{
+		ID:        "reg-id-001",
+		Reference: "nginx:1.25",
+		Status:    loka.ImageStatusReady,
+	}
+	m.Register(img)
+
+	got, ok := m.GetByRef("nginx:1.25")
+	if !ok {
+		t.Fatal("expected GetByRef to find the registered image")
+	}
+	if got.ID != "reg-id-001" {
+		t.Errorf("ID = %q, want %q", got.ID, "reg-id-001")
+	}
+	if got.Reference != "nginx:1.25" {
+		t.Errorf("Reference = %q, want %q", got.Reference, "nginx:1.25")
+	}
+
+	// Also verify via Get by ID.
+	got2, ok := m.Get("reg-id-001")
+	if !ok {
+		t.Fatal("expected Get to find the registered image by ID")
+	}
+	if got2.Reference != "nginx:1.25" {
+		t.Errorf("Reference = %q, want %q", got2.Reference, "nginx:1.25")
+	}
+}
+
+func TestRegisterOverwrite(t *testing.T) {
+	m := newTestManager(t)
+
+	// Register first image.
+	img1 := &loka.Image{
+		ID:        "overwrite-id",
+		Reference: "node:18",
+		Status:    loka.ImageStatusReady,
+		SizeMB:    100,
+	}
+	m.Register(img1)
+
+	// Register second image with the same ID — should overwrite.
+	img2 := &loka.Image{
+		ID:        "overwrite-id",
+		Reference: "node:20",
+		Status:    loka.ImageStatusReady,
+		SizeMB:    200,
+	}
+	m.Register(img2)
+
+	got, ok := m.Get("overwrite-id")
+	if !ok {
+		t.Fatal("expected Get to find the image after overwrite")
+	}
+	if got.Reference != "node:20" {
+		t.Errorf("Reference = %q, want %q (second registration should overwrite)", got.Reference, "node:20")
+	}
+	if got.SizeMB != 200 {
+		t.Errorf("SizeMB = %d, want 200", got.SizeMB)
+	}
+
+	// The old reference should no longer match via GetByRef.
+	_, ok = m.GetByRef("node:18")
+	if ok {
+		t.Error("expected GetByRef for old reference to return false after overwrite")
+	}
+
+	// The new reference should match.
+	got2, ok := m.GetByRef("node:20")
+	if !ok {
+		t.Fatal("expected GetByRef for new reference to succeed")
+	}
+	if got2.ID != "overwrite-id" {
+		t.Errorf("ID = %q, want %q", got2.ID, "overwrite-id")
+	}
+}
+
 func TestManager_RootfsPath_NotFound(t *testing.T) {
 	m := newTestManager(t)
 	_, err := m.RootfsPath(nil, "nonexistent")

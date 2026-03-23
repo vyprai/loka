@@ -6,9 +6,11 @@ import (
 	"os"
 	"testing"
 
+	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/objstore/local"
 	"github.com/vyprai/loka/internal/store"
 	"github.com/vyprai/loka/internal/store/sqlite"
 )
@@ -1476,4 +1478,162 @@ func TestIdleToTerminate(t *testing.T) {
 		t.Errorf("Status = %q, want %q", got.Status, loka.SessionStatusTerminated)
 	}
 	te.drainWorkerCommands(t)
+}
+
+// ─── Readiness and provisioning tests ────────────────────────────
+
+func TestMarkReady(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s, err := te.manager.Create(ctx, CreateOpts{Name: "mark-ready"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	// MarkReady should not return an error.
+	err = te.manager.MarkReady(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("MarkReady: %v", err)
+	}
+
+	// After MarkReady, the session status should be running in the DB.
+	got, err := te.manager.Get(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != loka.SessionStatusRunning {
+		t.Errorf("Status = %q, want %q", got.Status, loka.SessionStatusRunning)
+	}
+}
+
+func TestUpdateStatusMessage(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s, err := te.manager.Create(ctx, CreateOpts{Name: "status-msg"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	// UpdateStatusMessage should not return an error.
+	err = te.manager.UpdateStatusMessage(ctx, s.ID, "pulling image layer 3/5")
+	if err != nil {
+		t.Fatalf("UpdateStatusMessage: %v", err)
+	}
+
+	// Verify the session still exists and is in a valid state.
+	got, err := te.manager.Get(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.ID != s.ID {
+		t.Errorf("ID = %q, want %q", got.ID, s.ID)
+	}
+}
+
+func TestWaitForReady_ErrorSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "error-session"})
+
+	// Manually set the session to error status via the store.
+	got, _ := te.manager.Get(ctx, s.ID)
+	got.Status = loka.SessionStatusError
+	te.store.Sessions().Update(ctx, got)
+
+	_, err := te.manager.WaitForReady(ctx, s.ID)
+	if err == nil {
+		t.Fatal("expected error from WaitForReady on error session")
+	}
+}
+
+func TestProvisioningSession_NoImageManager(t *testing.T) {
+	// setupTestManager creates a manager with nil image manager.
+	// A session with an image ref should go straight to running when
+	// image manager is nil (no provisioning needed).
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s, err := te.manager.Create(ctx, CreateOpts{
+		Name:     "no-imgmgr",
+		ImageRef: "ubuntu:22.04",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	if s.Status != loka.SessionStatusRunning {
+		t.Errorf("Status = %q, want %q (should skip provisioning with nil image manager)",
+			s.Status, loka.SessionStatusRunning)
+	}
+	if !s.Ready {
+		t.Error("expected Ready=true with nil image manager")
+	}
+}
+
+func TestProvisioningSession_WithImageManager(t *testing.T) {
+	// Create a manager with image manager that has a pre-registered image.
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	st, err := sqlite.New(":memory:")
+	if err != nil {
+		t.Fatalf("create sqlite store: %v", err)
+	}
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	reg := worker.NewRegistry(st, logger)
+	_, err = reg.Register(ctx,
+		"test-host", "127.0.0.1", "local", "us-east-1", "us-east-1a", "1.0.0",
+		loka.ResourceCapacity{CPUCores: 4, MemoryMB: 8192, DiskMB: 50000},
+		map[string]string{"env": "test"}, true,
+	)
+	if err != nil {
+		t.Fatalf("register worker: %v", err)
+	}
+
+	sched := scheduler.New(reg, scheduler.StrategySpread)
+
+	// Create a real image manager and register an image.
+	tmpDir := t.TempDir()
+	objStore, err := local.New(tmpDir)
+	if err != nil {
+		t.Fatalf("create local objstore: %v", err)
+	}
+	imgMgr := image.NewManager(objStore, tmpDir, logger)
+	imgMgr.Register(&loka.Image{
+		ID:        "ubuntu-img-id",
+		Reference: "ubuntu:22.04",
+		Status:    loka.ImageStatusReady,
+	})
+
+	mgr := NewManager(st, reg, sched, imgMgr, logger)
+
+	s, err := mgr.Create(ctx, CreateOpts{
+		Name:     "with-imgmgr",
+		ImageRef: "ubuntu:22.04",
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// With a registered (ready) image, session should go straight to running.
+	if s.Status != loka.SessionStatusRunning {
+		t.Errorf("Status = %q, want %q (image was pre-cached)",
+			s.Status, loka.SessionStatusRunning)
+	}
+	if !s.Ready {
+		t.Error("expected Ready=true when image is pre-cached")
+	}
+	if s.ImageID != "ubuntu-img-id" {
+		t.Errorf("ImageID = %q, want %q", s.ImageID, "ubuntu-img-id")
+	}
 }

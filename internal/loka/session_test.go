@@ -174,6 +174,65 @@ func TestCanTransitionTo_UnknownStatus(t *testing.T) {
 	}
 }
 
+// TestProvisioningTransitions tests transitions involving the provisioning status.
+func TestProvisioningTransitions(t *testing.T) {
+	tests := []struct {
+		from   SessionStatus
+		to     SessionStatus
+		expect bool
+	}{
+		// creating → provisioning (valid)
+		{SessionStatusCreating, SessionStatusProvisioning, true},
+		// provisioning → running (valid)
+		{SessionStatusProvisioning, SessionStatusRunning, true},
+		// provisioning → error (valid)
+		{SessionStatusProvisioning, SessionStatusError, true},
+		// provisioning → paused (invalid)
+		{SessionStatusProvisioning, SessionStatusPaused, false},
+		// provisioning → idle (invalid)
+		{SessionStatusProvisioning, SessionStatusIdle, false},
+		// provisioning → terminated (invalid)
+		{SessionStatusProvisioning, SessionStatusTerminated, false},
+	}
+
+	for _, tt := range tests {
+		name := fmt.Sprintf("%s->%s", tt.from, tt.to)
+		t.Run(name, func(t *testing.T) {
+			s := &Session{Status: tt.from}
+			got := s.CanTransitionTo(tt.to)
+			if got != tt.expect {
+				t.Errorf("Session(%s).CanTransitionTo(%s) = %v, want %v", tt.from, tt.to, got, tt.expect)
+			}
+		})
+	}
+}
+
+// TestProvisioningInTransitionMap ensures provisioning is present in the
+// ValidSessionTransitions map with the correct outbound transitions.
+func TestProvisioningInTransitionMap(t *testing.T) {
+	targets, ok := ValidSessionTransitions[SessionStatusProvisioning]
+	if !ok {
+		t.Fatal("SessionStatusProvisioning is missing from ValidSessionTransitions map")
+	}
+	if len(targets) == 0 {
+		t.Fatal("SessionStatusProvisioning has no valid transitions")
+	}
+
+	expected := map[SessionStatus]bool{
+		SessionStatusRunning: true,
+		SessionStatusError:   true,
+	}
+	for _, target := range targets {
+		if !expected[target] {
+			t.Errorf("unexpected transition from provisioning to %s", target)
+		}
+		delete(expected, target)
+	}
+	for remaining := range expected {
+		t.Errorf("missing transition from provisioning to %s", remaining)
+	}
+}
+
 // TestCanTransitionTo_SelfTransition ensures no status can transition to itself.
 func TestCanTransitionTo_SelfTransition(t *testing.T) {
 	allStatuses := []SessionStatus{

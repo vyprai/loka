@@ -1071,13 +1071,118 @@ func TestRESTSessionWithMounts(t *testing.T) {
 	}
 
 	// Verify session can be fetched after creation.
-	getRec := ts.doRequest(t, http.MethodGet, "/api/v1/sessions/"+sess.ID, nil, nil)
-	if getRec.Code != http.StatusOK {
-		t.Fatalf("get: expected 200, got %d", getRec.Code)
+	getMountRec := ts.doRequest(t, http.MethodGet, "/api/v1/sessions/"+sess.ID, nil, nil)
+	if getMountRec.Code != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d", getMountRec.Code)
 	}
 	var fetched loka.Session
-	decodeBody(t, getRec, &fetched)
+	decodeBody(t, getMountRec, &fetched)
 	if fetched.ID != sess.ID {
 		t.Errorf("fetched session ID = %q, want %q", fetched.ID, sess.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Provisioning and readiness
+// ---------------------------------------------------------------------------
+
+func TestRESTCreateSession_WithWait(t *testing.T) {
+	ts := setupTestServer(t)
+	ts.registerTestWorker(t)
+
+	// With pre-registered images (setupTestServer registers alpine, ubuntu, python),
+	// the session goes straight to running+ready.
+	payload := map[string]any{
+		"name":  "wait-session",
+		"image": "alpine:latest",
+	}
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions?wait=true", payload, nil)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var sess loka.Session
+	decodeBody(t, rec, &sess)
+	if !sess.Ready {
+		t.Error("expected Ready=true in response when using ?wait=true")
+	}
+	if sess.Status != loka.SessionStatusRunning {
+		t.Errorf("expected status running, got %q", sess.Status)
+	}
+}
+
+func TestRESTCreateSession_StatusMessage(t *testing.T) {
+	ts := setupTestServer(t)
+	ts.registerTestWorker(t)
+
+	payload := map[string]any{
+		"name":  "status-msg-session",
+		"image": "alpine:latest",
+	}
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions", payload, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Decode into the Session struct to verify StatusMessage is a valid field.
+	// For a pre-cached image the session goes to running immediately, so
+	// StatusMessage should be empty (not an error message).
+	var sess loka.Session
+	decodeBody(t, rec, &sess)
+
+	// A running, ready session should have an empty status message.
+	if sess.StatusMessage != "" {
+		t.Errorf("expected empty StatusMessage for ready session, got %q", sess.StatusMessage)
+	}
+	if sess.Status != loka.SessionStatusRunning {
+		t.Errorf("expected status running, got %q", sess.Status)
+	}
+}
+
+func TestRESTIdleSession_ThenExecAutoWakes(t *testing.T) {
+	ts := setupTestServer(t)
+	ts.registerTestWorker(t)
+
+	// Step 1: Create a session in execute mode.
+	createRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions",
+		map[string]any{"name": "idle-exec-wake", "image": "alpine:latest", "mode": "execute"}, nil)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created loka.Session
+	decodeBody(t, createRec, &created)
+	if created.Status != loka.SessionStatusRunning {
+		t.Fatalf("after create: expected running, got %q", created.Status)
+	}
+
+	// Step 2: Idle the session.
+	idleRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+created.ID+"/idle", nil, nil)
+	if idleRec.Code != http.StatusOK {
+		t.Fatalf("idle: expected 200, got %d: %s", idleRec.Code, idleRec.Body.String())
+	}
+	var idled loka.Session
+	decodeBody(t, idleRec, &idled)
+	if idled.Status != loka.SessionStatusIdle {
+		t.Fatalf("after idle: expected idle, got %q", idled.Status)
+	}
+
+	// Step 3: Exec on the idle session — should auto-wake.
+	execRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+created.ID+"/exec",
+		map[string]any{"command": "echo", "args": []string{"wake-up"}}, nil)
+	if execRec.Code != http.StatusCreated {
+		t.Fatalf("exec on idle: expected 201, got %d: %s", execRec.Code, execRec.Body.String())
+	}
+	var exec loka.Execution
+	decodeBody(t, execRec, &exec)
+	if exec.SessionID != created.ID {
+		t.Errorf("exec session_id = %q, want %q", exec.SessionID, created.ID)
+	}
+
+	// Step 4: Verify the session is running again.
+	getRec := ts.doRequest(t, http.MethodGet, "/api/v1/sessions/"+created.ID, nil, nil)
+	var afterWake loka.Session
+	decodeBody(t, getRec, &afterWake)
+	if afterWake.Status != loka.SessionStatusRunning {
+		t.Errorf("after auto-wake: expected running, got %q", afterWake.Status)
 	}
 }
