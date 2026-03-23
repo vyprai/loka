@@ -144,6 +144,7 @@ func main() {
 	rootCmd.AddCommand(
 		newVersionCmd(),
 		newListCmd(),
+		newCurrentCmd(),
 		newConnectCmd(),
 		newDeployCmd(),
 		newUseCmd(),

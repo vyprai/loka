@@ -6,6 +6,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func newCurrentCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "current",
+		Short: "Show the active server",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, _ := loadDeployments()
+			d := store.GetActive()
+			if d == nil {
+				fmt.Println("No active server. Deploy one: loka deploy local")
+				return nil
+			}
+			fmt.Printf("Name:     %s\n", d.Name)
+			fmt.Printf("Provider: %s\n", d.Provider)
+			fmt.Printf("Endpoint: %s\n", d.Endpoint)
+			fmt.Printf("Workers:  %d\n", d.Workers)
+			fmt.Printf("Status:   %s\n", d.Status)
+			return nil
+		},
+	}
+}
+
 func newUseCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "use <server>",
