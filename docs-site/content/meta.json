@@ -25,6 +25,7 @@
     "sandbox",
     "---Deploy---",
     "deploy-local",
+    "deploy-vm",
     "deploy-aws",
     "deploy-gcp",
     "deploy-self-managed",

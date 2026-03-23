@@ -32,6 +32,7 @@ func newDeployCmd() *cobra.Command {
 		newDeployCloudCmd("azure", "Deploy to Azure", deployAzure),
 		newDeployCloudCmd("digitalocean", "Deploy to DigitalOcean", deployDigitalOcean),
 		newDeployCloudCmd("ovh", "Deploy to OVH", deployOVH),
+		newDeployVMCmd(),
 		newDeployLocalCmd(),
 		newDeployListCmd(),
 		newDeployUseCmd(),
