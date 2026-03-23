@@ -91,11 +91,13 @@ func newSessionCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&allowedCommands, "allowed-commands", "", "Comma-separated allowlist of commands")
 	cmd.Flags().StringVar(&blockedCommands, "blocked-commands", "", "Comma-separated blocklist of commands")
 	cmd.Flags().StringArrayVar(&mounts, "mount", nil, `Mount object storage (repeatable). Format: provider://bucket/prefix@/mount/path[:ro]
+  Credentials and options are passed as query params.
   Examples:
-    --mount s3://my-bucket@/data
-    --mount s3://my-bucket/datasets@/data:ro
-    --mount gcs://my-bucket@/gcs-data
-    --mount s3://my-bucket@/data?endpoint=http://minio:9000`)
+    --mount s3://my-bucket@/data?access_key_id=AKIA...&secret_access_key=...
+    --mount s3://my-bucket/datasets@/data:ro?region=us-east-1
+    --mount gcs://my-bucket@/gcs-data?service_account_json=@/path/to/key.json
+    --mount azure-blob://container@/az?account_name=...&account_key=...
+    --mount s3://my-bucket@/data?endpoint=http://minio:9000&access_key_id=minioadmin&secret_access_key=minioadmin`)
 	return cmd
 }
 
@@ -141,7 +143,8 @@ func parseMount(s string) (lokaapi.StorageMount, error) {
 	}
 	mount.MountPath = mountPath
 
-	// Parse query params.
+	// Parse query params — known keys go to typed fields, rest go to credentials.
+	creds := map[string]string{}
 	for _, kv := range strings.Split(query, "&") {
 		if kv == "" {
 			continue
@@ -152,7 +155,24 @@ func parseMount(s string) (lokaapi.StorageMount, error) {
 			mount.Endpoint = v
 		case "region":
 			mount.Region = v
+		case "access_key_id", "secret_access_key", "session_token",
+			"service_account_json",
+			"account_name", "account_key", "sas_token":
+			// If value starts with @, read from file.
+			if strings.HasPrefix(v, "@") {
+				data, err := os.ReadFile(strings.TrimPrefix(v, "@"))
+				if err != nil {
+					return mount, fmt.Errorf("read credential file %s: %w", v, err)
+				}
+				v = strings.TrimSpace(string(data))
+			}
+			creds[k] = v
+		default:
+			creds[k] = v
 		}
+	}
+	if len(creds) > 0 {
+		mount.Credentials = creds
 	}
 
 	return mount, nil
