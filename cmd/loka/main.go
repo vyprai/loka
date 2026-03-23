@@ -16,7 +16,21 @@ var (
 )
 
 func newClient() *lokaapi.Client {
-	return lokaapi.NewClient(serverAddr, token)
+	addr := serverAddr
+	tok := token
+	// If --server wasn't explicitly set, use the active deployment.
+	if addr == "http://localhost:8080" {
+		store, err := loadDeployments()
+		if err == nil {
+			if d := store.GetActive(); d != nil {
+				addr = d.Endpoint
+				if tok == "" && d.Token != "" {
+					tok = d.Token
+				}
+			}
+		}
+	}
+	return lokaapi.NewClient(addr, tok)
 }
 
 func main() {
@@ -32,6 +46,7 @@ func main() {
 
 	rootCmd.AddCommand(
 		newVersionCmd(),
+		newConnectCmd(),
 		newDeployCmd(),
 		newUseCmd(),
 		newSessionCmd(),
