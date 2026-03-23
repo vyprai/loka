@@ -1,6 +1,6 @@
 {
   "name": "@vypr-ai/loka-sdk",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "LOKA TypeScript SDK — Session-based microVM execution for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
