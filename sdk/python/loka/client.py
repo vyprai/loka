@@ -47,11 +47,12 @@ class LokaClient:
             name: Session name.
             image: Docker image reference (e.g., "python:3.12-slim").
             snapshot_id: Optional snapshot ID to restore from.
-            mode: Execution mode (inspect, plan, execute, commit, ask).
+            mode: Execution mode (explore, execute, ask).
             vcpus: Number of vCPUs.
             memory_mb: Memory in MB.
             allowed_commands: Command whitelist.
             blocked_commands: Command blacklist.
+            mounts: List of storage mounts (dicts with provider, bucket, mount_path, etc.).
         """
         return self._as(Session, self._post("/api/v1/sessions", kwargs))
 

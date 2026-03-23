@@ -38,6 +38,7 @@ func newSessionCreateCmd() *cobra.Command {
 		memoryMB        int
 		allowedCommands string
 		blockedCommands string
+		mounts          []string
 	)
 
 	cmd := &cobra.Command{
@@ -58,6 +59,13 @@ func newSessionCreateCmd() *cobra.Command {
 			}
 			if blockedCommands != "" {
 				req.BlockedCommands = strings.Split(blockedCommands, ",")
+			}
+			for _, m := range mounts {
+				mount, err := parseMount(m)
+				if err != nil {
+					return err
+				}
+				req.Mounts = append(req.Mounts, mount)
 			}
 			sess, err := client.CreateSession(cmd.Context(), req)
 			if err != nil {
@@ -82,7 +90,72 @@ func newSessionCreateCmd() *cobra.Command {
 	cmd.Flags().IntVar(&memoryMB, "memory", 512, "Memory in MB")
 	cmd.Flags().StringVar(&allowedCommands, "allowed-commands", "", "Comma-separated allowlist of commands")
 	cmd.Flags().StringVar(&blockedCommands, "blocked-commands", "", "Comma-separated blocklist of commands")
+	cmd.Flags().StringArrayVar(&mounts, "mount", nil, `Mount object storage (repeatable). Format: provider://bucket/prefix@/mount/path[:ro]
+  Examples:
+    --mount s3://my-bucket@/data
+    --mount s3://my-bucket/datasets@/data:ro
+    --mount gcs://my-bucket@/gcs-data
+    --mount s3://my-bucket@/data?endpoint=http://minio:9000`)
 	return cmd
+}
+
+// parseMount parses a mount string like "s3://bucket/prefix@/mount/path:ro?endpoint=..."
+func parseMount(s string) (lokaapi.StorageMount, error) {
+	mount := lokaapi.StorageMount{}
+
+	// Split off query params.
+	query := ""
+	if idx := strings.Index(s, "?"); idx != -1 {
+		query = s[idx+1:]
+		s = s[:idx]
+	}
+
+	// Split provider://bucket/prefix@/mount/path[:ro]
+	parts := strings.SplitN(s, "://", 2)
+	if len(parts) != 2 {
+		return mount, fmt.Errorf("invalid mount format: %s (expected provider://bucket@/path)", s)
+	}
+	mount.Provider = parts[0]
+
+	rest := parts[1]
+	atParts := strings.SplitN(rest, "@", 2)
+	if len(atParts) != 2 {
+		return mount, fmt.Errorf("invalid mount format: %s (missing @/mount/path)", s)
+	}
+
+	bucketPrefix := atParts[0]
+	mountPath := atParts[1]
+
+	// Split bucket and prefix.
+	if idx := strings.Index(bucketPrefix, "/"); idx != -1 {
+		mount.Bucket = bucketPrefix[:idx]
+		mount.Prefix = bucketPrefix[idx+1:]
+	} else {
+		mount.Bucket = bucketPrefix
+	}
+
+	// Check for :ro suffix.
+	if strings.HasSuffix(mountPath, ":ro") {
+		mount.ReadOnly = true
+		mountPath = strings.TrimSuffix(mountPath, ":ro")
+	}
+	mount.MountPath = mountPath
+
+	// Parse query params.
+	for _, kv := range strings.Split(query, "&") {
+		if kv == "" {
+			continue
+		}
+		k, v, _ := strings.Cut(kv, "=")
+		switch k {
+		case "endpoint":
+			mount.Endpoint = v
+		case "region":
+			mount.Region = v
+		}
+	}
+
+	return mount, nil
 }
 
 func newSessionListCmd() *cobra.Command {

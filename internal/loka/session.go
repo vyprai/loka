@@ -27,7 +27,8 @@ type Session struct {
 	VCPUs      int
 	MemoryMB   int
 	Labels     map[string]string
-	ExecPolicy ExecPolicy `json:"ExecPolicy"` // Command/package restrictions.
+	Mounts     []StorageMount `json:"Mounts,omitempty"` // Object storage mounts.
+	ExecPolicy ExecPolicy     `json:"ExecPolicy"`       // Command/package restrictions.
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 }

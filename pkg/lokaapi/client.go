@@ -128,16 +128,30 @@ type Session struct {
 	UpdatedAt time.Time         `json:"UpdatedAt"`
 }
 
+// StorageMount defines an object storage bucket to mount into a session.
+type StorageMount struct {
+	Name        string            `json:"name,omitempty"`
+	Provider    string            `json:"provider"`              // "s3", "gcs", "azure-blob", "local"
+	Bucket      string            `json:"bucket"`
+	Prefix      string            `json:"prefix,omitempty"`
+	MountPath   string            `json:"mount_path"`
+	ReadOnly    bool              `json:"read_only,omitempty"`
+	Region      string            `json:"region,omitempty"`
+	Endpoint    string            `json:"endpoint,omitempty"`    // For S3-compatible (MinIO, R2)
+	Credentials map[string]string `json:"credentials,omitempty"` // access_key_id, secret_access_key, etc.
+}
+
 type CreateSessionReq struct {
 	Name            string            `json:"name"`
-	Image           string            `json:"image,omitempty"`       // Docker image: "ubuntu:22.04"
-	SnapshotID      string            `json:"snapshot_id,omitempty"` // Restore from snapshot.
+	Image           string            `json:"image,omitempty"`
+	SnapshotID      string            `json:"snapshot_id,omitempty"`
 	Mode            string            `json:"mode,omitempty"`
 	VCPUs           int               `json:"vcpus,omitempty"`
 	MemoryMB        int               `json:"memory_mb,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	AllowedCommands []string          `json:"allowed_commands,omitempty"`
 	BlockedCommands []string          `json:"blocked_commands,omitempty"`
+	Mounts          []StorageMount    `json:"mounts,omitempty"`
 }
 
 func (c *Client) CreateSession(ctx context.Context, req CreateSessionReq) (*Session, error) {

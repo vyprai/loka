@@ -25,8 +25,9 @@ type CreateOpts struct {
 	VCPUs        int
 	MemoryMB     int
 	Labels       map[string]string
-	WorkerLabels map[string]string // Scheduling affinity labels.
-	ExecPolicy   *loka.ExecPolicy  // Command restrictions. Nil = default policy.
+	WorkerLabels map[string]string    // Scheduling affinity labels.
+	ExecPolicy   *loka.ExecPolicy     // Command restrictions. Nil = default policy.
+	Mounts       []loka.StorageMount  // Object storage mounts.
 }
 
 // Manager orchestrates session lifecycle.
@@ -75,6 +76,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 		VCPUs:      opts.VCPUs,
 		MemoryMB:   opts.MemoryMB,
 		Labels:     opts.Labels,
+		Mounts:     opts.Mounts,
 		ExecPolicy: execPolicy,
 		CreatedAt:  now,
 		UpdatedAt:  now,

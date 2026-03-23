@@ -22,6 +22,7 @@ type createSessionReq struct {
 	BlockedCommands []string              `json:"blocked_commands,omitempty"`
 	NetworkPolicy   *loka.NetworkPolicy   `json:"network_policy,omitempty"`
 	ExecPolicy      *loka.ExecPolicy      `json:"exec_policy,omitempty"`
+	Mounts          []loka.StorageMount   `json:"mounts,omitempty"`
 }
 
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +58,7 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		MemoryMB:   req.MemoryMB,
 		Labels:     req.Labels,
 		ExecPolicy: execPolicy,
+		Mounts:     req.Mounts,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
