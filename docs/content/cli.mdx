@@ -122,6 +122,17 @@ loka session expose <id> my-app --port 5000   # Expose via subdomain
 loka session unexpose <id> my-app             # Remove subdomain
 ```
 
+## Artifacts
+
+```bash
+loka session artifacts <id>                              # List changed files
+loka session artifacts <id> --checkpoint <cpId>          # For a checkpoint
+loka session download <id> /workspace/output.csv         # Download single file
+loka session download <id> /workspace/output.csv ./out.csv
+loka session download <id> --all ./output/               # Download all as tar
+loka session download <id> --all ./output/ --checkpoint <cpId>
+```
+
 ## Commands
 
 ```bash

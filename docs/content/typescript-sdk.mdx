@@ -91,6 +91,19 @@ await loka.restoreCheckpoint(session.id, cp.id);
 await loka.deleteCheckpoint(cp.id);
 ```
 
+## Artifacts
+
+```typescript
+// List changed files in a session
+const artifacts = await loka.listArtifacts(session.id);
+
+// List artifacts for a specific checkpoint
+const artifacts = await loka.listArtifacts(session.id, { checkpoint: cp.id });
+
+// Download a single file (returns Buffer)
+const data = await loka.downloadArtifact(session.id, '/workspace/output.csv');
+```
+
 ## Approval flow
 
 When a session runs in `ask` mode or a command hits the `needs_approval` verdict:

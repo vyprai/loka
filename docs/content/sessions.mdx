@@ -185,6 +185,51 @@ loka session unexpose <id> my-app
 loka domains
 ```
 
+## Artifacts
+
+Artifacts are files that have changed relative to the base image. They let you retrieve outputs (generated files, logs, trained models, etc.) from a session without needing a storage mount.
+
+When a checkpoint is created, its artifact list is frozen at that point in time. You can list or download artifacts for the current session state or for any checkpoint.
+
+
+
+```python
+# List changed files
+artifacts = client.list_artifacts(session.id)
+
+# List artifacts for a specific checkpoint
+artifacts = client.list_artifacts(session.id, checkpoint=cp.id)
+
+# Download a single file
+data = client.download_artifact(session.id, "/workspace/output.csv")
+
+# Download all artifacts as a tar archive
+client.download_artifacts(session.id, "./output/")
+```
+
+
+```typescript
+// List changed files
+const artifacts = await loka.listArtifacts(session.id);
+
+// List artifacts for a specific checkpoint
+const artifacts = await loka.listArtifacts(session.id, { checkpoint: cp.id });
+
+// Download a single file
+const data = await loka.downloadArtifact(session.id, '/workspace/output.csv');
+```
+
+
+
+CLI equivalent:
+
+```bash
+loka session artifacts <id>
+loka session artifacts <id> --checkpoint <cpId>
+loka session download <id> /workspace/output.csv
+loka session download <id> --all ./output/
+```
+
 ## Execution modes
 
 Each session runs in a mode that controls what commands can do.

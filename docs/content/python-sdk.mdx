@@ -91,6 +91,22 @@ client.restore_checkpoint(session.id, cp.id)
 client.delete_checkpoint(cp.id)
 ```
 
+## Artifacts
+
+```python
+# List changed files in a session
+artifacts = client.list_artifacts(session.id)
+
+# List artifacts for a specific checkpoint
+artifacts = client.list_artifacts(session.id, checkpoint=cp.id)
+
+# Download a single file (returns bytes)
+data = client.download_artifact(session.id, "/workspace/output.csv")
+
+# Download all artifacts to a local directory
+client.download_artifacts(session.id, "./output/")
+```
+
 ## Approval flow
 
 When a session runs in `ask` mode or a command hits the `needs_approval` verdict:

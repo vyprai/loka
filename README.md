@@ -18,7 +18,10 @@ Works on Linux (native) and macOS (auto-creates a Lima VM with KVM). TLS is enab
 loka deploy local                              # Start the server
 loka image pull python:3.12-slim               # Pull a Docker image
 loka session create --image python:3.12-slim   # Create a session
-loka exec <session-id> -- python3 -c "print('hello from LOKA')"
+loka exec <id> -- python3 -c "print('hello from LOKA')"
+loka shell <id>                                # Interactive shell
+loka session artifacts <id>                    # See what files changed
+loka session download <id> /workspace/out.csv  # Download a result
 loka deploy down                               # Stop
 ```
 
@@ -36,6 +39,11 @@ client = LokaClient()
 session = client.create_session(image="python:3.12-slim", mode="execute")
 result = client.run_and_wait(session.ID, "python3", ["-c", "print(42)"])
 print(result.Results[0].Stdout)
+
+# Get artifacts — files the agent created
+artifacts = client.list_artifacts(session.ID)
+data = client.download_artifact(session.ID, "/workspace/output.csv")
+
 client.destroy_session(session.ID)
 ```
 
@@ -61,10 +69,41 @@ loka deploy apply cluster.yml
 # Manage
 loka list                                      # List servers
 loka use prod                                  # Switch active server
+loka current                                   # Show active server
 loka worker add 10.0.0.5                       # Add a worker
 loka worker remove 10.0.0.5                    # Remove a worker
 loka worker scale 5                            # Scale (cloud providers)
 loka deploy export prod > prod.yml             # Export as YAML
+```
+
+## Sessions
+
+```python
+session = client.create_session(image="python:3.12-slim")  # Blocks until ready
+
+# Interactive shell
+# loka shell <id>
+
+# Port forwarding
+session = client.create_session(
+    image="python:3.12-slim",
+    ports=[{"local_port": 8080, "remote_port": 5000}]
+)
+
+# Storage mounts
+from loka import StorageMount
+session = client.create_session(
+    image="python:3.12-slim",
+    mounts=[StorageMount.s3("my-bucket", "/data", access_key_id="...", secret_access_key="...")]
+)
+
+# Idle / auto-wake
+client.idle_session(session.ID)                # Suspend to save resources
+client.run(session.ID, "python3", ["script.py"])  # Auto-wakes
+
+# Domain exposure
+client.expose_session(session.ID, "my-app", 5000)
+# Access at: https://my-app.loka.example.com
 ```
 
 ## Access control
@@ -86,39 +125,6 @@ ex = client.run(session.ID, "wget", ["http://example.com/data.csv"])
 client.approve_execution(session.ID, ex.ID, scope="command")
 ```
 
-Three approval scopes: `once`, `command` (this binary for the session), `always` (persist to whitelist).
-
-**Network** access is per-session with rules for IP, CIDR, domain, and port:
-
-```python
-session = client.create_session(
-    image="python:3.12-slim",
-    exec_policy={
-        "network_policy": {
-            "outbound": {
-                "default_action": "deny",
-                "rules": [
-                    {"action": "allow", "target": "*.pypi.org", "ports": "443"},
-                    {"action": "allow", "target": "any", "ports": "53", "protocol": "udp"},
-                ]
-            }
-        }
-    }
-)
-```
-
-**Filesystem** access is path-level:
-
-```python
-"filesystem_policy": {
-    "default_action": "deny",
-    "rules": [
-        {"action": "allow", "path": "/workspace/**"},
-        {"action": "deny",  "path": "/workspace/.env"},
-    ]
-}
-```
-
 **Modes** control the overall posture:
 
 | Mode | Filesystem | Network | Approval |
@@ -127,7 +133,7 @@ session = client.create_session(
 | `execute` | Read/write | Allowed | No |
 | `ask` | Read/write | Allowed | Every command |
 
-## Checkpoints
+## Checkpoints & Artifacts
 
 Capture filesystem diffs. Checkpoints form a DAG — branch execution and roll back to any prior state.
 
@@ -136,15 +142,14 @@ cp = client.create_checkpoint(session.ID, label="before-experiment")
 client.run_and_wait(session.ID, "pip", ["install", "some-package"])
 # Something went wrong...
 client.restore_checkpoint(session.ID, cp.ID)
-```
 
-## Images
+# See what changed
+artifacts = client.list_artifacts(session.ID)
+artifacts = client.list_artifacts(session.ID, checkpoint_id=cp.ID)
 
-Sessions start from Docker images. LOKA pulls, converts to a Firecracker rootfs, and creates a warm snapshot. Subsequent sessions restore in ~28ms.
-
-```python
-client.pull_image("python:3.12-slim")
-session = client.create_session(image="python:3.12-slim")  # ~28ms
+# Download results
+data = client.download_artifact(session.ID, "/workspace/output.csv")
+client.download_artifacts(session.ID, "./output/")  # All as tar
 ```
 
 ## Architecture
