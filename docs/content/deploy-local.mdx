@@ -1,0 +1,52 @@
+---
+title: Deploy Locally
+description: Single machine setup
+---
+
+# Deploy Locally
+
+```bash
+loka deploy local --name dev
+```
+
+This starts `lokad` in the background with an embedded worker, SQLite, and local storage. It uses `role: all` (the default), which runs the control plane and an embedded worker together in one process.
+
+## Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | `local` | Deployment name |
+| `-f, --foreground` | `false` | Run in foreground (attached to terminal) |
+
+## What it creates
+
+| Component | Details |
+|-----------|---------|
+| Control plane (REST) | `http://localhost:6840` |
+| Control plane (gRPC) | `localhost:6841` (primary — used by CLI and SDKs) |
+| Database | SQLite |
+| Workers | 1 (embedded) |
+
+You can also use `deploy apply` with `provider: local` as an equivalent:
+
+```yaml
+name: dev
+provider: local
+```
+
+```bash
+loka deploy apply dev.yml
+```
+
+## Stop
+
+```bash
+loka deploy down        # Stop the active server
+loka deploy down dev    # Stop a specific server
+```
+
+## Destroy
+
+```bash
+loka deploy destroy dev
+```

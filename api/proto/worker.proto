@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package loka.api.v1;
 
-option go_package = "github.com/lokahq/loka/api/proto/gen/lokav1";
+option go_package = "github.com/rizqme/loka/api/lokav1";
 
 import "types.proto";
 import "google/protobuf/empty.proto";

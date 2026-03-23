@@ -1,0 +1,409 @@
+---
+title: Self-Managed Workers
+description: Set up LOKA on your own infrastructure
+---
+
+# Self-Managed Setup
+
+Run LOKA on your own servers — bare metal, VMs, or any Linux machine with KVM support.
+
+## What You'll Set Up
+
+| Machine | Role | Runs |
+|---------|------|------|
+| Server A | Control plane | `lokad` — manages sessions, scheduling, API |
+| Server B, C, ... | Workers | `loka-worker` — runs Firecracker microVMs |
+| Your laptop | CLI | `loka` — interact with the cluster |
+
+Workers authenticate with the control plane using a **registration token**. You create a token on the control plane, then paste it into each worker's config.
+
+---
+
+## Step 1: Install LOKA on all machines
+
+On every machine (control plane + workers), run:
+
+```bash
+curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+```
+
+This installs `lokad`, `loka-worker`, `loka-supervisor`, and the `loka` CLI.
+
+---
+
+## Step 2: Start the control plane
+
+Pick one machine to be your control plane. SSH into it.
+
+### Create the config
+
+```bash
+sudo mkdir -p /etc/loka /var/loka
+```
+
+```bash
+cat <<'EOF' | sudo tee /etc/loka/controlplane.yaml
+role: controlplane     # CP only — workers run separately via loka-worker
+
+listen_addr: ":6840"   # REST API (fallback)
+grpc_addr: ":6841"     # gRPC (primary — CLI, SDKs, workers)
+
+database:
+  driver: sqlite
+  dsn: "/var/loka/loka.db"
+
+objectstore:
+  type: local
+  path: "/var/loka/artifacts"
+EOF
+```
+
+For production, use PostgreSQL and S3 — see [HA Mode](/docs/ha-mode).
+
+### Start it
+
+```bash
+lokad --config /etc/loka/controlplane.yaml
+```
+
+You should see output like:
+
+```
+LOKA control plane listening on :6840 (API) and :6841 (gRPC)
+```
+
+### Verify
+
+From the same machine:
+
+```bash
+curl http://localhost:6840/api/v1/health
+```
+
+```json
+{"status":"healthy","workers_total":0,"workers_ready":0}
+```
+
+No workers yet — that's expected.
+
+---
+
+## Step 3: Create a registration token
+
+Still on the control plane machine, generate a token that workers will use to authenticate:
+
+```bash
+loka token create --name my-workers
+```
+
+```
+Token: loka_a2d9f8e1c3b7...
+```
+
+Copy this token. You'll paste it into each worker's config file in the next step.
+
+> One token can be shared across multiple workers, or you can create separate tokens per worker for finer control.
+
+---
+
+## Step 4: Set up workers
+
+SSH into each worker machine.
+
+### 4a. Verify KVM is available
+
+```bash
+ls -la /dev/kvm
+```
+
+```
+crw-rw---- 1 root kvm 10, 232 ... /dev/kvm
+```
+
+If `/dev/kvm` doesn't exist, enable hardware virtualization in your BIOS/hypervisor settings.
+
+### 4b. Create the worker config
+
+Replace `10.0.0.1` with your control plane's IP and paste the token from Step 3:
+
+```bash
+sudo mkdir -p /etc/loka
+```
+
+```bash
+cat <<'EOF' | sudo tee /etc/loka/worker.yaml
+control_plane:
+  address: "10.0.0.1:6841"      # <-- your control plane IP, port 6841
+  tls: false
+
+token: "loka_a2d9f8e1c3b7..."   # <-- token from Step 3
+
+labels:
+  region: "us-east"
+  gpu: "false"
+EOF
+```
+
+### 4c. Start the worker
+
+```bash
+loka-worker --config /etc/loka/worker.yaml
+```
+
+You should see:
+
+```
+Registered with control plane at 10.0.0.1:6841
+Worker wrk-abc123 ready
+```
+
+The worker is now connected. Repeat this step on each additional worker machine.
+
+---
+
+## Step 5: Connect from your laptop
+
+On your local machine (where you'll run `loka` commands), connect to the control plane:
+
+```bash
+loka connect http://10.0.0.1:6840 --name my-cluster
+```
+
+```
+Connecting to http://10.0.0.1:6840...
+  Status:  healthy
+  Workers: 1 ready / 1 total
+
+Connected. Server "my-cluster" is now active.
+```
+
+All `loka` commands now target this server.
+
+### Verify everything
+
+```bash
+loka status
+```
+
+```
+Control Plane:  healthy
+Server:         http://10.0.0.1:6840
+Workers:        1 ready / 1 total
+Sessions:       0 running, 0 paused, 0 terminated
+```
+
+```bash
+loka worker list
+```
+
+```
+ID            STATUS    SESSIONS    CPU     MEMORY    LABELS
+wrk-abc123    ready     0/20        0%      12%       region=us-east
+```
+
+---
+
+## Step 6: Use it
+
+```bash
+loka image pull python:3.12-slim
+loka session create --image python:3.12-slim
+loka exec <session-id> -- python3 -c "print('hello from LOKA')"
+```
+
+---
+
+## Adding more workers
+
+The quickest way to add a worker to the active server is:
+
+```bash
+loka worker add 10.0.0.5
+```
+
+This SSHes into the machine, installs LOKA, and registers the worker automatically. To drain and remove a worker:
+
+```bash
+loka worker remove 10.0.0.5
+```
+
+To see the current worker count and addresses:
+
+```bash
+loka worker scale
+```
+
+For **declarative management**, use `deploy apply` with a YAML file. Edit the `workers` list and re-apply — LOKA diffs the desired state against the live cluster and reconciles:
+
+```bash
+loka deploy apply cluster.yml
+```
+
+See [Deploy to VMs](/docs/deploy-vm) for the YAML schema.
+
+**Manual approach** — if you prefer full control over each machine:
+
+1. Install LOKA: `curl -fsSL https://rizqme.github.io/loka/install.sh | bash`
+2. Verify `/dev/kvm` exists
+3. Create `/etc/loka/worker.yaml` with your control plane address and the token from Step 3
+4. Start: `loka-worker --config /etc/loka/worker.yaml`
+
+The worker registers automatically. Check with `loka worker list`.
+
+---
+
+## Running as systemd services
+
+For production, run the control plane and workers as services so they survive reboots.
+
+### Control plane (`/etc/systemd/system/lokad.service`)
+
+```ini
+[Unit]
+Description=LOKA Control Plane
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/lokad --config /etc/loka/controlplane.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now lokad
+```
+
+### Worker (`/etc/systemd/system/loka-worker.service`)
+
+```ini
+[Unit]
+Description=LOKA Worker
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/loka-worker --config /etc/loka/worker.yaml
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now loka-worker
+```
+
+---
+
+## Enabling HTTPS (self-signed)
+
+By default LOKA runs over plain HTTP. To encrypt traffic between the CLI, workers, and the control plane, generate a self-signed certificate and configure TLS.
+
+### Generate certificates
+
+On the control plane machine:
+
+```bash
+sudo mkdir -p /etc/loka/tls
+```
+
+```bash
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -days 365 -nodes \
+  -keyout /etc/loka/tls/server.key \
+  -out /etc/loka/tls/server.crt \
+  -subj "/CN=loka" \
+  -addext "subjectAltName=IP:10.0.0.1,DNS:loka.local"
+```
+
+Replace `10.0.0.1` with your control plane's IP. Add more SANs if needed (e.g. `IP:10.0.0.2,DNS:cp.example.com`).
+
+### Update control plane config
+
+Add the `tls` section to `/etc/loka/controlplane.yaml`:
+
+```yaml
+listen:
+  api: ":6843"
+  grpc: ":6841"
+
+tls:
+  cert: "/etc/loka/tls/server.crt"
+  key: "/etc/loka/tls/server.key"
+
+database:
+  driver: sqlite
+  dsn: "/var/loka/loka.db"
+
+objectstore:
+  type: local
+  path: "/var/loka/artifacts"
+```
+
+Restart the control plane:
+
+```bash
+sudo systemctl restart lokad
+```
+
+### Verify
+
+```bash
+curl --cacert /etc/loka/tls/server.crt https://10.0.0.1:6843/api/v1/health
+```
+
+### Copy the certificate to workers
+
+Each worker needs the CA certificate to trust the control plane. Copy `server.crt` to every worker:
+
+```bash
+scp /etc/loka/tls/server.crt user@10.0.0.2:/etc/loka/tls/server.crt
+```
+
+### Update worker config
+
+On each worker, update `/etc/loka/worker.yaml`:
+
+```yaml
+control_plane:
+  address: "10.0.0.1:6841"
+  tls: true
+  ca_cert: "/etc/loka/tls/server.crt"   # <-- the cert you copied
+
+token: "loka_a2d9f8e1c3b7..."
+```
+
+Restart the worker:
+
+```bash
+sudo systemctl restart loka-worker
+```
+
+### Connect from your laptop
+
+Copy `server.crt` to your laptop and connect with HTTPS:
+
+```bash
+loka connect https://10.0.0.1:6843 --name my-cluster --ca-cert ./server.crt
+```
+
+Or skip verification (not recommended for production):
+
+```bash
+loka connect https://10.0.0.1:6843 --name my-cluster --insecure
+```
+
+---
+
+## Managing servers
+
+```bash
+loka list                  # List all servers (* = active)
+loka use staging           # Switch active server
+loka connect <url> --name prod --token loka_xyz   # Add another server
+```

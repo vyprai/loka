@@ -48,7 +48,7 @@ Examples:
 				sshUser = "root"
 			}
 			if cpPort == "" {
-				cpPort = "8080"
+				cpPort = "6840"
 			}
 
 			fmt.Printf("Deploying %q\n", name)
@@ -105,7 +105,7 @@ Examples:
 				// Write worker config and start.
 				workerConfig := fmt.Sprintf(`cat > /etc/loka/worker.yaml << 'WCFG'
 control_plane:
-  address: "%s:9090"
+  address: "%s:6841"
 data_dir: /var/loka/worker
 provider: selfmanaged
 token: "%s"
@@ -143,7 +143,7 @@ nohup loka-worker > /var/log/loka-worker.log 2>&1 &`, cp, workerToken, i+1)
 			store.Active = name
 			saveDeployments(store)
 
-			fmt.Printf("Deployment %q ready\n", name)
+			fmt.Printf("Server %q ready\n", name)
 			fmt.Printf("  Endpoint: %s\n", endpoint)
 			fmt.Printf("  Workers:  %d\n", len(workerHosts))
 			fmt.Println()
@@ -155,12 +155,12 @@ nohup loka-worker > /var/log/loka-worker.log 2>&1 &`, cp, workerToken, i+1)
 		},
 	}
 
-	cmd.Flags().StringVar(&name, "name", "", "Deployment name (default: vm)")
+	cmd.Flags().StringVar(&name, "name", "", "Server name (default: vm)")
 	cmd.Flags().StringVar(&cp, "cp", "", "Control plane VM address (required)")
 	cmd.Flags().StringArrayVar(&workers, "worker", nil, "Worker VM addresses (repeatable, default: same as CP)")
 	cmd.Flags().StringVar(&sshUser, "ssh-user", "root", "SSH username")
 	cmd.Flags().StringVar(&sshKey, "ssh-key", "", "SSH private key path")
-	cmd.Flags().StringVar(&cpPort, "port", "8080", "Control plane API port")
+	cmd.Flags().StringVar(&cpPort, "port", "6840", "Control plane API port")
 
 	return cmd
 }

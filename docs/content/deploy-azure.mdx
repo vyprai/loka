@@ -1,0 +1,108 @@
+---
+title: Deploy to Azure
+description: Azure VMs with nested virtualization
+---
+
+# Deploy to Azure
+
+## Credentials
+
+```bash
+# Option 1: Azure CLI (recommended)
+az login
+az account set --subscription <subscription-id>
+
+# Option 2: Service principal
+export AZURE_TENANT_ID=...
+export AZURE_CLIENT_ID=...
+export AZURE_CLIENT_SECRET=...
+export AZURE_SUBSCRIPTION_ID=...
+```
+
+## Deploy
+
+```bash
+loka deploy azure --name prod --region eastus --workers 3
+```
+
+## Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | `azure` | Server name |
+| `--region` | `eastus` | Azure region |
+| `--workers` | `1` | Number of worker VMs |
+| `--instance-type` | `Standard_D8s_v5` | VM size |
+| `--ssh-key` | | SSH public key path |
+
+Nested virtualization is supported on most Dv3, Ev3, Dv4, Ev4, Dv5, and Ev5 series VMs.
+
+## Scale
+
+```bash
+loka worker scale 5       # Scale to 5 workers
+loka worker scale 2       # Scale down to 2
+```
+
+## Declarative
+
+```yaml
+name: prod
+provider: azure
+region: eastus
+workers:
+  - instance_type: Standard_D8s_v5
+  - instance_type: Standard_D8s_v5
+  - instance_type: Standard_D8s_v5
+```
+
+```bash
+loka deploy apply prod.yml
+```
+
+## Manual setup
+
+### 1. Create VMs
+
+```bash
+az vm create --resource-group loka-rg --name loka-cp \
+  --image Ubuntu2204 --size Standard_D4s_v5 \
+  --admin-username ubuntu --ssh-key-value ~/.ssh/id_rsa.pub
+
+az vm create --resource-group loka-rg --name loka-worker-1 \
+  --image Ubuntu2204 --size Standard_D8s_v5 \
+  --admin-username ubuntu --ssh-key-value ~/.ssh/id_rsa.pub
+```
+
+### 2. Enable nested virtualization
+
+Azure Dv3/Ev3 and newer series support nested virtualization by default. Verify:
+
+```bash
+ssh ubuntu@<ip>
+ls /dev/kvm
+```
+
+### 3. Install and start
+
+```bash
+curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+
+# On CP:
+lokad --role controlplane
+
+# On workers:
+loka token create --name worker-1  # run on CP first
+cat > /etc/loka/worker.yaml << YAML
+control_plane:
+  address: "<cp-ip>:6841"
+token: "loka_..."
+YAML
+loka-worker
+```
+
+Or use SSH-based deployment:
+
+```bash
+loka deploy vm --name prod --cp <cp-ip> --worker <worker-ip> --ssh-user ubuntu
+```

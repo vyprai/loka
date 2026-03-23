@@ -15,7 +15,7 @@ export class LokaClient {
   private timeout: number;
 
   constructor(opts: LokaClientOpts = {}) {
-    this.baseUrl = (opts.baseUrl || 'http://localhost:8080').replace(/\/$/, '');
+    this.baseUrl = (opts.baseUrl || 'http://localhost:6840').replace(/\/$/, '');
     this.token = opts.token || '';
     this.timeout = opts.timeout || 30000;
   }

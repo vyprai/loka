@@ -1,0 +1,43 @@
+---
+title: Deploy to GCP
+description: Compute Engine with nested virtualization
+---
+
+# Deploy to GCP
+
+## Credentials
+
+```bash
+# Option 1: gcloud CLI (recommended)
+gcloud auth login
+gcloud config set project my-project-id
+
+# Option 2: Service account
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+```
+
+## Deploy
+
+```bash
+loka deploy gcp --name staging --project my-project --zone us-central1-a --workers 2
+```
+
+## Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | `gcp` | Deployment name |
+| `--project` | | GCP project ID (required) |
+| `--zone` | `us-central1-a` | Compute zone |
+| `--workers` | `1` | Number of worker VMs |
+| `--instance-type` | `n2-standard-8` | Machine type |
+
+Nested virtualization is enabled automatically. Requires Intel Haswell or newer CPU platform.
+
+## Manual setup
+
+When setting up manually, start `lokad` on the control plane node with `role: controlplane` so it runs as CP only — workers connect separately via `loka-worker`:
+
+```bash
+lokad --role controlplane
+```

@@ -1,0 +1,183 @@
+---
+title: Installation
+description: Install LOKA and the SDKs
+---
+
+# Installation
+
+## One-line install
+
+```bash
+curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+```
+
+On **Linux**: installs all binaries (`lokad`, `loka`, `loka-worker`, `loka-supervisor`), Firecracker, Linux kernel, default config, and data directories.
+
+On **macOS**: installs the `loka` CLI locally and sets up a [Lima](https://lima-vm.io) VM with KVM support. LOKA runs inside the VM with ports forwarded to localhost. Lima is installed automatically via Homebrew if not present.
+
+### Options
+
+```bash
+# Specific version
+LOKA_VERSION=v0.1.0 curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+
+# Custom install directory
+LOKA_INSTALL_DIR=/opt/loka/bin curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+
+# Custom data directory
+LOKA_DATA_DIR=/opt/loka/data curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+```
+
+## Verify
+
+```bash
+loka version
+```
+
+## Start
+
+```bash
+loka deploy local                              # Start the server
+loka image pull python:3.12-slim               # Pull an image
+loka session create --image python:3.12-slim   # Create a session
+loka exec <id> -- echo "it works"              # Run a command
+```
+
+## Install the SDKs
+
+
+
+```bash
+pip install loka-sdk
+```
+
+
+```bash
+npm install @rizqme/loka-sdk
+```
+
+
+---
+
+## Prerequisites
+
+| Platform | Requirement | Why |
+|----------|-------------|-----|
+| **Linux** | `/dev/kvm` | Firecracker requires KVM |
+| **Linux** | Docker | To pull base images (`loka image pull`) |
+| **macOS** | Homebrew | Used to install Lima (the installer handles this) |
+
+
+---
+
+## Alternative: Build from source
+
+```bash
+git clone https://github.com/rizqme/loka && cd loka
+make build              # Build all 4 binaries
+make fetch-firecracker  # Download Firecracker + kernel
+make build-rootfs       # Build guest rootfs with supervisor
+```
+
+### Binaries
+
+| Binary | What it does |
+|--------|-------------|
+| `lokad` | Control plane — API server, scheduler, session manager |
+| `loka-worker` | Worker agent — manages Firecracker VMs |
+| `loka-supervisor` | Runs inside VM as PID 1 — command proxy, sandbox |
+| `loka` | CLI client |
+
+## Alternative: Docker
+
+```bash
+docker build -f deploy/docker/Dockerfile.controlplane -t loka-cp .
+docker build -f deploy/docker/Dockerfile.worker -t loka-worker .
+```
+
+## Alternative: Systemd
+
+```bash
+sudo cp deploy/systemd/lokad.service /etc/systemd/system/
+sudo systemctl enable --now lokad
+```
+
+---
+
+## Configuration
+
+### Control Plane
+
+`/etc/loka/controlplane.yaml` (or set via `LOKA_CONFIG` env var / `lokad --config <path>` / `lokad -c <path>`)
+
+```yaml
+role: all                 # "all" (CP + embedded worker) or "controlplane" (CP only)
+mode: single              # "single" or "ha"
+listen_addr: ":6840"      # REST API (fallback for CLI and SDKs)
+grpc_addr: ":6841"        # gRPC (primary — CLI, SDKs, and workers default to this)
+
+database:
+  driver: sqlite          # "sqlite" or "postgres"
+  dsn: "/var/loka/loka.db"
+
+coordinator:
+  type: local             # "local" or "raft"
+
+objectstore:
+  type: local
+  path: "/var/loka/artifacts"
+
+scheduler:
+  strategy: spread        # "spread" or "binpack"
+
+auth:
+  api_key: ""             # Set to require Bearer token
+
+logging:
+  format: text            # "text" or "json"
+  level: info
+```
+
+### Environment Variables
+
+| Variable | Default |
+|----------|---------|
+| `LOKA_CONFIG` | `/etc/loka/controlplane.yaml` |
+| `LOKA_FIRECRACKER_BIN` | `/usr/local/bin/firecracker` |
+| `LOKA_KERNEL_PATH` | `/var/loka/kernel/vmlinux` |
+| `LOKA_ROOTFS_PATH` | `/var/loka/rootfs/rootfs.ext4` |
+
+---
+
+## macOS
+
+Firecracker requires Linux + KVM. The install script handles this automatically using [Lima](https://lima-vm.io) — a lightweight Linux VM for macOS.
+
+```bash
+curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+```
+
+This will:
+1. Install the `loka` CLI on your Mac (native macOS binary)
+2. Install Lima via Homebrew (if not present)
+3. Create a Lima VM named `loka` with Ubuntu, KVM, Docker, and LOKA pre-installed
+4. Forward ports 6840 and 6841 from the VM to localhost
+
+After installation, use LOKA exactly like on Linux — `deploy local` handles Lima transparently:
+
+```bash
+loka deploy local                         # Starts lokad inside the Lima VM
+loka image pull python:3.12-slim
+loka session create --image python:3.12-slim
+loka exec <id> -- python3 -c "print(42)"
+loka deploy down                          # Stops lokad and the Lima VM
+```
+
+The Lima VM is managed automatically. If you need direct access:
+
+```bash
+lima loka bash                  # Shell into the VM
+limactl stop loka               # Stop the VM
+limactl start loka              # Start the VM
+limactl delete loka             # Delete the VM
+```

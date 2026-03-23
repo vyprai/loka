@@ -136,7 +136,7 @@ for event in client.stream(session.ID, "python3", ["train.py"]):
 
 LOKA has a control plane (`lokad`) that manages sessions and schedules them onto workers. Each worker runs Firecracker VMs. Inside each VM, a supervisor process handles command execution and policy enforcement via vsock.
 
-The control plane supports SQLite for development and PostgreSQL + Redis for production HA deployments. Workers can run on AWS, GCP, Azure, OVH, DigitalOcean, local machines, or self-managed servers.
+The control plane supports SQLite for development and PostgreSQL + Raft for production HA deployments. Workers can run on AWS, GCP, Azure, OVH, DigitalOcean, local machines, or self-managed servers.
 
 ```
 Agent → SDK → Control Plane → Worker → Firecracker VM → Supervisor → Process

@@ -13,7 +13,7 @@ npm install @rizqme/loka-sdk
 ```typescript
 import { LokaClient } from '@rizqme/loka-sdk';
 
-const loka = new LokaClient({ baseUrl: 'http://localhost:8080' });
+const loka = new LokaClient({ baseUrl: 'http://localhost:6840' });
 
 // Pull image and create session
 await loka.pullImage('python:3.12-slim');

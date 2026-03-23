@@ -6,7 +6,7 @@ import (
 )
 
 // Coordinator provides distributed coordination primitives.
-// Implementations: LocalCoordinator (single-node dev), RedisCoordinator (production HA).
+// Implementations: LocalCoordinator (single-node dev), RaftCoordinator (production HA).
 type Coordinator interface {
 	// Lock acquires a distributed lock. Returns unlock function.
 	// The lock is held until unlock() is called or the TTL expires.

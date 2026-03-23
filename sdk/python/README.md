@@ -13,7 +13,7 @@ pip install loka-sdk
 ```python
 from loka import LokaClient
 
-client = LokaClient("http://localhost:8080")
+client = LokaClient("http://localhost:6840")
 
 # Pull image and create session
 client.pull_image("python:3.12-slim")
@@ -45,7 +45,7 @@ if ex.Status == "pending_approval":
 ## Context Manager
 
 ```python
-with LokaClient("http://localhost:8080") as client:
+with LokaClient("http://localhost:6840") as client:
     session = client.create_session(image="ubuntu:22.04")
     # ...
 ```

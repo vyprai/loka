@@ -7,7 +7,7 @@ GOFLAGS := -trimpath
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME := $(shell date -u '+%Y-%m-%dT%H:%M:%SZ')
-LDFLAGS := -ldflags "-s -w -X github.com/lokahq/loka/pkg/version.Version=$(VERSION) -X github.com/lokahq/loka/pkg/version.Commit=$(COMMIT) -X github.com/lokahq/loka/pkg/version.BuildTime=$(BUILD_TIME)"
+LDFLAGS := -ldflags "-s -w -X github.com/rizqme/loka/pkg/version.Version=$(VERSION) -X github.com/rizqme/loka/pkg/version.Commit=$(COMMIT) -X github.com/rizqme/loka/pkg/version.BuildTime=$(BUILD_TIME)"
 
 # Binaries
 BIN_DIR := bin
@@ -47,7 +47,14 @@ build-all: build build-linux
 # Generate protobuf code
 proto:
 	@echo "Generating protobuf code..."
-	buf generate
+	protoc --proto_path=api/proto \
+		--go_out=api/lokav1 --go_opt=paths=source_relative \
+		--go-grpc_out=api/lokav1 --go-grpc_opt=paths=source_relative \
+		types.proto control.proto worker.proto
+	protoc --proto_path=api/proto \
+		--go_out=api/supervisorv1 --go_opt=paths=source_relative \
+		--go-grpc_out=api/supervisorv1 --go-grpc_opt=paths=source_relative \
+		supervisor.proto
 
 # Run all tests
 test: test-unit

@@ -2,7 +2,10 @@ package main
 
 import (
 	"fmt"
+	"net/url"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/rizqme/loka/pkg/lokaapi"
@@ -15,22 +18,116 @@ var (
 	outputFmt  string
 )
 
-func newClient() *lokaapi.Client {
-	addr := serverAddr
-	tok := token
-	// If --server wasn't explicitly set, use the active deployment.
-	if addr == "http://localhost:8080" {
+// resolveServer returns the endpoint, token, and TLS metadata for the active server.
+func resolveServer() (endpoint, tok, caCert string, insecureTLS bool) {
+	endpoint = serverAddr
+	tok = token
+	if endpoint == "http://localhost:6840" {
 		store, err := loadDeployments()
 		if err == nil {
 			if d := store.GetActive(); d != nil {
-				addr = d.Endpoint
+				endpoint = d.Endpoint
 				if tok == "" && d.Token != "" {
 					tok = d.Token
+				}
+				if d.Meta != nil {
+					caCert = d.Meta["ca_cert"]
+					insecureTLS = d.Meta["insecure"] == "true"
 				}
 			}
 		}
 	}
-	return lokaapi.NewClient(addr, tok)
+	// Auto-detect CA cert for local deployments.
+	if caCert == "" && !insecureTLS {
+		home, _ := os.UserHomeDir()
+		for _, p := range []string{
+			"/var/loka/tls/ca.crt",
+			"/tmp/loka-data/artifacts/tls/ca.crt",
+			filepath.Join(home, ".loka", "tls", "ca.crt"),
+		} {
+			if _, err := os.Stat(p); err == nil {
+				caCert = p
+				// If we found auto-TLS CA, upgrade endpoint to https.
+				if strings.HasPrefix(endpoint, "http://localhost") {
+					endpoint = strings.Replace(endpoint, "http://", "https://", 1)
+				}
+				break
+			}
+		}
+	}
+	return
+}
+
+// grpcAddr derives the gRPC address from an HTTP endpoint.
+// http://host:6840 → host:6841, https://host:6843 → host:6841
+func grpcAddr(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return "localhost:6841"
+	}
+	host := u.Hostname()
+	if host == "" {
+		host = "localhost"
+	}
+	return host + ":6841"
+}
+
+// newGRPCClient creates a gRPC client targeting the active server.
+// Tries TLS first. Falls back to plaintext with a warning.
+func newGRPCClient() *lokaapi.GRPCClient {
+	endpoint, tok, caCert, insecureTLS := resolveServer()
+	addr := grpcAddr(endpoint)
+
+	// Try TLS first if we have a CA cert.
+	if caCert != "" {
+		c, err := lokaapi.NewGRPCClient(lokaapi.GRPCOpts{
+			Address:    addr,
+			Token:      tok,
+			CACertPath: caCert,
+		})
+		if err == nil {
+			return c
+		}
+	}
+
+	// Try insecure TLS.
+	if insecureTLS {
+		c, err := lokaapi.NewGRPCClient(lokaapi.GRPCOpts{
+			Address:  addr,
+			Token:    tok,
+			Insecure: true,
+		})
+		if err == nil {
+			return c
+		}
+	}
+
+	// Fall back to plaintext — warn.
+	c, err := lokaapi.NewGRPCClient(lokaapi.GRPCOpts{
+		Address:   addr,
+		Token:     tok,
+		PlainText: true,
+	})
+	if err != nil {
+		return nil
+	}
+	fmt.Fprintf(os.Stderr, "warning: gRPC connection to %s is not encrypted\n", addr)
+	return c
+}
+
+// newClient creates an HTTP REST client (fallback).
+func newClient() *lokaapi.Client {
+	endpoint, tok, caCert, insecureTLS := resolveServer()
+	if caCert != "" || insecureTLS {
+		c, err := lokaapi.NewClientWithTLS(endpoint, tok, lokaapi.TLSOptions{
+			CACertPath: caCert,
+			Insecure:   insecureTLS,
+		})
+		if err == nil {
+			return c
+		}
+	}
+	return lokaapi.NewClient(endpoint, tok)
 }
 
 func main() {
@@ -40,12 +137,13 @@ func main() {
 		Long:  "Deploy, manage, and interact with LOKA sessions, workers, and infrastructure.",
 	}
 
-	rootCmd.PersistentFlags().StringVarP(&serverAddr, "server", "s", "http://localhost:8080", "Control plane address")
+	rootCmd.PersistentFlags().StringVarP(&serverAddr, "server", "s", "http://localhost:6840", "Control plane address")
 	rootCmd.PersistentFlags().StringVarP(&token, "token", "t", "", "Auth token")
 	rootCmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "table", "Output format: table, json")
 
 	rootCmd.AddCommand(
 		newVersionCmd(),
+		newListCmd(),
 		newConnectCmd(),
 		newDeployCmd(),
 		newUseCmd(),

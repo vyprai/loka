@@ -4,14 +4,19 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/rizqme/loka/internal/loka"
 )
 
 // registerInternalRoutes adds internal API routes used by workers.
+// All internal routes require a valid worker token via Bearer authentication.
 func (s *Server) registerInternalRoutes() {
-	s.router.Post("/api/internal/workers/register", s.internalRegisterWorker)
-	s.router.Post("/api/internal/exec/complete", s.internalExecComplete)
-	s.router.Post("/api/internal/sessions/status", s.internalSessionStatus)
+	s.router.Route("/api/internal", func(r chi.Router) {
+		r.Use(workerTokenAuth(s.store))
+		r.Post("/workers/register", s.internalRegisterWorker)
+		r.Post("/exec/complete", s.internalExecComplete)
+		r.Post("/sessions/status", s.internalSessionStatus)
+	})
 }
 
 type registerWorkerReq struct {

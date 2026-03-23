@@ -1,0 +1,75 @@
+---
+title: Deploy to AWS
+description: EC2 bare-metal instances with KVM
+---
+
+# Deploy to AWS
+
+## Credentials
+
+```bash
+# Option 1: AWS CLI (recommended)
+aws configure
+
+# Option 2: Environment variables
+export AWS_ACCESS_KEY_ID=AKIA...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_DEFAULT_REGION=us-east-1
+```
+
+## Deploy
+
+```bash
+loka deploy aws --name prod --region us-east-1 --workers 3
+```
+
+## Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | `aws` | Deployment name |
+| `--region` | `us-east-1` | AWS region |
+| `--workers` | `1` | Number of worker instances |
+| `--instance-type` | `i3.metal` | Worker instance type (must support KVM) |
+| `--ssh-key` | | EC2 key pair name |
+
+Only `.metal` instances have KVM: `i3.metal`, `m5.metal`, `c5.metal`.
+
+## Manual setup
+
+### 1. Launch instances
+
+```bash
+aws ec2 run-instances --image-id ami-0c7217cdde317cfec \
+  --instance-type i3.metal --key-name my-key --count 3
+```
+
+### 2. Install on each
+
+```bash
+ssh ubuntu@<ip>
+curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+```
+
+### 3. Start control plane
+
+```bash
+lokad --role controlplane
+```
+
+Using `role: controlplane` starts `lokad` as CP only — no embedded worker. Workers run separately via `loka-worker`.
+
+### 4. Register workers
+
+```bash
+# On CP: create token
+loka token create --name worker-1
+
+# On worker:
+cat > /etc/loka/worker.yaml << YAML
+control_plane:
+  address: "<cp-ip>:6841"
+token: "loka_..."
+YAML
+loka-worker
+```

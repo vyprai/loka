@@ -12,13 +12,16 @@ type WorkerConfig struct {
 
 // WorkerCPConfig specifies how the worker connects to the control plane.
 type WorkerCPConfig struct {
-	Address string `yaml:"address"` // Control plane gRPC address.
+	Address  string `yaml:"address"`  // Control plane gRPC address.
+	TLS      bool   `yaml:"tls"`      // Use TLS to connect.
+	CACert   string `yaml:"ca_cert"`  // Path to CA certificate for verifying the server.
+	Insecure bool   `yaml:"insecure"` // Skip TLS verification (not recommended).
 }
 
 // Defaults fills in default values for unset fields.
 func (c *WorkerConfig) Defaults() {
 	if c.ControlPlane.Address == "" {
-		c.ControlPlane.Address = "localhost:9090"
+		c.ControlPlane.Address = "localhost:6841"
 	}
 	if c.DataDir == "" {
 		c.DataDir = "/var/loka/worker"

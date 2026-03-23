@@ -55,7 +55,7 @@ func (p *Provider) Provision(ctx context.Context, opts provider.ProvisionOpts) (
 
 	// Generate bootstrap userdata.
 	userdata := provider.GenerateCloudInit(provider.BootstrapConfig{
-		ControlPlaneAddr: "cp.loka.internal:9090", // Would come from config.
+		ControlPlaneAddr: "cp.loka.internal:6841", // Would come from config.
 		Token:            opts.UserData,            // Registration token passed via UserData.
 		Provider:         "aws",
 		Labels:           opts.Labels,

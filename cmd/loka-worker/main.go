@@ -57,8 +57,19 @@ func main() {
 	}
 
 	// Create CP client.
-	cpURL := fmt.Sprintf("http://%s", cfg.ControlPlane.Address)
-	cpClient := worker.NewCPClient(cpURL, cfg.Token, logger)
+	scheme := "https"
+	if cfg.ControlPlane.Insecure && !cfg.ControlPlane.TLS {
+		scheme = "http"
+	}
+	cpURL := fmt.Sprintf("%s://%s", scheme, cfg.ControlPlane.Address)
+	var tlsOpts *worker.CPClientTLS
+	if scheme == "https" {
+		tlsOpts = &worker.CPClientTLS{
+			CACertPath: cfg.ControlPlane.CACert,
+			Insecure:   cfg.ControlPlane.Insecure,
+		}
+	}
+	cpClient := worker.NewCPClient(cpURL, cfg.Token, tlsOpts, logger)
 
 	// Register with control plane.
 	logger.Info("registering with control plane", "address", cfg.ControlPlane.Address)

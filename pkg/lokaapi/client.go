@@ -3,10 +3,13 @@ package lokaapi
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -26,6 +29,42 @@ func NewClient(baseURL, token string) *Client {
 		},
 		token: token,
 	}
+}
+
+// TLSOptions configures TLS for the client.
+type TLSOptions struct {
+	CACertPath string // Path to CA certificate file.
+	Insecure   bool   // Skip TLS verification.
+}
+
+// NewClientWithTLS creates a client with custom TLS settings.
+func NewClientWithTLS(baseURL, token string, opts TLSOptions) (*Client, error) {
+	tlsCfg := &tls.Config{}
+
+	if opts.Insecure {
+		tlsCfg.InsecureSkipVerify = true
+	} else if opts.CACertPath != "" {
+		caCert, err := os.ReadFile(opts.CACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("read CA cert: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caCert) {
+			return nil, fmt.Errorf("invalid CA certificate")
+		}
+		tlsCfg.RootCAs = pool
+	}
+
+	return &Client{
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: tlsCfg,
+			},
+		},
+		token: token,
+	}, nil
 }
 
 func (c *Client) do(ctx context.Context, method, path string, body any, result any) error {

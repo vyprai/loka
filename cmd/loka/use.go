@@ -8,9 +8,9 @@ import (
 
 func newUseCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "use <deployment>",
-		Short: "Switch active deployment",
-		Long:  "Switch which deployment all commands target. Same as 'loka deploy use'.",
+		Use:   "use <server>",
+		Short: "Switch active server",
+		Long:  "Switch which server all commands target.",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, err := loadDeployments()

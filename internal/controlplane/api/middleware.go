@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/rizqme/loka/internal/controlplane/metrics"
+	"github.com/rizqme/loka/internal/store"
 )
 
 // metricsMiddleware records request count and latency per route.
@@ -37,6 +38,29 @@ type statusWriter struct {
 func (w *statusWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+// workerTokenAuth returns middleware that validates worker tokens from the Authorization header.
+// It looks up the Bearer token in the store and rejects requests with missing, expired, or invalid tokens.
+func workerTokenAuth(db store.Store) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth := r.Header.Get("Authorization")
+			if auth == "" || !strings.HasPrefix(auth, "Bearer ") {
+				writeError(w, http.StatusUnauthorized, "invalid worker token")
+				return
+			}
+
+			token := strings.TrimPrefix(auth, "Bearer ")
+			wt, err := db.Tokens().GetByToken(r.Context(), token)
+			if err != nil || wt == nil || !wt.IsValid() {
+				writeError(w, http.StatusUnauthorized, "invalid worker token")
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // apiKeyAuth returns middleware that validates API key from Authorization header.

@@ -16,7 +16,7 @@ class LokaClient:
 
     def __init__(
         self,
-        base_url: str = "http://localhost:8080",
+        base_url: str = "http://localhost:6840",
         token: str = "",
         timeout: float = 30.0,
     ):

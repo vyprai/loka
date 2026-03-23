@@ -13,7 +13,7 @@ func init() {
 }
 
 // LocalCoordinator is an in-process coordinator for single-node dev mode.
-// It uses sync primitives instead of Redis.
+// It uses sync primitives instead of distributed consensus.
 type LocalCoordinator struct {
 	mu       sync.Mutex
 	locks    map[string]*sync.Mutex

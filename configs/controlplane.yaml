@@ -1,8 +1,19 @@
 # LOKA Control Plane Configuration — Single Node (Dev Mode)
+role: all              # "all" (CP + embedded worker) or "controlplane" (CP only)
 mode: single
 
-listen_addr: ":8080"
-grpc_addr: ":9090"
+listen_addr: ":6840"
+grpc_addr: ":6841"
+
+# TLS is enabled by default (auto-generated certificates).
+# To use your own certs:
+# tls:
+#   cert: /etc/loka/tls/server.crt
+#   key: /etc/loka/tls/server.key
+#   ca_cert: /etc/loka/tls/ca.crt
+# To disable TLS (not recommended):
+# tls:
+#   auto: false
 
 database:
   driver: sqlite
@@ -17,6 +28,3 @@ objectstore:
 
 scheduler:
   strategy: spread
-
-tls:
-  enabled: false

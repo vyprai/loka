@@ -1,0 +1,130 @@
+---
+title: Python SDK
+description: loka-sdk for Python
+---
+
+# Python SDK
+
+Install the Loka Python SDK and use it to manage sessions, run commands, and work with checkpoints.
+
+## Install
+
+```bash
+pip install loka
+```
+
+## Connect
+
+```python
+from loka import LokaClient
+
+client = LokaClient()                          # uses LOKA_API_URL env var
+client = LokaClient(url="http://localhost:6840") # or pass explicitly
+```
+
+The SDK defaults to **gRPC** (port 6841) for all requests and falls back to REST (port 6840) when gRPC is unavailable. Pass the REST endpoint URL — the SDK auto-derives the gRPC address from the same host on port 6841.
+
+Check connectivity:
+
+```python
+status = client.health()
+print(status)  # {"status": "ok", "workers": 3}
+```
+
+## Sessions
+
+```python
+# Create from an image
+session = client.create_session(image="python:3.12-slim", mode="execute")
+
+# Create from a checkpoint
+session = client.create_session(checkpoint="chk_7b2f...")
+
+# Pause / resume
+client.pause_session(session.id)
+client.resume_session(session.id)
+
+# Change mode
+client.set_mode(session.id, "inspect")
+
+# Destroy
+client.destroy_session(session.id)
+```
+
+## Run commands
+
+```python
+# Synchronous -- blocks until the command finishes
+result = client.run_and_wait(session.id, "python3 -c 'print(1+1)'")
+print(result.stdout)    # 2
+print(result.exit_code) # 0
+print(result.stderr)    # ""
+
+# Asynchronous -- returns immediately
+execution = client.run(session.id, "sleep 60")
+execution.cancel()
+
+# Parallel
+results = client.run_parallel(session.id, [
+    "pip install requests",
+    "pip install flask",
+])
+```
+
+## Checkpoints
+
+```python
+# Create
+cp = client.create_checkpoint(session.id, label="after-setup")
+
+# List
+checkpoints = client.list_checkpoints(session.id)
+
+# Restore
+client.restore_checkpoint(session.id, cp.id)
+
+# Delete
+client.delete_checkpoint(cp.id)
+```
+
+## Approval flow
+
+When a session runs in `ask` mode or a command hits the `needs_approval` verdict:
+
+```python
+# Wait for the next pending execution
+execution = client.wait_for_execution(session.id)
+print(f"Command: {execution.command}")
+
+# Approve it
+client.approve_execution(execution.id)
+
+# Or reject it
+client.reject_execution(execution.id, reason="Not allowed to curl")
+
+# Approve and add to the session's allowlist for future runs
+client.approve_execution(execution.id, add_to_whitelist=True)
+```
+
+## Images
+
+```python
+image = client.pull_image("ubuntu:22.04")
+images = client.list_images()
+```
+
+## Error handling
+
+```python
+from loka import LokaError, SessionNotFoundError, CheckpointNotFoundError
+
+try:
+    client.restore_checkpoint(session.id, "chk_invalid")
+except CheckpointNotFoundError:
+    print("Checkpoint does not exist")
+except LokaError as e:
+    print(f"API error: {e.status_code} {e.message}")
+```
+
+## Next steps
+

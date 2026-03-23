@@ -2,9 +2,10 @@ package config
 
 // ControlPlaneConfig is the configuration for the lokad control plane.
 type ControlPlaneConfig struct {
+	Role        string            `yaml:"role"`        // "all" (CP + embedded worker) or "controlplane" (CP only)
 	Mode        string            `yaml:"mode"`        // "single" or "ha"
-	ListenAddr  string            `yaml:"listen_addr"` // REST API listen address (default ":8080")
-	GRPCAddr    string            `yaml:"grpc_addr"`   // gRPC listen address for workers (default ":9090")
+	ListenAddr  string            `yaml:"listen_addr"` // REST API listen address (default ":6840")
+	GRPCAddr    string            `yaml:"grpc_addr"`   // gRPC listen address for workers (default ":6841")
 	Database    DatabaseConfig    `yaml:"database"`
 	Coordinator CoordinatorConfig `yaml:"coordinator"`
 	ObjectStore ObjectStoreConfig `yaml:"objectstore"`
@@ -33,10 +34,12 @@ type DatabaseConfig struct {
 
 // CoordinatorConfig selects and configures the HA coordinator.
 type CoordinatorConfig struct {
-	Type           string `yaml:"type"`            // "local" or "redis"
-	Address        string `yaml:"address"`         // Redis address.
-	SentinelMaster string `yaml:"sentinel_master"` // Redis Sentinel master name.
-	Password       string `yaml:"password"`
+	Type      string   `yaml:"type"`      // "local" or "raft"
+	Address   string   `yaml:"address"`   // Raft bind address (default ":6842")
+	NodeID    string   `yaml:"node_id"`   // Unique node ID (default: hostname)
+	DataDir   string   `yaml:"data_dir"`  // Raft data directory (default "/var/loka/raft")
+	Bootstrap bool     `yaml:"bootstrap"` // Bootstrap as first node in cluster
+	Peers     []string `yaml:"peers"`     // Initial peer addresses
 }
 
 // ObjectStoreConfig selects and configures the object store.
@@ -54,21 +57,27 @@ type SchedulerConfig struct {
 
 // TLSConfig enables TLS for API and gRPC servers.
 type TLSConfig struct {
-	Enabled  bool   `yaml:"enabled"`
-	CertFile string `yaml:"cert_file"`
-	KeyFile  string `yaml:"key_file"`
+	CertFile      string   `yaml:"cert"`
+	KeyFile       string   `yaml:"key"`
+	CACertFile    string   `yaml:"ca_cert"`
+	AutoTLS       *bool    `yaml:"auto"`
+	AllowInsecure bool     `yaml:"allow_insecure"`
+	SANs          []string `yaml:"sans"`
 }
 
 // Defaults fills in default values for unset fields.
 func (c *ControlPlaneConfig) Defaults() {
+	if c.Role == "" {
+		c.Role = "all"
+	}
 	if c.Mode == "" {
 		c.Mode = "single"
 	}
 	if c.ListenAddr == "" {
-		c.ListenAddr = ":8080"
+		c.ListenAddr = ":6840"
 	}
 	if c.GRPCAddr == "" {
-		c.GRPCAddr = ":9090"
+		c.GRPCAddr = ":6841"
 	}
 	if c.Database.Driver == "" {
 		c.Database.Driver = "sqlite"

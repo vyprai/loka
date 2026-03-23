@@ -97,7 +97,7 @@ func (s *DeploymentStore) Remove(name string) bool {
 
 func (s *DeploymentStore) SetActive(name string) error {
 	if s.Get(name) == nil {
-		return fmt.Errorf("deployment %q not found", name)
+		return fmt.Errorf("server %q not found", name)
 	}
 	s.Active = name
 	return nil

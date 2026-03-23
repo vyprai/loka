@@ -15,11 +15,14 @@ func newWorkerCmd() *cobra.Command {
 		Short: "Manage workers",
 	}
 	cmd.AddCommand(
+		newWorkerAddCmd(),
+		newWorkerRemoveByAddrCmd(),
+		newWorkerScaleCmd(),
 		newWorkerListCmd(),
 		newWorkerGetCmd(),
 		newWorkerDrainCmd(),
 		newWorkerUndrainCmd(),
-		newWorkerRemoveCmd(),
+		newWorkerDeregisterCmd(),
 		newWorkerLabelCmd(),
 		newWorkerTopCmd(),
 	)
@@ -122,11 +125,11 @@ func newWorkerUndrainCmd() *cobra.Command {
 	}
 }
 
-func newWorkerRemoveCmd() *cobra.Command {
+func newWorkerDeregisterCmd() *cobra.Command {
 	var force bool
 	cmd := &cobra.Command{
-		Use:   "remove <worker-id>",
-		Short: "Remove a worker from the cluster",
+		Use:   "deregister <worker-id>",
+		Short: "Deregister a worker from the control plane by ID",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := newClient()

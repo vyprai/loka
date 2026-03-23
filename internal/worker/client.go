@@ -3,18 +3,20 @@ package worker
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/rizqme/loka/internal/loka"
 )
 
 // CPClient communicates with the control plane's HTTP API.
-// In production, this will be replaced with gRPC.
 type CPClient struct {
 	baseURL string
 	token   string
@@ -22,12 +24,35 @@ type CPClient struct {
 	logger  *slog.Logger
 }
 
-// NewCPClient creates a new control plane client.
-func NewCPClient(baseURL, token string, logger *slog.Logger) *CPClient {
+// CPClientTLS configures TLS for the worker-to-CP connection.
+type CPClientTLS struct {
+	CACertPath string // Path to CA certificate for server verification.
+	Insecure   bool   // Skip TLS verification (not recommended).
+}
+
+// NewCPClient creates a new control plane client with optional TLS.
+func NewCPClient(baseURL, token string, tlsOpts *CPClientTLS, logger *slog.Logger) *CPClient {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+
+	if tlsOpts != nil {
+		tlsCfg := &tls.Config{}
+		if tlsOpts.Insecure {
+			tlsCfg.InsecureSkipVerify = true
+		} else if tlsOpts.CACertPath != "" {
+			caCert, err := os.ReadFile(tlsOpts.CACertPath)
+			if err == nil {
+				pool := x509.NewCertPool()
+				pool.AppendCertsFromPEM(caCert)
+				tlsCfg.RootCAs = pool
+			}
+		}
+		transport.TLSClientConfig = tlsCfg
+	}
+
 	return &CPClient{
 		baseURL: baseURL,
 		token:   token,
-		http:    &http.Client{Timeout: 10 * time.Second},
+		http:    &http.Client{Timeout: 10 * time.Second, Transport: transport},
 		logger:  logger,
 	}
 }

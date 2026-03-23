@@ -1,0 +1,153 @@
+---
+title: CLI Reference
+description: loka command reference
+---
+
+# CLI Reference
+
+```
+loka [command] [flags]
+```
+
+## Global Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--server, -s` | active deployment | Control plane REST endpoint (e.g. `http://host:6840`) |
+| `--token, -t` | | Auth token |
+| `--output, -o` | `table` | Output: `table`, `json` |
+
+The CLI defaults to **gRPC** (port 6841) for all control-plane communication and falls back to REST (port 6840) when gRPC is unavailable. The `--server` flag (and `loka connect`) takes the REST endpoint URL; the CLI automatically derives the gRPC address from the same host on port 6841.
+
+## Servers
+
+```bash
+loka deploy local --name dev            # Start locally (role: all — CP + embedded worker in one process)
+loka deploy local --name dev -f         # Foreground
+loka deploy aws --name prod --region us-east-1 --workers 3
+loka deploy gcp --name staging --project my-proj --workers 2
+loka connect http://10.0.0.1:6840 --name custom
+
+loka list                               # List all servers (* = active)
+loka use prod                           # Switch active server
+loka deploy rename staging qa           # Rename
+loka deploy status                      # Status of active server
+loka deploy status prod                 # Status of specific server
+loka deploy down                        # Stop active
+loka deploy down dev                    # Stop specific
+loka deploy destroy prod                # Remove permanently
+loka deploy export                      # Export active server as YAML
+loka deploy export prod prod.yml        # Export specific server to file
+```
+
+Servers are stored in `~/.loka/deployments.json`. All commands (`session`, `exec`, etc.) target the active server.
+
+### Declarative Deployment
+
+Use a YAML file to declare the full cluster topology. `deploy apply` creates the cluster on first run, then diffs and reconciles workers on subsequent runs (adds new nodes, removes ones no longer listed). The control plane is not re-deployed on updates.
+
+```yaml
+name: production
+provider: vm           # vm, aws, gcp, azure, do, ovh, local
+ssh:
+  user: ubuntu
+  key: ~/.ssh/id_rsa
+controlplane:
+  address: 10.0.0.1
+  port: "6840"         # optional, default 6840
+workers:
+  - address: 10.0.0.2
+    labels:
+      gpu: "true"
+  - address: 10.0.0.3
+  - address: 10.0.0.4
+```
+
+```bash
+loka deploy apply cluster.yml           # Create or reconcile
+loka deploy export > cluster.yml        # Export current state as YAML
+loka deploy export prod prod.yml        # Export specific server to file
+```
+
+Edit the exported file and re-apply to update workers. For a local single-node cluster:
+
+```yaml
+name: dev
+provider: local
+```
+
+```bash
+loka deploy apply dev.yml
+```
+
+## Sessions
+
+```bash
+loka session create --image python:3.12-slim --mode execute
+loka session create --image ubuntu:22.04 --mode ask --name my-session
+loka session list
+loka session get <id>
+loka session destroy <id>
+loka session pause <id>
+loka session resume <id>
+loka session mode <id> ask
+```
+
+## Commands
+
+```bash
+loka exec <session-id> -- echo "hello"
+loka exec <session-id> -- python3 script.py
+loka exec <session-id> --parallel --cmd "echo A" --cmd "echo B"
+```
+
+## Checkpoints
+
+```bash
+loka checkpoint create <session-id> --label "before-change"
+loka checkpoint list <session-id>
+loka checkpoint tree <session-id>
+loka checkpoint restore <session-id> <checkpoint-id>
+loka checkpoint diff <session-id> <cp-a> <cp-b>
+```
+
+## Workers
+
+```bash
+loka worker list                         # List workers
+loka worker get <id>                     # Worker details
+loka worker add 10.0.0.5                # Add a worker via SSH
+loka worker add 10.0.0.5 --label gpu=true
+loka worker remove 10.0.0.5             # Drain, stop, and remove a worker
+loka worker scale                        # Show current worker count
+loka worker scale 5                      # Scale to 5 workers (cloud providers)
+loka worker scale 0                      # Remove all workers
+loka worker drain <id>
+loka worker undrain <id>
+loka worker deregister <id>              # Deregister by worker ID (API only)
+loka worker label <id> gpu=true
+loka worker top                          # Resource usage across workers
+```
+
+## Images
+
+```bash
+loka image pull ubuntu:22.04
+loka image list
+```
+
+## Tokens
+
+```bash
+loka token create --name my-server --expires 86400
+loka token list
+loka token revoke <id>
+```
+
+## Other
+
+```bash
+loka status
+loka version
+loka completion bash
+```

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package loka.api.v1;
 
-option go_package = "github.com/lokahq/loka/api/proto/gen/lokav1";
+option go_package = "github.com/rizqme/loka/api/lokav1";
 
 import "google/protobuf/timestamp.proto";
 
@@ -20,10 +20,9 @@ enum SessionStatus {
 
 enum ExecMode {
   EXEC_MODE_UNSPECIFIED = 0;
-  EXEC_MODE_INSPECT     = 1;
-  EXEC_MODE_PLAN        = 2;
-  EXEC_MODE_EXECUTE     = 3;
-  EXEC_MODE_COMMIT      = 4;
+  EXEC_MODE_EXPLORE     = 1;
+  EXEC_MODE_EXECUTE     = 2;
+  EXEC_MODE_ASK         = 3;
 }
 
 message Session {

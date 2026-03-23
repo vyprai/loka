@@ -1,0 +1,100 @@
+---
+title: Deploy to OVH
+description: Dedicated servers and VPS with KVM
+---
+
+# Deploy to OVH
+
+## Credentials
+
+```bash
+# OVH API credentials
+export OVH_ENDPOINT=ovh-eu          # or ovh-ca, ovh-us
+export OVH_APPLICATION_KEY=...
+export OVH_APPLICATION_SECRET=...
+export OVH_CONSUMER_KEY=...
+```
+
+Generate API credentials at [api.ovh.com/createToken](https://api.ovh.com/createToken/).
+
+## Deploy
+
+```bash
+loka deploy ovh --name prod --region gra --workers 2
+```
+
+## Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | `ovh` | Server name |
+| `--region` | `gra` | OVH datacenter (gra, sbg, bhs, waw, etc.) |
+| `--workers` | `1` | Number of worker servers |
+| `--instance-type` | `b2-30` | Flavor name |
+| `--ssh-key` | | SSH key name registered in OVH |
+
+OVH dedicated servers and most VPS support KVM natively. For best performance, use dedicated servers (Advance or Scale series) which have bare-metal KVM access.
+
+## Scale
+
+```bash
+loka worker scale 3       # Scale to 3 workers
+```
+
+## Declarative
+
+```yaml
+name: prod
+provider: ovh
+region: gra
+workers:
+  - instance_type: b2-30
+  - instance_type: b2-30
+```
+
+```bash
+loka deploy apply prod.yml
+```
+
+## Datacenters
+
+| Location | Slug |
+|----------|------|
+| Gravelines, France | `gra` |
+| Strasbourg, France | `sbg` |
+| Beauharnois, Canada | `bhs` |
+| Warsaw, Poland | `waw` |
+| London, UK | `lon` |
+| Frankfurt, Germany | `de` |
+| Singapore | `sgp` |
+| Sydney, Australia | `syd` |
+
+## Manual setup
+
+### 1. Order servers
+
+Order dedicated servers or VPS through the [OVH Control Panel](https://www.ovh.com/manager/) or API. Choose Ubuntu 22.04.
+
+### 2. Install and start
+
+```bash
+ssh ubuntu@<ip>
+curl -fsSL https://rizqme.github.io/loka/install.sh | bash
+
+# On CP:
+lokad --role controlplane
+
+# On workers:
+cat > /etc/loka/worker.yaml << YAML
+control_plane:
+  address: "<cp-ip>:6841"
+token: "loka_..."
+YAML
+loka-worker
+```
+
+Or use SSH-based deployment:
+
+```bash
+loka deploy vm --name prod --cp <cp-ip> --worker <worker-ip> --ssh-user ubuntu
+```

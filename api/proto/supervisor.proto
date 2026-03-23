@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package loka.supervisor.v1;
 
-option go_package = "github.com/lokahq/loka/api/proto/gen/supervisorv1";
+option go_package = "github.com/rizqme/loka/api/supervisorv1";
 
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/empty.proto";
@@ -110,7 +110,7 @@ message ProcessList {
 // ─── Mode ──────────────────────────────────────────────────
 
 message SupervisorSetModeRequest {
-  string mode = 1; // "inspect", "plan", "execute", "commit"
+  string mode = 1; // "explore", "execute", "ask"
 }
 
 message SupervisorSetModeResponse {

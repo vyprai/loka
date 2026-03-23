@@ -1,18 +1,23 @@
 # LOKA Control Plane Configuration — HA Mode (Production)
+role: controlplane
 mode: ha
 
-listen_addr: ":8080"
-grpc_addr: ":9090"
+listen_addr: ":6840"
+grpc_addr: ":6841"
 
 database:
   driver: postgres
   dsn: "postgres://loka:loka@localhost:5432/loka?sslmode=disable"
 
 coordinator:
-  type: redis
-  address: "localhost:6379"
-  # sentinel_master: "loka"
-  # password: ""
+  type: raft
+  address: "0.0.0.0:6842"     # Raft transport bind address
+  node_id: "cp-1"             # Unique ID for this node
+  data_dir: "/var/loka/raft"  # Raft log and snapshot storage
+  bootstrap: true              # Set true only for the first node
+  # peers:                     # Other CP nodes (for multi-node HA)
+  #   - "10.0.0.2:6842"
+  #   - "10.0.0.3:6842"
 
 objectstore:
   type: s3
@@ -22,7 +27,6 @@ objectstore:
 scheduler:
   strategy: spread
 
-tls:
-  enabled: false
-  # cert_file: /etc/loka/tls.crt
-  # key_file: /etc/loka/tls.key
+# tls:
+#   cert: /etc/loka/tls/server.crt
+#   key: /etc/loka/tls/server.key

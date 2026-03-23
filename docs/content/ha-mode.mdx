@@ -1,0 +1,337 @@
+---
+title: HA Mode
+description: Run multiple control plane nodes with automatic failover
+---
+
+# HA Mode
+
+Run multiple control plane instances for fault tolerance. If one goes down, another takes over automatically — no manual intervention, no data loss.
+
+## What you need
+
+| Component | Purpose |
+|-----------|---------|
+| 3 CP nodes (recommended) | Raft needs a majority for consensus. 3 nodes tolerate 1 failure. |
+| PostgreSQL | Shared database for sessions, executions, checkpoints |
+| S3-compatible storage | Shared object store for VM snapshots and checkpoint data |
+
+Raft is embedded in `lokad` — no additional software to install or manage.
+
+---
+
+## How it works
+
+```
+          ┌─────────────┐
+          │ Load Balancer│
+          └──────┬───────┘
+       ┌─────────┼─────────┐
+       │         │         │
+  ┌────▼───┐ ┌──▼────┐ ┌──▼────┐
+  │ cp-1   │ │ cp-2  │ │ cp-3  │
+  │(leader)│ │       │ │       │
+  └──┬─────┘ └──┬────┘ └──┬────┘
+     │    Raft   │         │
+     └───────────┴─────────┘
+           │
+     ┌─────▼──────┐
+     │ PostgreSQL  │
+     └─────────────┘
+```
+
+- **All nodes** serve the API (reads from PostgreSQL)
+- **Only the leader** runs scheduling, health monitoring, and state transitions
+- **Raft** handles leader election, distributed locks, and event replication
+- If the leader dies, a new leader is elected in **2-5 seconds**
+
+---
+
+## Step-by-step setup
+
+### 1. Set up PostgreSQL
+
+All CP nodes connect to the same PostgreSQL database:
+
+```bash
+createdb loka
+```
+
+### 2. Set up S3 (or compatible)
+
+All CP nodes and workers need access to the same object store for snapshots and checkpoints. Any S3-compatible store works (AWS S3, MinIO, etc).
+
+### 3. Configure the first CP node
+
+On your first control plane machine, create `/etc/loka/controlplane.yaml`:
+
+```yaml
+role: controlplane
+mode: ha
+
+listen_addr: ":6840"
+grpc_addr: ":6841"
+
+database:
+  driver: postgres
+  dsn: "postgres://loka:password@db.internal:5432/loka?sslmode=require"
+
+coordinator:
+  type: raft
+  address: "0.0.0.0:6842"     # Raft transport — other nodes connect here
+  node_id: "cp-1"             # Must be unique across the cluster
+  data_dir: "/var/loka/raft"  # Persistent storage for Raft log
+  bootstrap: true              # ONLY set true on the first node
+
+objectstore:
+  type: s3
+  bucket: "loka-artifacts"
+  region: "us-east-1"
+
+scheduler:
+  strategy: spread
+```
+
+Start it:
+
+```bash
+lokad --config /etc/loka/controlplane.yaml
+```
+
+You should see:
+
+```
+INFO starting lokad  version=... role=controlplane
+INFO raft coordinator started  node_id=cp-1 bootstrap=true
+INFO this node is the raft leader  name=control-plane
+INFO listening on :6840 (mode=ha, db=postgres, coordinator=raft)
+```
+
+### 4. Configure additional CP nodes
+
+On the second and third machines, create the same config but with:
+- A different `node_id`
+- `bootstrap: false` (or just omit it)
+- The first node listed as a peer
+
+**Node 2** (`/etc/loka/controlplane.yaml`):
+
+```yaml
+role: controlplane
+mode: ha
+
+listen_addr: ":6840"
+grpc_addr: ":6841"
+
+database:
+  driver: postgres
+  dsn: "postgres://loka:password@db.internal:5432/loka?sslmode=require"
+
+coordinator:
+  type: raft
+  address: "0.0.0.0:6842"
+  node_id: "cp-2"
+  data_dir: "/var/loka/raft"
+  peers:
+    - "10.0.0.1:6842"         # Address of cp-1
+
+objectstore:
+  type: s3
+  bucket: "loka-artifacts"
+  region: "us-east-1"
+
+scheduler:
+  strategy: spread
+```
+
+**Node 3** — same as node 2 but with `node_id: "cp-3"`.
+
+Start each:
+
+```bash
+lokad --config /etc/loka/controlplane.yaml
+```
+
+They will join the Raft cluster and start replicating:
+
+```
+INFO raft coordinator started  node_id=cp-2 bootstrap=false
+INFO listening on :6840 (mode=ha, db=postgres, coordinator=raft)
+```
+
+### 5. Put a load balancer in front
+
+Route traffic to all CP nodes on port 6840 (REST) and 6841 (gRPC). Any node can serve reads. Writes are forwarded internally to the leader.
+
+Example with nginx:
+
+```nginx
+upstream loka_api {
+    server 10.0.0.1:6840;
+    server 10.0.0.2:6840;
+    server 10.0.0.3:6840;
+}
+
+server {
+    listen 80;
+    location / {
+        proxy_pass http://loka_api;
+    }
+}
+```
+
+### 6. Connect workers and CLI
+
+Workers and the CLI connect to the load balancer address:
+
+```bash
+# Workers
+cat > /etc/loka/worker.yaml << YAML
+control_plane:
+  address: "lb.internal:6841"
+token: "loka_..."
+YAML
+loka-worker --config /etc/loka/worker.yaml
+
+# CLI
+loka connect http://lb.internal:6840 --name production
+```
+
+---
+
+## Ports
+
+| Port | Protocol | Purpose |
+|------|----------|---------|
+| 6840 | HTTP | REST API (CLI, SDKs, load balancer) |
+| 6841 | gRPC | Primary API + worker communication |
+| 6842 | TCP | Raft transport (CP-to-CP only) |
+
+Port 6842 only needs to be reachable between CP nodes. It does not need to be exposed to workers or clients.
+
+---
+
+## Leader election
+
+Raft leader election is fully automatic:
+
+1. When the cluster starts, nodes hold an election.
+2. A node with the most up-to-date log wins.
+3. The leader sends heartbeats to followers every ~1 second.
+4. If a follower doesn't hear from the leader for ~5 seconds, it starts a new election.
+5. A majority (quorum) is needed to elect a leader.
+
+| Cluster size | Quorum | Tolerates failures |
+|-------------|--------|-------------------|
+| 1 | 1 | 0 (no HA) |
+| 3 | 2 | 1 |
+| 5 | 3 | 2 |
+
+3 nodes is the recommended minimum. 5 nodes gives more fault tolerance but adds latency to consensus operations.
+
+---
+
+## Failover
+
+When the leader fails:
+
+1. Followers detect missing heartbeats (~5 seconds).
+2. A follower with an up-to-date Raft log starts an election.
+3. New leader is elected within **2-5 seconds**.
+4. New leader reconciles in-flight operations from PostgreSQL.
+5. Workers automatically reconnect to the new leader via the load balancer.
+
+No sessions are lost. In-progress executions continue on their workers. Scheduling resumes once the new leader is elected.
+
+---
+
+## Distributed locking
+
+Operations that modify shared state acquire a distributed lock via the Raft log:
+
+- Session create/destroy
+- Checkpoint create/restore
+- Worker drain
+- Mode transitions
+
+A lock is only confirmed once the Raft entry is committed to a majority of nodes, preventing split-brain conflicts.
+
+---
+
+## Health check
+
+Each CP node exposes `/api/v1/health`:
+
+```json
+{
+  "status": "ok",
+  "is_leader": true,
+  "leader_id": "cp-1",
+  "pg_connected": true,
+  "raft_state": "leader",
+  "raft_applied_index": 1042,
+  "workers_total": 5,
+  "workers_ready": 5
+}
+```
+
+`raft_state` is one of: `leader`, `follower`, `candidate`.
+
+For load balancer health checks, check that `status` is `ok`. All nodes (leader and followers) can serve traffic.
+
+---
+
+## Declarative HA deployment
+
+You can use `deploy apply` with multiple CP nodes defined in a YAML file:
+
+```yaml
+name: production
+provider: vm
+ssh:
+  user: ubuntu
+  key: ~/.ssh/id_rsa
+controlplane:
+  address: 10.0.0.1
+workers:
+  - address: 10.0.0.4
+  - address: 10.0.0.5
+  - address: 10.0.0.6
+```
+
+For multi-CP HA setup, deploy each CP node manually (see steps above) and connect via the load balancer:
+
+```bash
+loka connect http://lb.internal:6840 --name production
+```
+
+---
+
+## Troubleshooting
+
+### Node can't join the cluster
+
+Check that port 6842 is reachable between CP nodes:
+
+```bash
+nc -zv 10.0.0.1 6842
+```
+
+### Split brain after network partition
+
+Raft prevents split brain by requiring a quorum. If the cluster splits into two groups, only the group with a majority can elect a leader. The minority group stops accepting writes until connectivity is restored.
+
+### Recovering from data loss
+
+If a node's Raft data directory is lost, remove the node and re-add it:
+
+```bash
+# On any healthy CP node:
+# The node will re-join and replicate from the current leader
+lokad --config /etc/loka/controlplane.yaml
+```
+
+The node will receive a snapshot from the leader and catch up.
+
+### All nodes lost
+
+If all CP nodes are lost but PostgreSQL is intact, bootstrap a new single-node cluster with `bootstrap: true`. It will read existing sessions and workers from PostgreSQL.
