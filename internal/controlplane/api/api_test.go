@@ -749,3 +749,326 @@ func TestRESTExecCommand_ExploreMode_AllowsAllCommands(t *testing.T) {
 			rec.Code, rec.Body.String())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Idle session
+// ---------------------------------------------------------------------------
+
+func TestRESTIdleSession(t *testing.T) {
+	ts := setupTestServer(t)
+	ts.registerTestWorker(t)
+
+	createRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions",
+		map[string]any{"name": "idle-me", "image": "alpine:latest"}, nil)
+	var created loka.Session
+	decodeBody(t, createRec, &created)
+
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+created.ID+"/idle", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var sess loka.Session
+	decodeBody(t, rec, &sess)
+	if sess.Status != loka.SessionStatusIdle {
+		t.Errorf("expected idle status, got %q", sess.Status)
+	}
+}
+
+func TestRESTIdleSession_NotRunning(t *testing.T) {
+	ts := setupTestServer(t)
+	ts.registerTestWorker(t)
+
+	createRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions",
+		map[string]any{"name": "pause-then-idle", "image": "alpine:latest"}, nil)
+	var created loka.Session
+	decodeBody(t, createRec, &created)
+
+	// Pause first.
+	ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+created.ID+"/pause", nil, nil)
+
+	// Trying to idle a paused session should fail.
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+created.ID+"/idle", nil, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRESTExecAutoWakes(t *testing.T) {
+	ts := setupTestServer(t)
+	ts.registerTestWorker(t)
+
+	// Create a session in execute mode.
+	createRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions",
+		map[string]any{"name": "exec-autowake", "image": "alpine:latest", "mode": "execute"}, nil)
+	var created loka.Session
+	decodeBody(t, createRec, &created)
+
+	// Idle the session.
+	idleRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+created.ID+"/idle", nil, nil)
+	if idleRec.Code != http.StatusOK {
+		t.Fatalf("idle: expected 200, got %d: %s", idleRec.Code, idleRec.Body.String())
+	}
+
+	// Exec on the idle session should auto-wake and succeed.
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+created.ID+"/exec",
+		map[string]any{"command": "echo", "args": []string{"hello"}}, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 for exec on idle session (auto-wake), got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+	var exec loka.Execution
+	decodeBody(t, rec, &exec)
+	if exec.SessionID != created.ID {
+		t.Errorf("expected session_id %s, got %s", created.ID, exec.SessionID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Full E2E Lifecycle
+// ---------------------------------------------------------------------------
+
+func TestRESTFullLifecycle(t *testing.T) {
+	ts := setupTestServer(t)
+	ts.registerTestWorker(t)
+
+	// Step 1: Create session.
+	createRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions",
+		map[string]any{"name": "lifecycle", "image": "ubuntu:22.04", "mode": "explore"}, nil)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var sess loka.Session
+	decodeBody(t, createRec, &sess)
+	if sess.Status != loka.SessionStatusRunning {
+		t.Fatalf("after create: expected status running, got %q", sess.Status)
+	}
+	if sess.Mode != loka.ModeExplore {
+		t.Fatalf("after create: expected mode explore, got %q", sess.Mode)
+	}
+	sessionID := sess.ID
+
+	// Step 2: Exec a command (in explore mode).
+	execRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+sessionID+"/exec",
+		map[string]any{"command": "ls", "args": []string{"-la"}}, nil)
+	if execRec.Code != http.StatusCreated {
+		t.Fatalf("exec: expected 201, got %d: %s", execRec.Code, execRec.Body.String())
+	}
+	var exec loka.Execution
+	decodeBody(t, execRec, &exec)
+	if exec.SessionID != sessionID {
+		t.Errorf("exec: session_id = %q, want %q", exec.SessionID, sessionID)
+	}
+
+	// Step 3: Set mode to execute.
+	modeRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+sessionID+"/mode",
+		map[string]string{"mode": "execute"}, nil)
+	if modeRec.Code != http.StatusOK {
+		t.Fatalf("set mode: expected 200, got %d: %s", modeRec.Code, modeRec.Body.String())
+	}
+	decodeBody(t, modeRec, &sess)
+	if sess.Mode != loka.ModeExecute {
+		t.Fatalf("after set mode: expected mode execute, got %q", sess.Mode)
+	}
+
+	// Step 4: Idle the session.
+	idleRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+sessionID+"/idle", nil, nil)
+	if idleRec.Code != http.StatusOK {
+		t.Fatalf("idle: expected 200, got %d: %s", idleRec.Code, idleRec.Body.String())
+	}
+	decodeBody(t, idleRec, &sess)
+	if sess.Status != loka.SessionStatusIdle {
+		t.Fatalf("after idle: expected status idle, got %q", sess.Status)
+	}
+
+	// Step 5: Exec again — should auto-wake the idle session.
+	exec2Rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+sessionID+"/exec",
+		map[string]any{"command": "echo", "args": []string{"hello"}}, nil)
+	if exec2Rec.Code != http.StatusCreated {
+		t.Fatalf("exec on idle: expected 201, got %d: %s", exec2Rec.Code, exec2Rec.Body.String())
+	}
+	// Verify the session is now running again.
+	getRec := ts.doRequest(t, http.MethodGet, "/api/v1/sessions/"+sessionID, nil, nil)
+	decodeBody(t, getRec, &sess)
+	if sess.Status != loka.SessionStatusRunning {
+		t.Fatalf("after auto-wake exec: expected status running, got %q", sess.Status)
+	}
+
+	// Step 6: Pause.
+	pauseRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+sessionID+"/pause", nil, nil)
+	if pauseRec.Code != http.StatusOK {
+		t.Fatalf("pause: expected 200, got %d: %s", pauseRec.Code, pauseRec.Body.String())
+	}
+	decodeBody(t, pauseRec, &sess)
+	if sess.Status != loka.SessionStatusPaused {
+		t.Fatalf("after pause: expected status paused, got %q", sess.Status)
+	}
+
+	// Step 7: Resume.
+	resumeRec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/"+sessionID+"/resume", nil, nil)
+	if resumeRec.Code != http.StatusOK {
+		t.Fatalf("resume: expected 200, got %d: %s", resumeRec.Code, resumeRec.Body.String())
+	}
+	decodeBody(t, resumeRec, &sess)
+	if sess.Status != loka.SessionStatusRunning {
+		t.Fatalf("after resume: expected status running, got %q", sess.Status)
+	}
+
+	// Step 8: Destroy.
+	destroyRec := ts.doRequest(t, http.MethodDelete, "/api/v1/sessions/"+sessionID, nil, nil)
+	if destroyRec.Code != http.StatusNoContent {
+		t.Fatalf("destroy: expected 204, got %d: %s", destroyRec.Code, destroyRec.Body.String())
+	}
+	// Verify terminated.
+	getRec = ts.doRequest(t, http.MethodGet, "/api/v1/sessions/"+sessionID, nil, nil)
+	decodeBody(t, getRec, &sess)
+	if sess.Status != loka.SessionStatusTerminated {
+		t.Fatalf("after destroy: expected status terminated, got %q", sess.Status)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Session with Ports
+// ---------------------------------------------------------------------------
+
+func TestRESTSessionWithPorts(t *testing.T) {
+	ts := setupTestServer(t)
+	ts.registerTestWorker(t)
+
+	payload := map[string]any{
+		"name":  "ports-session",
+		"image": "alpine:latest",
+		"ports": []map[string]any{
+			{"local_port": 8080, "remote_port": 5000, "protocol": "tcp"},
+			{"local_port": 0, "remote_port": 3000},
+		},
+	}
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions", payload, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var sess loka.Session
+	decodeBody(t, rec, &sess)
+
+	if len(sess.Ports) != 2 {
+		t.Fatalf("expected 2 port mappings, got %d", len(sess.Ports))
+	}
+
+	found8080 := false
+	found3000 := false
+	for _, p := range sess.Ports {
+		if p.LocalPort == 8080 && p.RemotePort == 5000 {
+			found8080 = true
+			if p.Protocol != "tcp" {
+				t.Errorf("expected protocol tcp for 8080:5000, got %q", p.Protocol)
+			}
+		}
+		if p.RemotePort == 3000 && p.LocalPort == 0 {
+			found3000 = true
+		}
+	}
+	if !found8080 {
+		t.Error("port mapping 8080:5000 not found in response")
+	}
+	if !found3000 {
+		t.Error("port mapping 0:3000 not found in response")
+	}
+
+	// Verify session can be fetched after creation.
+	getRec := ts.doRequest(t, http.MethodGet, "/api/v1/sessions/"+sess.ID, nil, nil)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d", getRec.Code)
+	}
+	var fetched loka.Session
+	decodeBody(t, getRec, &fetched)
+	if fetched.ID != sess.ID {
+		t.Errorf("fetched session ID = %q, want %q", fetched.ID, sess.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Session with Mounts
+// ---------------------------------------------------------------------------
+
+func TestRESTSessionWithMounts(t *testing.T) {
+	ts := setupTestServer(t)
+	ts.registerTestWorker(t)
+
+	payload := map[string]any{
+		"name":  "mount-session",
+		"image": "alpine:latest",
+		"mounts": []map[string]any{
+			{
+				"provider":   "s3",
+				"bucket":     "my-bucket",
+				"prefix":     "datasets/",
+				"mount_path": "/data",
+				"read_only":  true,
+				"region":     "us-east-1",
+			},
+			{
+				"provider":   "gcs",
+				"bucket":     "gcs-bucket",
+				"mount_path": "/gcs",
+			},
+		},
+	}
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions", payload, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var sess loka.Session
+	decodeBody(t, rec, &sess)
+
+	if len(sess.Mounts) != 2 {
+		t.Fatalf("expected 2 mounts, got %d", len(sess.Mounts))
+	}
+
+	foundS3 := false
+	foundGCS := false
+	for _, m := range sess.Mounts {
+		if m.Provider == "s3" {
+			foundS3 = true
+			if m.Bucket != "my-bucket" {
+				t.Errorf("s3 mount: bucket = %q, want my-bucket", m.Bucket)
+			}
+			if m.Prefix != "datasets/" {
+				t.Errorf("s3 mount: prefix = %q, want datasets/", m.Prefix)
+			}
+			if m.MountPath != "/data" {
+				t.Errorf("s3 mount: mount_path = %q, want /data", m.MountPath)
+			}
+			if !m.ReadOnly {
+				t.Error("s3 mount: expected read_only=true")
+			}
+			if m.Region != "us-east-1" {
+				t.Errorf("s3 mount: region = %q, want us-east-1", m.Region)
+			}
+		}
+		if m.Provider == "gcs" {
+			foundGCS = true
+			if m.Bucket != "gcs-bucket" {
+				t.Errorf("gcs mount: bucket = %q, want gcs-bucket", m.Bucket)
+			}
+			if m.MountPath != "/gcs" {
+				t.Errorf("gcs mount: mount_path = %q, want /gcs", m.MountPath)
+			}
+		}
+	}
+	if !foundS3 {
+		t.Error("S3 mount not found in response")
+	}
+	if !foundGCS {
+		t.Error("GCS mount not found in response")
+	}
+
+	// Verify session can be fetched after creation.
+	getRec := ts.doRequest(t, http.MethodGet, "/api/v1/sessions/"+sess.ID, nil, nil)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d", getRec.Code)
+	}
+	var fetched loka.Session
+	decodeBody(t, getRec, &fetched)
+	if fetched.ID != sess.ID {
+		t.Errorf("fetched session ID = %q, want %q", fetched.ID, sess.ID)
+	}
+}

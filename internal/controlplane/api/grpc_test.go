@@ -477,6 +477,187 @@ func TestSessionLabelsPreserved(t *testing.T) {
 	}
 }
 
+func TestGRPCPauseAndResume(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	created, err := env.client.CreateSession(ctx, &pb.CreateSessionRequest{
+		Name: "pause-resume",
+		Mode: pb.ExecMode_EXEC_MODE_EXPLORE,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if created.Status != pb.SessionStatus_SESSION_STATUS_RUNNING {
+		t.Fatalf("expected initial status RUNNING, got %v", created.Status)
+	}
+
+	// Pause.
+	paused, err := env.client.PauseSession(ctx, &pb.PauseSessionRequest{Id: created.Id})
+	if err != nil {
+		t.Fatalf("PauseSession: %v", err)
+	}
+	if paused.Status != pb.SessionStatus_SESSION_STATUS_PAUSED {
+		t.Errorf("expected status PAUSED, got %v", paused.Status)
+	}
+
+	// Verify via Get.
+	got, err := env.client.GetSession(ctx, &pb.GetSessionRequest{Id: created.Id})
+	if err != nil {
+		t.Fatalf("GetSession after pause: %v", err)
+	}
+	if got.Status != pb.SessionStatus_SESSION_STATUS_PAUSED {
+		t.Errorf("expected status PAUSED from Get, got %v", got.Status)
+	}
+
+	// Resume.
+	resumed, err := env.client.ResumeSession(ctx, &pb.ResumeSessionRequest{Id: created.Id})
+	if err != nil {
+		t.Fatalf("ResumeSession: %v", err)
+	}
+	if resumed.Status != pb.SessionStatus_SESSION_STATUS_RUNNING {
+		t.Errorf("expected status RUNNING after resume, got %v", resumed.Status)
+	}
+
+	// Verify via Get.
+	got2, err := env.client.GetSession(ctx, &pb.GetSessionRequest{Id: created.Id})
+	if err != nil {
+		t.Fatalf("GetSession after resume: %v", err)
+	}
+	if got2.Status != pb.SessionStatus_SESSION_STATUS_RUNNING {
+		t.Errorf("expected status RUNNING from Get, got %v", got2.Status)
+	}
+}
+
+func TestGRPCSetModeTransitions(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	created, err := env.client.CreateSession(ctx, &pb.CreateSessionRequest{
+		Name: "mode-transitions",
+		Mode: pb.ExecMode_EXEC_MODE_EXPLORE,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	transitions := []pb.ExecMode{
+		pb.ExecMode_EXEC_MODE_EXECUTE,
+		pb.ExecMode_EXEC_MODE_ASK,
+		pb.ExecMode_EXEC_MODE_EXPLORE,
+	}
+
+	for _, mode := range transitions {
+		resp, err := env.client.SetSessionMode(ctx, &pb.SetSessionModeRequest{
+			Id:   created.Id,
+			Mode: mode,
+		})
+		if err != nil {
+			t.Fatalf("SetSessionMode to %v: %v", mode, err)
+		}
+		if resp.Mode != mode {
+			t.Errorf("expected mode %v, got %v", mode, resp.Mode)
+		}
+
+		// Verify via Get.
+		got, err := env.client.GetSession(ctx, &pb.GetSessionRequest{Id: created.Id})
+		if err != nil {
+			t.Fatalf("GetSession after mode change: %v", err)
+		}
+		if got.Mode != mode {
+			t.Errorf("Get: expected mode %v, got %v", mode, got.Mode)
+		}
+	}
+}
+
+func TestGRPCDestroyRunningSession(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	created, err := env.client.CreateSession(ctx, &pb.CreateSessionRequest{
+		Name: "destroy-running",
+		Mode: pb.ExecMode_EXEC_MODE_EXECUTE,
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if created.Status != pb.SessionStatus_SESSION_STATUS_RUNNING {
+		t.Fatalf("expected status RUNNING, got %v", created.Status)
+	}
+
+	// Destroy the running session.
+	_, err = env.client.DestroySession(ctx, &pb.DestroySessionRequest{Id: created.Id})
+	if err != nil {
+		t.Fatalf("DestroySession: %v", err)
+	}
+
+	// Verify terminated.
+	got, err := env.client.GetSession(ctx, &pb.GetSessionRequest{Id: created.Id})
+	if err != nil {
+		t.Fatalf("GetSession after destroy: %v", err)
+	}
+	if got.Status != pb.SessionStatus_SESSION_STATUS_TERMINATED {
+		t.Errorf("expected TERMINATED, got %v", got.Status)
+	}
+
+	// List should still include it.
+	list, err := env.client.ListSessions(ctx, &pb.ListSessionsRequest{})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	found := false
+	for _, s := range list.Sessions {
+		if s.Id == created.Id {
+			found = true
+			if s.Status != pb.SessionStatus_SESSION_STATUS_TERMINATED {
+				t.Errorf("listed session status: expected TERMINATED, got %v", s.Status)
+			}
+		}
+	}
+	if !found {
+		t.Error("destroyed session not found in list")
+	}
+}
+
+func TestGRPCCreateMultipleSessions(t *testing.T) {
+	env := setupTestEnv(t)
+	ctx := context.Background()
+
+	ids := make(map[string]bool)
+	for i := 0; i < 5; i++ {
+		resp, err := env.client.CreateSession(ctx, &pb.CreateSessionRequest{
+			Name:     "multi-" + string(rune('A'+i)),
+			Snapshot: "ubuntu:22.04",
+			Mode:     pb.ExecMode_EXEC_MODE_EXPLORE,
+		})
+		if err != nil {
+			t.Fatalf("CreateSession %d: %v", i, err)
+		}
+		if ids[resp.Id] {
+			t.Errorf("duplicate session ID: %s", resp.Id)
+		}
+		ids[resp.Id] = true
+	}
+
+	list, err := env.client.ListSessions(ctx, &pb.ListSessionsRequest{})
+	if err != nil {
+		t.Fatalf("ListSessions: %v", err)
+	}
+	if list.Total != 5 {
+		t.Errorf("expected 5 sessions, got %d", list.Total)
+	}
+	if len(list.Sessions) != 5 {
+		t.Errorf("expected 5 session objects, got %d", len(list.Sessions))
+	}
+
+	// Verify each returned session has a unique ID that we created.
+	for _, s := range list.Sessions {
+		if !ids[s.Id] {
+			t.Errorf("unexpected session ID in list: %s", s.Id)
+		}
+	}
+}
+
 // defaultCapacity returns a ResourceCapacity for test workers.
 func defaultCapacity() loka.ResourceCapacity {
 	return loka.ResourceCapacity{

@@ -1253,3 +1253,227 @@ func TestRestoreCheckpointNonExistentCheckpoint(t *testing.T) {
 	}
 	te.drainWorkerCommands(t)
 }
+
+// ─── Idle / Wake tests ──────────────────────────────────────────
+
+func TestIdleSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "idle-test", Mode: loka.ModeExplore})
+
+	idled, err := te.manager.Idle(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Idle: %v", err)
+	}
+	if idled.Status != loka.SessionStatusIdle {
+		t.Errorf("Status = %q, want %q", idled.Status, loka.SessionStatusIdle)
+	}
+
+	// Verify a pause_session command was sent to the worker.
+	cmds := te.drainWorkerCommands(t)
+	found := false
+	for _, cmd := range cmds {
+		if cmd.Type == "pause_session" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected pause_session command sent to worker")
+	}
+}
+
+func TestIdleNonRunningSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "idle-paused", Mode: loka.ModeExplore})
+
+	// Pause the session first.
+	_, err := te.manager.Pause(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	// Trying to idle a paused session should fail.
+	_, err = te.manager.Idle(ctx, s.ID)
+	if err == nil {
+		t.Fatal("expected error when idling a paused session")
+	}
+}
+
+func TestWakeSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "wake-test", Mode: loka.ModeExplore})
+
+	_, err := te.manager.Idle(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Idle: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	woken, err := te.manager.Wake(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Wake: %v", err)
+	}
+	if woken.Status != loka.SessionStatusRunning {
+		t.Errorf("Status = %q, want %q", woken.Status, loka.SessionStatusRunning)
+	}
+
+	// Verify a resume_session command was sent.
+	cmds := te.drainWorkerCommands(t)
+	found := false
+	for _, cmd := range cmds {
+		if cmd.Type == "resume_session" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected resume_session command sent to worker")
+	}
+}
+
+func TestWakeAlreadyRunning(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "wake-running", Mode: loka.ModeExplore})
+
+	// Waking an already-running session should return it without error.
+	woken, err := te.manager.Wake(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Wake on running session: %v", err)
+	}
+	if woken.ID != s.ID {
+		t.Errorf("ID = %q, want %q", woken.ID, s.ID)
+	}
+	if woken.Status != loka.SessionStatusRunning {
+		t.Errorf("Status = %q, want %q", woken.Status, loka.SessionStatusRunning)
+	}
+}
+
+func TestWakeNonIdleSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "wake-paused", Mode: loka.ModeExplore})
+
+	// Pause the session.
+	_, err := te.manager.Pause(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	// Waking a paused session should fail (only idle or running is accepted).
+	_, err = te.manager.Wake(ctx, s.ID)
+	if err == nil {
+		t.Fatal("expected error when waking a paused session")
+	}
+}
+
+func TestExecAutoWakesIdleSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "exec-autowake", Mode: loka.ModeExecute})
+
+	// Idle the session.
+	_, err := te.manager.Idle(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Idle: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	// Exec on idle session should auto-wake, then execute.
+	commands := []loka.Command{{ID: "cmd-1", Command: "echo", Args: []string{"hello"}}}
+	exec, err := te.manager.Exec(ctx, s.ID, commands, false)
+	if err != nil {
+		t.Fatalf("Exec on idle session: %v", err)
+	}
+	if exec.SessionID != s.ID {
+		t.Errorf("SessionID = %q, want %q", exec.SessionID, s.ID)
+	}
+	if exec.Status != loka.ExecStatusRunning {
+		t.Errorf("Status = %q, want %q", exec.Status, loka.ExecStatusRunning)
+	}
+
+	// Verify the session is now running.
+	got, err := te.manager.Get(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != loka.SessionStatusRunning {
+		t.Errorf("session Status = %q, want %q after auto-wake", got.Status, loka.SessionStatusRunning)
+	}
+	te.drainWorkerCommands(t)
+}
+
+func TestSyncAutoWakesIdleSession(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "sync-autowake", Mode: loka.ModeExecute})
+
+	// Idle the session.
+	_, err := te.manager.Idle(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Idle: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	// SyncMount on idle session should auto-wake.
+	_, err = te.manager.SyncMount(ctx, s.ID, loka.SyncRequest{
+		MountPath: "/data",
+		Direction: loka.SyncPush,
+	})
+	// The sync itself may fail (no actual mount configured), but it should
+	// NOT fail because the session is idle — it should have woken it first.
+	// Check that the session is now running.
+	got, err2 := te.manager.Get(ctx, s.ID)
+	if err2 != nil {
+		t.Fatalf("Get: %v", err2)
+	}
+	if got.Status != loka.SessionStatusRunning {
+		t.Errorf("session Status = %q, want %q after auto-wake via sync", got.Status, loka.SessionStatusRunning)
+	}
+	// If err is non-nil, it should not be about idle status.
+	if err != nil && (err.Error() == "session is idle, must be running" || err.Error() == "cannot wake session in status idle") {
+		t.Fatalf("SyncMount failed due to idle status instead of auto-waking: %v", err)
+	}
+	te.drainWorkerCommands(t)
+}
+
+func TestIdleToTerminate(t *testing.T) {
+	te := setupTestManager(t)
+	ctx := context.Background()
+
+	s := te.createRunningSession(t, CreateOpts{Name: "idle-destroy", Mode: loka.ModeExplore})
+
+	// Idle the session.
+	_, err := te.manager.Idle(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Idle: %v", err)
+	}
+	te.drainWorkerCommands(t)
+
+	// Destroy an idle session should succeed.
+	err = te.manager.Destroy(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Destroy idle session: %v", err)
+	}
+
+	got, err := te.manager.Get(ctx, s.ID)
+	if err != nil {
+		t.Fatalf("Get after destroy: %v", err)
+	}
+	if got.Status != loka.SessionStatusTerminated {
+		t.Errorf("Status = %q, want %q", got.Status, loka.SessionStatusTerminated)
+	}
+	te.drainWorkerCommands(t)
+}

@@ -373,5 +373,184 @@ func TestClientHealthPath(t *testing.T) {
 	}
 }
 
+func TestStorageMountJSONRoundTrip(t *testing.T) {
+	mount := StorageMount{
+		Name:      "data-bucket",
+		Provider:  "s3",
+		Bucket:    "my-bucket",
+		Prefix:    "datasets/",
+		MountPath: "/mnt/data",
+		ReadOnly:  true,
+		Region:    "us-east-1",
+		Endpoint:  "https://s3.amazonaws.com",
+		Credentials: map[string]string{
+			"access_key_id":     "AKIA...",
+			"secret_access_key": "secret",
+		},
+	}
+
+	data, err := json.Marshal(mount)
+	if err != nil {
+		t.Fatalf("Marshal StorageMount: %v", err)
+	}
+
+	var got StorageMount
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal StorageMount: %v", err)
+	}
+
+	if got.Name != mount.Name {
+		t.Errorf("Name: expected %q, got %q", mount.Name, got.Name)
+	}
+	if got.Provider != mount.Provider {
+		t.Errorf("Provider: expected %q, got %q", mount.Provider, got.Provider)
+	}
+	if got.Bucket != mount.Bucket {
+		t.Errorf("Bucket: expected %q, got %q", mount.Bucket, got.Bucket)
+	}
+	if got.Prefix != mount.Prefix {
+		t.Errorf("Prefix: expected %q, got %q", mount.Prefix, got.Prefix)
+	}
+	if got.MountPath != mount.MountPath {
+		t.Errorf("MountPath: expected %q, got %q", mount.MountPath, got.MountPath)
+	}
+	if got.ReadOnly != mount.ReadOnly {
+		t.Errorf("ReadOnly: expected %v, got %v", mount.ReadOnly, got.ReadOnly)
+	}
+	if got.Region != mount.Region {
+		t.Errorf("Region: expected %q, got %q", mount.Region, got.Region)
+	}
+	if got.Endpoint != mount.Endpoint {
+		t.Errorf("Endpoint: expected %q, got %q", mount.Endpoint, got.Endpoint)
+	}
+	if got.Credentials["access_key_id"] != "AKIA..." {
+		t.Errorf("Credentials[access_key_id]: expected %q, got %q", "AKIA...", got.Credentials["access_key_id"])
+	}
+}
+
+func TestPortMappingJSONRoundTrip(t *testing.T) {
+	pm := PortMapping{
+		LocalPort:  8080,
+		RemotePort: 80,
+		Protocol:   "tcp",
+	}
+
+	data, err := json.Marshal(pm)
+	if err != nil {
+		t.Fatalf("Marshal PortMapping: %v", err)
+	}
+
+	var got PortMapping
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal PortMapping: %v", err)
+	}
+
+	if got.LocalPort != pm.LocalPort {
+		t.Errorf("LocalPort: expected %d, got %d", pm.LocalPort, got.LocalPort)
+	}
+	if got.RemotePort != pm.RemotePort {
+		t.Errorf("RemotePort: expected %d, got %d", pm.RemotePort, got.RemotePort)
+	}
+	if got.Protocol != pm.Protocol {
+		t.Errorf("Protocol: expected %q, got %q", pm.Protocol, got.Protocol)
+	}
+
+	// Verify JSON field names.
+	var raw map[string]interface{}
+	json.Unmarshal(data, &raw)
+	if _, ok := raw["local_port"]; !ok {
+		t.Error("expected JSON key \"local_port\"")
+	}
+	if _, ok := raw["remote_port"]; !ok {
+		t.Error("expected JSON key \"remote_port\"")
+	}
+}
+
+func TestCreateSessionReqWithMountsAndPorts(t *testing.T) {
+	req := CreateSessionReq{
+		Name:     "full-session",
+		Image:    "python:3.12",
+		Mode:     "execute",
+		VCPUs:    4,
+		MemoryMB: 2048,
+		Labels:   map[string]string{"team": "ml"},
+		Mounts: []StorageMount{
+			{
+				Provider:  "s3",
+				Bucket:    "training-data",
+				MountPath: "/mnt/training",
+				ReadOnly:  true,
+			},
+			{
+				Provider:  "gcs",
+				Bucket:    "output-data",
+				MountPath: "/mnt/output",
+				ReadOnly:  false,
+			},
+		},
+		Ports: []PortMapping{
+			{LocalPort: 8080, RemotePort: 80, Protocol: "tcp"},
+			{LocalPort: 5432, RemotePort: 5432},
+		},
+	}
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("Marshal CreateSessionReq: %v", err)
+	}
+
+	var got CreateSessionReq
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("Unmarshal CreateSessionReq: %v", err)
+	}
+
+	if got.Name != "full-session" {
+		t.Errorf("Name: expected %q, got %q", "full-session", got.Name)
+	}
+	if len(got.Mounts) != 2 {
+		t.Fatalf("Mounts: expected 2, got %d", len(got.Mounts))
+	}
+	if got.Mounts[0].Bucket != "training-data" {
+		t.Errorf("Mounts[0].Bucket: expected %q, got %q", "training-data", got.Mounts[0].Bucket)
+	}
+	if got.Mounts[1].Provider != "gcs" {
+		t.Errorf("Mounts[1].Provider: expected %q, got %q", "gcs", got.Mounts[1].Provider)
+	}
+	if len(got.Ports) != 2 {
+		t.Fatalf("Ports: expected 2, got %d", len(got.Ports))
+	}
+	if got.Ports[0].LocalPort != 8080 {
+		t.Errorf("Ports[0].LocalPort: expected 8080, got %d", got.Ports[0].LocalPort)
+	}
+	if got.Ports[1].RemotePort != 5432 {
+		t.Errorf("Ports[1].RemotePort: expected 5432, got %d", got.Ports[1].RemotePort)
+	}
+
+	// Verify omitempty: protocol on second port should be absent.
+	var raw map[string]json.RawMessage
+	json.Unmarshal(data, &raw)
+	var ports []map[string]json.RawMessage
+	json.Unmarshal(raw["ports"], &ports)
+	if _, ok := ports[1]["protocol"]; ok {
+		// Protocol is empty string, with omitempty it should be omitted.
+		var proto string
+		json.Unmarshal(ports[1]["protocol"], &proto)
+		if proto != "" {
+			t.Errorf("expected empty protocol to be omitted or empty, got %q", proto)
+		}
+	}
+}
+
+func TestGRPCClientInvalidAddress(t *testing.T) {
+	// NewGRPCClient with an invalid CA cert path should return an error.
+	_, err := NewGRPCClient(GRPCOpts{
+		Address:    "localhost:0",
+		CACertPath: "/nonexistent/ca.pem",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid CA cert path")
+	}
+}
+
 // Ensure unused import is consumed.
 var _ = insecure.NewCredentials

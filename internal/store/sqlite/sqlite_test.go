@@ -1051,3 +1051,272 @@ func TestSessionDeleteCascadesCheckpoints(t *testing.T) {
 		t.Error("checkpoint should be cascade-deleted with session")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Extended tests
+// ---------------------------------------------------------------------------
+
+func TestSessionUpdateStatusAndVerify(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	sess := createTestSession(t, s, "status-update", loka.SessionStatusRunning, "worker-1")
+
+	// Update to paused.
+	sess.Status = loka.SessionStatusPaused
+	sess.UpdatedAt = time.Now()
+	if err := s.Sessions().Update(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Sessions().Get(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != loka.SessionStatusPaused {
+		t.Errorf("status = %s, want paused", got.Status)
+	}
+
+	// Update to terminated.
+	got.Status = loka.SessionStatusTerminated
+	got.UpdatedAt = time.Now()
+	if err := s.Sessions().Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+
+	got2, err := s.Sessions().Get(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.Status != loka.SessionStatusTerminated {
+		t.Errorf("status = %s, want terminated", got2.Status)
+	}
+}
+
+func TestExecutionUpdateStatusAndResults(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	sess := createTestSession(t, s, "exec-update", loka.SessionStatusRunning, "")
+
+	exec := &loka.Execution{
+		ID:        uuid.New().String(),
+		SessionID: sess.ID,
+		Status:    loka.ExecStatusPending,
+		Commands: []loka.Command{
+			{ID: "c1", Command: "echo", Args: []string{"hello"}},
+			{ID: "c2", Command: "ls", Args: []string{"-la"}},
+		},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	if err := s.Executions().Create(ctx, exec); err != nil {
+		t.Fatal(err)
+	}
+
+	// Update to running.
+	got, err := s.Executions().Get(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got.Status = loka.ExecStatusRunning
+	got.UpdatedAt = time.Now()
+	if err := s.Executions().Update(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+
+	got2, err := s.Executions().Get(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got2.Status != loka.ExecStatusRunning {
+		t.Errorf("status = %s, want running", got2.Status)
+	}
+
+	// Update to success with results.
+	got2.Status = loka.ExecStatusSuccess
+	got2.Results = []loka.CommandResult{
+		{CommandID: "c1", ExitCode: 0, Stdout: "hello\n"},
+		{CommandID: "c2", ExitCode: 0, Stdout: "total 4\n-rw-r--r-- 1 root root 0 Jan 1 00:00 file.txt\n"},
+	}
+	got2.UpdatedAt = time.Now()
+	if err := s.Executions().Update(ctx, got2); err != nil {
+		t.Fatal(err)
+	}
+
+	got3, err := s.Executions().Get(ctx, exec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got3.Status != loka.ExecStatusSuccess {
+		t.Errorf("status = %s, want success", got3.Status)
+	}
+	if len(got3.Results) != 2 {
+		t.Fatalf("results len = %d, want 2", len(got3.Results))
+	}
+	if got3.Results[0].Stdout != "hello\n" {
+		t.Errorf("results[0].stdout = %q, want %q", got3.Results[0].Stdout, "hello\n")
+	}
+	if got3.Results[1].CommandID != "c2" {
+		t.Errorf("results[1].command_id = %q, want c2", got3.Results[1].CommandID)
+	}
+}
+
+func TestCheckpointWithParentVerify(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	sess := createTestSession(t, s, "cp-parent", loka.SessionStatusRunning, "")
+
+	parent := &loka.Checkpoint{
+		ID:        uuid.New().String(),
+		SessionID: sess.ID,
+		ParentID:  "",
+		Type:      loka.CheckpointLight,
+		Status:    loka.CheckpointStatusReady,
+		Label:     "parent-cp",
+		CreatedAt: time.Now(),
+	}
+	if err := s.Checkpoints().Create(ctx, parent); err != nil {
+		t.Fatal(err)
+	}
+
+	child := &loka.Checkpoint{
+		ID:        uuid.New().String(),
+		SessionID: sess.ID,
+		ParentID:  parent.ID,
+		Type:      loka.CheckpointFull,
+		Status:    loka.CheckpointStatusCreating,
+		Label:     "child-cp",
+		CreatedAt: time.Now(),
+	}
+	if err := s.Checkpoints().Create(ctx, child); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify parent has no parent.
+	gotParent, err := s.Checkpoints().Get(ctx, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotParent.ParentID != "" {
+		t.Errorf("parent.ParentID = %q, want empty", gotParent.ParentID)
+	}
+
+	// Verify child references parent.
+	gotChild, err := s.Checkpoints().Get(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotChild.ParentID != parent.ID {
+		t.Errorf("child.ParentID = %q, want %q", gotChild.ParentID, parent.ID)
+	}
+	if gotChild.Type != loka.CheckpointFull {
+		t.Errorf("child.Type = %s, want full", gotChild.Type)
+	}
+	if gotChild.Label != "child-cp" {
+		t.Errorf("child.Label = %q, want %q", gotChild.Label, "child-cp")
+	}
+}
+
+func TestSessionListMultipleFiltersCombined(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	// Create sessions with various status and worker combinations.
+	createTestSession(t, s, "r-w1", loka.SessionStatusRunning, "worker-1")
+	createTestSession(t, s, "r-w2", loka.SessionStatusRunning, "worker-2")
+	createTestSession(t, s, "p-w1", loka.SessionStatusPaused, "worker-1")
+	createTestSession(t, s, "t-w1", loka.SessionStatusTerminated, "worker-1")
+
+	// Filter by status=running AND worker=worker-1 should give 1 result.
+	status := loka.SessionStatusRunning
+	wid := "worker-1"
+	list, err := s.Sessions().List(ctx, store.SessionFilter{
+		Status:   &status,
+		WorkerID: &wid,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 {
+		t.Errorf("got %d sessions, want 1", len(list))
+	}
+	if len(list) > 0 {
+		if list[0].Name != "r-w1" {
+			t.Errorf("got name %q, want r-w1", list[0].Name)
+		}
+	}
+
+	// Filter by status=running should give 2 results.
+	list2, err := s.Sessions().List(ctx, store.SessionFilter{Status: &status})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list2) != 2 {
+		t.Errorf("got %d sessions, want 2", len(list2))
+	}
+
+	// Filter by worker-1 only should give 3 results.
+	list3, err := s.Sessions().List(ctx, store.SessionFilter{WorkerID: &wid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list3) != 3 {
+		t.Errorf("got %d sessions, want 3", len(list3))
+	}
+
+	// Filter by name and status combined.
+	name := "p-w1"
+	pausedStatus := loka.SessionStatusPaused
+	list4, err := s.Sessions().List(ctx, store.SessionFilter{
+		Name:   &name,
+		Status: &pausedStatus,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list4) != 1 {
+		t.Errorf("got %d sessions, want 1", len(list4))
+	}
+}
+
+func TestWorkerUpdateHeartbeatChangesLastSeen(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	w := createTestWorker(t, s, uuid.New().String(), "aws", "us-east-1", loka.WorkerStatusReady, nil)
+
+	// Record original LastSeen.
+	original, err := s.Workers().Get(ctx, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalLastSeen := original.LastSeen
+
+	// Use a timestamp far enough in the future to survive any rounding.
+	futureTime := originalLastSeen.Add(2 * time.Second)
+	hb := &loka.Heartbeat{
+		WorkerID:  w.ID,
+		Timestamp: futureTime,
+		Status:    loka.WorkerStatusReady,
+	}
+	if err := s.Workers().UpdateHeartbeat(ctx, w.ID, hb); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := s.Workers().Get(ctx, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// LastSeen should have been updated to at least after the original.
+	if !got.LastSeen.After(originalLastSeen) {
+		t.Errorf("LastSeen was not updated: original=%v, got=%v", originalLastSeen, got.LastSeen)
+	}
+
+	// Status should remain ready (we sent ready in heartbeat).
+	if got.Status != loka.WorkerStatusReady {
+		t.Errorf("status = %s, want ready", got.Status)
+	}
+}
