@@ -3,7 +3,7 @@
 #  LOKA End-to-End Test Suite
 #
 #  Runs on both macOS (via Lima) and Linux (direct).
-#  On macOS: uses 'loka deploy local' / 'loka deploy down'
+#  On macOS: uses 'loka setup local' / 'loka setup down'
 #  On Linux: starts lokad directly with Firecracker + KVM
 #
 #  Usage: make e2e-test  (or bash scripts/e2e-test.sh)
@@ -79,7 +79,7 @@ run_in_vm() {
 
 stop_lokad() {
   if [ "$IS_MACOS" = true ]; then
-    "$LOKA_BIN" deploy down 2>/dev/null || true
+    "$LOKA_BIN" setup down 2>/dev/null || true
     sleep 2
   else
     if [ -n "$LOKAD_PID" ] && kill -0 "$LOKAD_PID" 2>/dev/null; then
@@ -233,7 +233,7 @@ echo -e "${CYAN}==> Starting lokad${NC}"
 CURL_OPTS="-s"
 
 if [ "$IS_MACOS" = true ]; then
-  # macOS: use loka deploy local (handles Lima, rootfs, kernel, lokad)
+  # macOS: use loka setup local (handles Lima, rootfs, kernel, lokad)
   stop_lokad
 
   # Ensure Lima VM is running before copying binaries
@@ -250,13 +250,13 @@ if [ "$IS_MACOS" = true ]; then
   rm -f ~/lokad-e2e ~/supervisor-e2e
   echo "  Binaries updated in Lima"
 
-  "$LOKA_BIN" deploy local
+  "$LOKA_BIN" setup local
   if [ $? -ne 0 ]; then
-    fail "loka deploy local" "failed to start"
+    fail "loka setup local" "failed to start"
     exit 1
   fi
 
-  # deploy local fetches CA cert from server → ~/.loka/tls/ca.crt
+  # setup local fetches CA cert from server → ~/.loka/tls/ca.crt
   ENDPOINT="https://localhost:6840"
   CA_CERT="$HOME/.loka/tls/ca.crt"
   if [ -f "$CA_CERT" ]; then
@@ -1159,7 +1159,7 @@ if [ "$IS_LINUX" = true ]; then
     sleep 3
   fi
 fi
-# macOS: lokad should still be running from deploy local
+# macOS: lokad should still be running from setup local
 
 # All CLI commands explicitly use http (no TLS in test mode)
 CLI_S="--server $ENDPOINT"
@@ -1192,8 +1192,8 @@ VER=$("$LOKA_BIN" version 2>&1)
 echo "$VER" | grep -q "loka" && pass "loka version" || fail "loka version" "$VER"
 
 # Export
-EXP=$("$LOKA_BIN" deploy export e2e-server 2>&1)
-echo "$EXP" | grep -q "e2e-server" && pass "loka deploy export" || fail "loka deploy export" "$EXP"
+EXP=$("$LOKA_BIN" setup export e2e-server 2>&1)
+echo "$EXP" | grep -q "e2e-server" && pass "loka setup export" || fail "loka setup export" "$EXP"
 
 # Admin
 RET=$("$LOKA_BIN" $CLI_S admin retention 2>&1)
@@ -1384,8 +1384,8 @@ workers:
   - address: $W2_IP
 YAML
 
-  APPLY_OUT=$("$LOKA_BIN" --server "$MW_EP" deploy export e2e-multi 2>&1 || echo "no export")
-  # deploy export works if the server was connected
+  APPLY_OUT=$("$LOKA_BIN" --server "$MW_EP" setup export e2e-multi 2>&1 || echo "no export")
+  # setup export works if the server was connected
   pass "Deploy YAML created for multi-worker"
 
   # Cleanup
@@ -1472,14 +1472,14 @@ PROV=$("$LOKA_BIN" $CLI_S provider list 2>&1)
 pass "CLI: provider list"
 
 # Deploy rename
-"$LOKA_BIN" deploy rename e2e-server e2e-renamed 2>&1 | grep -qi "Renamed\|e2e" && \
-  pass "CLI: deploy rename" || pass "CLI: deploy rename (completed)"
+"$LOKA_BIN" setup rename e2e-server e2e-renamed 2>&1 | grep -qi "Renamed\|e2e" && \
+  pass "CLI: setup rename" || pass "CLI: setup rename (completed)"
 # Rename back
-"$LOKA_BIN" deploy rename e2e-renamed e2e-server 2>/dev/null
+"$LOKA_BIN" setup rename e2e-renamed e2e-server 2>/dev/null
 
 # Deploy status
-DS=$("$LOKA_BIN" deploy status 2>&1)
-pass "CLI: deploy status"
+DS=$("$LOKA_BIN" setup status 2>&1)
+pass "CLI: setup status"
 
 # ── 16. gRPC streaming ──────────────────────────────────
 

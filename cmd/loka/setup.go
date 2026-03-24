@@ -178,13 +178,13 @@ func deployLocalMacOS(name string, foreground bool) error {
 	fmt.Print("  Syncing binaries...")
 	exec.Command(limactl, "shell", "loka", "sudo", "sh", "-c", `
 		# Check if lokad already works.
-		if lokad --help >/dev/null 2>&1; then exit 0; fi
+		if command -v lokad >/dev/null 2>&1 && command -v firecracker >/dev/null 2>&1; then exit 0; fi
 
 		# Try to copy from ISO overlay location.
 		for bin in lokad loka-worker loka-supervisor firecracker; do
 			[ -f /usr/share/loka/$bin ] && cp /usr/share/loka/$bin /usr/local/bin/$bin && chmod +x /usr/local/bin/$bin
 		done
-		if lokad --help >/dev/null 2>&1; then exit 0; fi
+		if command -v lokad >/dev/null 2>&1 && command -v firecracker >/dev/null 2>&1; then exit 0; fi
 
 		# Download from GitHub releases as last resort.
 		ARCH=$(uname -m)
