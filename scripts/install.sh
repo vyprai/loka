@@ -502,7 +502,7 @@ provision:
 LIMAEOF
     fi
 
-    limactl create --name="$LIMA_INSTANCE" --tty=false "$lima_config"
+    limactl create --name="$LIMA_INSTANCE" --plain --tty=false "$lima_config"
     rm "$lima_config"
 
     info "Starting Lima VM..."
