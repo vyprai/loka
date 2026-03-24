@@ -457,16 +457,40 @@ provision:
   - mode: system
     script: |
       #!/bin/sh
-      # LOKA binaries are pre-installed in the ISO.
-      # Just enable KVM and install Docker on first boot.
+      # LOKA ISO: binaries + firecracker + kernel pre-installed.
+      # Provision: enable KVM, link kernel, install Docker, create rootfs.
       #!/bin/sh
       set -eux
       [ -e /dev/kvm ] && chmod 666 /dev/kvm || true
+
+      # Link kernel to paths lokad expects.
+      mkdir -p /var/loka/kernel /tmp/loka-data/kernel /tmp/loka-data/rootfs /tmp/loka-data/objstore
+      [ -f /usr/share/loka/vmlinux ] && cp /usr/share/loka/vmlinux /var/loka/kernel/vmlinux
+      [ -f /var/loka/kernel/vmlinux ] && ln -sf /var/loka/kernel/vmlinux /tmp/loka-data/kernel/vmlinux
+
+      # Install Docker.
       if ! command -v docker >/dev/null 2>&1; then
         apk add --no-cache docker >/dev/null 2>&1
         rc-update add docker default 2>/dev/null || true
       fi
       service docker start 2>/dev/null || true
+
+      # Create default rootfs if missing.
+      if [ ! -f /tmp/loka-data/rootfs/rootfs.ext4 ] && command -v docker >/dev/null 2>&1; then
+        docker pull alpine:latest >/dev/null 2>&1 || true
+        CID=$(docker create alpine:latest 2>/dev/null) || true
+        if [ -n "$CID" ]; then
+          docker export $CID > /tmp/rootfs.tar
+          docker rm $CID >/dev/null
+          dd if=/dev/zero of=/tmp/loka-data/rootfs/rootfs.ext4 bs=1M count=128 2>/dev/null
+          mkfs.ext4 -F /tmp/loka-data/rootfs/rootfs.ext4 >/dev/null 2>&1
+          mkdir -p /tmp/mnt-rootfs
+          mount -o loop /tmp/loka-data/rootfs/rootfs.ext4 /tmp/mnt-rootfs
+          tar xf /tmp/rootfs.tar -C /tmp/mnt-rootfs 2>/dev/null
+          [ -f /usr/local/bin/loka-supervisor ] && cp /usr/local/bin/loka-supervisor /tmp/mnt-rootfs/usr/local/bin/loka-supervisor && chmod +x /tmp/mnt-rootfs/usr/local/bin/loka-supervisor
+          umount /tmp/mnt-rootfs; rmdir /tmp/mnt-rootfs; rm -f /tmp/rootfs.tar
+        fi
+      fi
 LIMAEOF
     else
       # Stock Alpine: needs full provision.

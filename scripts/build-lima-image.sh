@@ -47,7 +47,30 @@ git clone --depth 1 https://github.com/lima-vm/alpine-lima.git "$BUILD_DIR" 2>&1
 cd "$BUILD_DIR"
 git submodule update --init 2>/dev/null || true
 
-# ── Step 3: Patch overlay to include LOKA ────────────────
+# ── Step 3b: Download Firecracker + kernel ───────────────
+
+FC_VERSION="v1.10.1"
+case "$ARCH" in
+  aarch64) FC_ARCH="aarch64" ;;
+  x86_64)  FC_ARCH="x86_64" ;;
+esac
+
+echo "==> Downloading Firecracker ${FC_VERSION} (${FC_ARCH})"
+if [ ! -f "$OUT_DIR/firecracker" ]; then
+  curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-${FC_ARCH}.tgz" -o "$OUT_DIR/fc.tgz"
+  tar -xzf "$OUT_DIR/fc.tgz" -C "$OUT_DIR"
+  mv "$OUT_DIR/release-${FC_VERSION}-${FC_ARCH}/firecracker-${FC_VERSION}-${FC_ARCH}" "$OUT_DIR/firecracker"
+  rm -rf "$OUT_DIR/release-${FC_VERSION}-${FC_ARCH}" "$OUT_DIR/fc.tgz"
+fi
+echo "  $(du -h "$OUT_DIR/firecracker" | awk '{print $1}')"
+
+echo "==> Downloading kernel"
+if [ ! -f "$OUT_DIR/vmlinux" ]; then
+  curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/ci-artifacts/kernels/${FC_ARCH}/vmlinux-5.10.bin" -o "$OUT_DIR/vmlinux"
+fi
+echo "  $(du -h "$OUT_DIR/vmlinux" | awk '{print $1}')"
+
+# ── Step 3c: Patch overlay to include LOKA ───────────────
 
 echo "==> Patching overlay"
 
@@ -55,11 +78,18 @@ echo "==> Patching overlay"
 cat > /tmp/loka-patch.sh << 'LPATCH'
 # ── LOKA ─────────────────────────────────────────────────
 if [ -d /loka-bins ]; then
+  # Binaries.
   mkdir -p "$tmp"/usr/local/bin
-  for bin in lokad loka-worker loka-supervisor; do
+  for bin in lokad loka-worker loka-supervisor firecracker; do
     [ -f "/loka-bins/$bin" ] && cp "/loka-bins/$bin" "$tmp/usr/local/bin/$bin" && chmod +x "$tmp/usr/local/bin/$bin"
   done
-  mkdir -p "$tmp"/var/loka/kernel "$tmp"/var/loka/artifacts "$tmp"/var/loka/tls
+
+  # Kernel — store in /usr/share/loka/ (persisted), provision script links it.
+  mkdir -p "$tmp"/usr/share/loka
+  [ -f "/loka-bins/vmlinux" ] && cp "/loka-bins/vmlinux" "$tmp/usr/share/loka/vmlinux"
+
+  # Data dirs (created but kernel/rootfs linked at boot by provision).
+  mkdir -p "$tmp"/var/loka/artifacts "$tmp"/var/loka/tls
 fi
 LPATCH
 
@@ -78,13 +108,15 @@ chmod +x genapkovl-lima.sh
 
 # ── Step 4: Patch Dockerfile to COPY binaries ────────────
 
-# Add LOKA binaries into the Docker build image so genapkovl can access them.
+# Add all LOKA files into the Docker build image so genapkovl can access them.
 cp "$OUT_DIR/lokad" "$BUILD_DIR/lokad"
 cp "$OUT_DIR/loka-worker" "$BUILD_DIR/loka-worker"
 cp "$OUT_DIR/loka-supervisor" "$BUILD_DIR/loka-supervisor"
+cp "$OUT_DIR/firecracker" "$BUILD_DIR/firecracker"
+cp "$OUT_DIR/vmlinux" "$BUILD_DIR/vmlinux"
 
 sed -i.bak '/^ENTRYPOINT/i\
-COPY lokad loka-worker loka-supervisor /loka-bins/\
+COPY lokad loka-worker loka-supervisor firecracker vmlinux /loka-bins/\
 RUN chmod +x /loka-bins/*' Dockerfile
 
 echo "  Done"
