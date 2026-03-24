@@ -145,6 +145,7 @@ func main() {
 		newDomainsCmd(),
 		newRecipeCmd(),
 		newAdminCmd(),
+		newSecretCmd(),
 	)
 
 	rootCmd.AddCommand(&cobra.Command{

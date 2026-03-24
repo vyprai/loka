@@ -166,6 +166,9 @@ func (s *Server) routes() {
 		r.Post("/services/{id}/redeploy", s.redeployService)
 		r.Put("/services/{id}/env", s.updateServiceEnv)
 		r.Get("/services/{id}/logs", s.getServiceLogs)
+		r.Post("/services/{id}/routes", s.addServiceRoute)
+		r.Delete("/services/{id}/routes/{subdomain}", s.removeServiceRoute)
+		r.Get("/services/{id}/routes", s.listServiceRoutes)
 
 		// Object store (service bundles) — public API for CLI uploads.
 		r.Put("/objstore/objects/{bucket}/*", s.objStorePut)

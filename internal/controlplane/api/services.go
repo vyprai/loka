@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/vyprai/loka/internal/controlplane/service"
@@ -201,5 +202,103 @@ func (s *Server) getServiceLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"stdout": stdout,
 		"stderr": stderr,
+	})
+}
+
+// --- Service Routes ---
+
+type addRouteReq struct {
+	Subdomain    string `json:"subdomain,omitempty"`
+	CustomDomain string `json:"custom_domain,omitempty"`
+	Port         int    `json:"port"`
+	Protocol     string `json:"protocol,omitempty"`
+}
+
+func (s *Server) addServiceRoute(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req addRouteReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Subdomain == "" && req.CustomDomain == "" {
+		writeError(w, http.StatusBadRequest, "subdomain or custom_domain is required")
+		return
+	}
+
+	svc, err := s.serviceManager.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	route := loka.ServiceRoute{
+		Subdomain:    req.Subdomain,
+		CustomDomain: req.CustomDomain,
+		Port:         req.Port,
+		Protocol:     req.Protocol,
+	}
+	if route.Port == 0 {
+		route.Port = svc.Port
+	}
+
+	svc.Routes = append(svc.Routes, route)
+	svc.UpdatedAt = time.Now()
+	if err := s.store.Services().Update(r.Context(), svc); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, svc)
+}
+
+func (s *Server) removeServiceRoute(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	subdomain := chi.URLParam(r, "subdomain")
+
+	svc, err := s.serviceManager.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	found := false
+	filtered := make([]loka.ServiceRoute, 0, len(svc.Routes))
+	for _, rt := range svc.Routes {
+		if rt.Subdomain == subdomain {
+			found = true
+			continue
+		}
+		filtered = append(filtered, rt)
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "route not found")
+		return
+	}
+
+	svc.Routes = filtered
+	svc.UpdatedAt = time.Now()
+	if err := s.store.Services().Update(r.Context(), svc); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, svc)
+}
+
+func (s *Server) listServiceRoutes(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	svc, err := s.serviceManager.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	routes := svc.Routes
+	if routes == nil {
+		routes = []loka.ServiceRoute{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"routes": routes,
 	})
 }

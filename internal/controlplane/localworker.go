@@ -53,6 +53,12 @@ func NewLocalWorker(registry *cpworker.Registry, sm *session.Manager, objStore o
 	return lw, nil
 }
 
+// Agent returns the embedded worker agent, allowing callers to access
+// agent-level methods such as ServiceLogs.
+func (lw *LocalWorker) Agent() *worker.Agent {
+	return lw.agent
+}
+
 // Start begins processing commands and sending heartbeats.
 func (lw *LocalWorker) Start(ctx context.Context) {
 	lw.logger.Info("local worker started", "id", lw.agent.ID())
@@ -190,6 +196,56 @@ func (lw *LocalWorker) handleCommand(ctx context.Context, cmd cpworker.WorkerCom
 				lw.logger.Info("checkpoint restored on worker", "checkpoint", data.CheckpointID, "session", data.SessionID)
 			}
 		}()
+
+	case "launch_service":
+		data := cmd.Data.(cpworker.LaunchServiceData)
+		go func() {
+			if err := lw.agent.LaunchService(ctx, data.ServiceID, worker.ServiceLaunchOpts{
+				ImageRef:      data.ImageRef,
+				VCPUs:         data.VCPUs,
+				MemoryMB:      data.MemoryMB,
+				RootfsPath:    data.RootfsPath,
+				Command:       data.Command,
+				Args:          data.Args,
+				Env:           data.Env,
+				Workdir:       data.Workdir,
+				Port:          data.Port,
+				BundleKey:     data.BundleKey,
+				RestartPolicy: data.RestartPolicy,
+			}); err != nil {
+				lw.logger.Error("failed to launch service", "service", data.ServiceID, "error", err)
+			}
+		}()
+
+	case "stop_service":
+		data := cmd.Data.(cpworker.StopServiceData)
+		if err := lw.agent.StopService(data.ServiceID); err != nil {
+			lw.logger.Error("failed to stop service", "service", data.ServiceID, "error", err)
+		}
+
+	case "service_status":
+		data := cmd.Data.(map[string]string)
+		serviceID := data["service_id"]
+		status, err := lw.agent.ServiceStatus(serviceID)
+		if err != nil {
+			lw.logger.Debug("service status check failed", "service", serviceID, "error", err)
+		} else {
+			lw.logger.Debug("service status", "service", serviceID, "running", status.Running, "pid", status.PID)
+		}
+
+	case "service_logs":
+		data := cmd.Data.(map[string]interface{})
+		serviceID := data["service_id"].(string)
+		lines := 100
+		if l, ok := data["lines"].(float64); ok {
+			lines = int(l)
+		}
+		result, err := lw.agent.ServiceLogs(serviceID, lines)
+		if err != nil {
+			lw.logger.Debug("service logs request failed", "service", serviceID, "error", err)
+		} else {
+			lw.logger.Debug("service logs retrieved", "service", serviceID, "stdout_lines", len(result.Stdout), "stderr_lines", len(result.Stderr))
+		}
 
 	default:
 		lw.logger.Warn("unknown command type", "type", cmd.Type)

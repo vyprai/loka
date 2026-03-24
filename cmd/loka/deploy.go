@@ -13,7 +13,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
+	"github.com/vyprai/loka/internal/loka"
 	"github.com/vyprai/loka/internal/recipe"
+	"github.com/vyprai/loka/internal/secret"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,6 +30,22 @@ type lokaYAML struct {
 	Include   []string          `yaml:"include"`
 	Start     string            `yaml:"start"`
 	Env       map[string]string `yaml:"env"`
+
+	// Routes and mounts.
+	Routes []loka.ServiceRoute `yaml:"routes,omitempty"`
+	Mounts []loka.VolumeMount  `yaml:"mounts,omitempty"`
+
+	// Health check config.
+	HealthPath     string `yaml:"health_path,omitempty"`
+	HealthInterval int    `yaml:"health_interval,omitempty"`
+	HealthTimeout  int    `yaml:"health_timeout,omitempty"`
+	HealthRetries  int    `yaml:"health_retries,omitempty"`
+
+	// Autoscale config.
+	Autoscale *loka.AutoscaleConfig `yaml:"autoscale,omitempty"`
+
+	// Idle timeout in seconds (0 = never idle).
+	IdleTimeout int `yaml:"idle_timeout,omitempty"`
 }
 
 func newDeployCmd() *cobra.Command {
@@ -149,6 +167,16 @@ Examples:
 				finalEnv[k] = v
 			}
 
+			// Resolve ${secret.*} references in env values.
+			secretStore := secret.NewStore()
+			for k, v := range finalEnv {
+				resolved, err := secretStore.Resolve(v)
+				if err != nil {
+					return fmt.Errorf("resolve secret in env %s: %w", k, err)
+				}
+				finalEnv[k] = resolved
+			}
+
 			fmt.Printf("\n")
 			fmt.Printf("  Name:      %s\n", finalName)
 			fmt.Printf("  Recipe:    %s\n", r.Name)
@@ -218,6 +246,28 @@ Examples:
 				StatusMessage string `json:"StatusMessage"`
 			}
 
+			// Build routes: prefer loka.yaml routes, fall back to subdomain default.
+			var finalRoutes []map[string]any
+			if len(cfg.Routes) > 0 {
+				for _, rt := range cfg.Routes {
+					route := map[string]any{"port": rt.Port}
+					if rt.Subdomain != "" {
+						route["subdomain"] = rt.Subdomain
+					}
+					if rt.CustomDomain != "" {
+						route["custom_domain"] = rt.CustomDomain
+					}
+					if rt.Protocol != "" {
+						route["protocol"] = rt.Protocol
+					}
+					finalRoutes = append(finalRoutes, route)
+				}
+			} else {
+				finalRoutes = []map[string]any{
+					{"subdomain": finalSubdomain, "port": finalPort},
+				}
+			}
+
 			deployReq := map[string]any{
 				"name":        finalName,
 				"image":       finalImage,
@@ -227,9 +277,30 @@ Examples:
 				"env":         finalEnv,
 				"port":        finalPort,
 				"bundle_key":  bundleKey,
-				"routes": []map[string]any{
-					{"subdomain": finalSubdomain, "port": finalPort},
-				},
+				"routes":      finalRoutes,
+			}
+
+			// Pass through optional fields from loka.yaml.
+			if len(cfg.Mounts) > 0 {
+				deployReq["mounts"] = cfg.Mounts
+			}
+			if cfg.HealthPath != "" {
+				deployReq["health_path"] = cfg.HealthPath
+			}
+			if cfg.HealthInterval > 0 {
+				deployReq["health_interval"] = cfg.HealthInterval
+			}
+			if cfg.HealthTimeout > 0 {
+				deployReq["health_timeout"] = cfg.HealthTimeout
+			}
+			if cfg.HealthRetries > 0 {
+				deployReq["health_retries"] = cfg.HealthRetries
+			}
+			if cfg.Autoscale != nil {
+				deployReq["autoscale"] = cfg.Autoscale
+			}
+			if cfg.IdleTimeout > 0 {
+				deployReq["idle_timeout"] = cfg.IdleTimeout
 			}
 
 			waitQuery := ""

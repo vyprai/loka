@@ -284,6 +284,17 @@ func main() {
 			os.Exit(1)
 		}
 		localWorker.Start(ctx)
+
+		// Wire up service log retrieval through the embedded agent.
+		agent := localWorker.Agent()
+		svcMgr.SetLogsFn(func(serviceID string, lines int) ([]string, []string, error) {
+			result, err := agent.ServiceLogs(serviceID, lines)
+			if err != nil {
+				return nil, nil, err
+			}
+			return result.Stdout, result.Stderr, nil
+		})
+
 		logger.Info("embedded worker started")
 	} else {
 		logger.Info("running as control plane only (no embedded worker)")

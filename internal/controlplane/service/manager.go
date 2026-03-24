@@ -52,12 +52,14 @@ type Manager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	logsFn func(serviceID string, lines int) ([]string, []string, error) // set by localworker
 }
 
 // NewManager creates a new service manager.
 func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler, imgMgr *image.Manager, objStore objstore.ObjectStore, logger *slog.Logger) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Manager{
+	m := &Manager{
 		store:     s,
 		registry:  reg,
 		scheduler: sched,
@@ -67,6 +69,9 @@ func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler,
 		ctx:       ctx,
 		cancel:    cancel,
 	}
+	m.wg.Add(1)
+	go m.idleMonitor()
+	return m
 }
 
 // Close cancels all in-flight goroutines and waits for them to finish.
@@ -220,6 +225,7 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 		Workdir:    svc.Workdir,
 		Port:       svc.Port,
 		BundleKey:  svc.BundleKey,
+		Mounts:     svc.Mounts,
 	}
 
 	m.registry.SendCommand(svc.WorkerID, worker.WorkerCommand{
@@ -229,11 +235,24 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 	})
 
 	// 3. Wait for health check to pass (polling with timeout).
+	// TODO: Implement actual HTTP health checking by sending an exec command
+	// to the worker to run: wget -q -O /dev/null http://localhost:{port}{health_path}
+	// For now, we poll service_status and assume healthy after successful status checks.
 	m.updateStatusMessage(ctx, serviceID, "waiting for health check")
 
-	const healthInterval = 5 * time.Second
-	const healthTimeout = 60 * time.Second
-	const healthRetries = 12
+	// Use the service's configured health parameters.
+	healthInterval := time.Duration(svc.HealthInterval) * time.Second
+	if healthInterval <= 0 {
+		healthInterval = 5 * time.Second
+	}
+	healthTimeout := time.Duration(svc.HealthTimeout) * time.Second
+	if healthTimeout <= 0 {
+		healthTimeout = 60 * time.Second
+	}
+	healthRetries := svc.HealthRetries
+	if healthRetries <= 0 {
+		healthRetries = 12
+	}
 
 	deadline := time.After(healthTimeout)
 	ticker := time.NewTicker(healthInterval)
@@ -546,6 +565,12 @@ func (m *Manager) Touch(ctx context.Context, id string) error {
 	return m.store.Services().Update(ctx, svc)
 }
 
+// SetLogsFn sets the callback used to retrieve service logs.
+// This is typically called by the local worker to wire up direct agent access.
+func (m *Manager) SetLogsFn(fn func(string, int) ([]string, []string, error)) {
+	m.logsFn = fn
+}
+
 // Logs retrieves recent log lines from the worker for a service.
 func (m *Manager) Logs(ctx context.Context, id string, lines int) (stdout []string, stderr []string, err error) {
 	svc, err := m.store.Services().Get(ctx, id)
@@ -553,15 +578,62 @@ func (m *Manager) Logs(ctx context.Context, id string, lines int) (stdout []stri
 		return nil, nil, err
 	}
 
-	if svc.WorkerID == "" {
-		return nil, nil, fmt.Errorf("service has no assigned worker")
+	if svc.Status != loka.ServiceStatusRunning {
+		return nil, nil, fmt.Errorf("service not running (status: %s)", svc.Status)
 	}
 
-	// Send a logs request to the worker. For now return empty logs
-	// until the worker-side log collection is implemented.
-	_ = lines
-	m.logger.Debug("logs requested for service", "service", id, "worker", svc.WorkerID, "lines", lines)
-	return []string{}, []string{}, nil
+	if m.logsFn != nil {
+		return m.logsFn(id, lines)
+	}
+
+	return nil, nil, fmt.Errorf("log retrieval not available")
+}
+
+// idleMonitor periodically checks running services and transitions idle ones.
+func (m *Manager) idleMonitor() {
+	defer m.wg.Done()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+			m.checkIdleServices()
+		}
+	}
+}
+
+// checkIdleServices finds running services that have exceeded their idle timeout
+// and transitions them to idle status.
+func (m *Manager) checkIdleServices() {
+	running := loka.ServiceStatusRunning
+	services, _, err := m.store.Services().List(m.ctx, store.ServiceFilter{Status: &running})
+	if err != nil {
+		m.logger.Error("idle monitor: failed to list services", "error", err)
+		return
+	}
+	for _, svc := range services {
+		if svc.IdleTimeout <= 0 {
+			continue // never idle
+		}
+		if time.Since(svc.LastActivity) > time.Duration(svc.IdleTimeout)*time.Second {
+			m.logger.Info("service idle, transitioning", "service_id", svc.ID, "name", svc.Name)
+			// Send stop command to worker (stops process, keeps VM state).
+			if svc.WorkerID != "" {
+				m.registry.SendCommand(svc.WorkerID, worker.WorkerCommand{
+					Type: "stop_service",
+					Data: worker.StopServiceData{ServiceID: svc.ID},
+				})
+			}
+			svc.Status = loka.ServiceStatusIdle
+			svc.Ready = false
+			svc.UpdatedAt = time.Now()
+			if err := m.store.Services().Update(m.ctx, svc); err != nil {
+				m.logger.Error("idle monitor: failed to update service", "service_id", svc.ID, "error", err)
+			}
+		}
+	}
 }
 
 // WaitForReady blocks until the service is ready or the context is cancelled.

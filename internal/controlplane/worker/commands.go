@@ -74,6 +74,7 @@ type LaunchServiceData struct {
 	Port          int
 	BundleKey     string
 	RestartPolicy string
+	Mounts        []loka.VolumeMount
 }
 
 // StopServiceData is the payload for stopping a service on a worker.

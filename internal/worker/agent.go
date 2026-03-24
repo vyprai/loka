@@ -2,10 +2,13 @@ package worker
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +32,22 @@ type Agent struct {
 	overlay       *vm.OverlayManager
 	checkpointMgr *CheckpointManager
 	vmManager     *vm.Manager
+	objStore      objstore.ObjectStore
+}
+
+// ServiceLaunchOpts holds options for launching a service VM.
+type ServiceLaunchOpts struct {
+	ImageRef      string
+	VCPUs         int
+	MemoryMB      int
+	RootfsPath    string
+	Command       string
+	Args          []string
+	Env           map[string]string
+	Workdir       string
+	Port          int
+	BundleKey     string
+	RestartPolicy string
 }
 
 // SessionState tracks a running session backed by a Firecracker microVM.
@@ -62,6 +81,7 @@ func NewAgent(provider string, labels map[string]string, dataDir string, objStor
 		overlay:       overlay,
 		checkpointMgr: cpMgr,
 		vmManager:     vmMgr,
+		objStore:      objStore,
 	}, nil
 }
 
@@ -366,6 +386,149 @@ func (a *Agent) DiffCheckpoints(sessionID, cpIDA, cpIDB string) ([]vm.DiffEntry,
 }
 
 // ── Service Process Methods ──────────────────────────────
+
+// LaunchService boots a Firecracker VM for a service, optionally extracts a
+// bundle from the object store, and starts the long-running service process.
+// The VM is tracked in the sessions map keyed by serviceID so that
+// StopService / ServiceStatus / ServiceLogs can find it.
+func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts ServiceLaunchOpts) error {
+	a.mu.Lock()
+	if _, exists := a.sessions[serviceID]; exists {
+		a.mu.Unlock()
+		return fmt.Errorf("service %s already exists", serviceID)
+	}
+	a.mu.Unlock()
+
+	// Initialize overlay filesystem (same as session launch).
+	if err := a.overlay.Init(serviceID); err != nil {
+		return fmt.Errorf("init overlay: %w", err)
+	}
+
+	vcpu := opts.VCPUs
+	if vcpu == 0 {
+		vcpu = 1
+	}
+	mem := opts.MemoryMB
+	if mem == 0 {
+		mem = 512
+	}
+
+	// Launch Firecracker microVM.
+	microVM, err := a.vmManager.Launch(ctx, serviceID, vm.VMConfig{
+		VCPU:       vcpu,
+		MemoryMB:   mem,
+		RootfsPath: opts.RootfsPath,
+		OverlayDir: a.overlay.SessionDir(serviceID),
+	})
+	if err != nil {
+		return fmt.Errorf("launch VM: %w", err)
+	}
+
+	// Connect to the supervisor inside the VM via vsock.
+	vsock := vm.NewVsockClient(microVM.VsockPath)
+
+	// Wait for supervisor to be ready with exponential backoff.
+	backoff := 100 * time.Millisecond
+	for i := 0; i < 50; i++ {
+		if err := vsock.Ping(); err == nil {
+			break
+		}
+		time.Sleep(backoff)
+		if backoff < 2*time.Second {
+			backoff = time.Duration(float64(backoff) * 1.5)
+		}
+	}
+
+	// Extract bundle into the VM if a BundleKey is provided.
+	if opts.BundleKey != "" && a.objStore != nil {
+		if err := a.extractBundle(ctx, vsock, opts.BundleKey, opts.Workdir); err != nil {
+			a.vmManager.Stop(serviceID)
+			return fmt.Errorf("extract bundle: %w", err)
+		}
+	}
+
+	// Start the service process inside the VM.
+	restartPolicy := opts.RestartPolicy
+	if restartPolicy == "" {
+		restartPolicy = "on-failure"
+	}
+	if _, err := vsock.ServiceStart(opts.Command, opts.Args, opts.Env, opts.Workdir, restartPolicy); err != nil {
+		a.vmManager.Stop(serviceID)
+		return fmt.Errorf("start service: %w", err)
+	}
+
+	// Store the session/VM reference so other service methods can find it.
+	a.mu.Lock()
+	a.sessions[serviceID] = &SessionState{
+		ID:       serviceID,
+		VM:       microVM,
+		Vsock:    vsock,
+		LayerMap: make(map[string]string),
+	}
+	a.mu.Unlock()
+
+	a.logger.Info("service launched with Firecracker VM",
+		"service", serviceID,
+		"vm_pid", microVM.PID,
+		"command", opts.Command,
+	)
+	return nil
+}
+
+// extractBundle downloads a bundle from the object store, writes it to the
+// overlay workspace directory on the host, and extracts it inside the VM.
+func (a *Agent) extractBundle(ctx context.Context, vsock *vm.VsockClient, bundleKey, workdir string) error {
+	// BundleKey format: "services/<id>/bundle.tar.gz"
+	// Object store bucket is the first path segment, key is the rest.
+	parts := strings.SplitN(bundleKey, "/", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid bundle key: %s", bundleKey)
+	}
+	bucket, key := parts[0], parts[1]
+
+	reader, err := a.objStore.Get(ctx, bucket, key)
+	if err != nil {
+		return fmt.Errorf("download bundle: %w", err)
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("read bundle: %w", err)
+	}
+
+	if workdir == "" {
+		workdir = "/workspace"
+	}
+
+	// Write the bundle to a temp path inside the VM via exec, then extract.
+	// First, ensure the workdir exists, then use base64 to safely transfer
+	// the binary data through the exec command and pipe it to tar.
+	encoded := base64Encode(data)
+
+	resp, execErr := vsock.Execute(vm.ExecRequest{
+		Commands: []loka.Command{
+			{
+				ID:      uuid.New().String(),
+				Command: "sh",
+				Args:    []string{"-c", fmt.Sprintf("mkdir -p %s && echo '%s' | base64 -d | tar xzf - -C %s", workdir, encoded, workdir)},
+			},
+		},
+	})
+	if execErr != nil {
+		return fmt.Errorf("extract bundle in VM: %w", execErr)
+	}
+	if resp.Status != "completed" {
+		return fmt.Errorf("bundle extraction failed: %s", resp.Error)
+	}
+
+	return nil
+}
+
+// base64Encode encodes data to base64 string.
+func base64Encode(data []byte) string {
+	return base64.StdEncoding.EncodeToString(data)
+}
 
 // StartService starts a long-running service process inside the session's VM.
 func (a *Agent) StartService(ctx context.Context, sessionID string, command string, args []string, env map[string]string, workdir, restartPolicy string) error {
