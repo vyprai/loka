@@ -482,7 +482,7 @@ provision:
 PROVISION_EOF
     fi
 
-    limactl create --name="$LIMA_INSTANCE" "$lima_config"
+    limactl create --name="$LIMA_INSTANCE" --tty=false "$lima_config"
     rm "$lima_config"
 
     info "Starting Lima VM..."

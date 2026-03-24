@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────
-#  Build a minimal Lima VM image for LOKA (~50MB)
+#  Build a custom Lima VM image for LOKA
 #
-#  Creates a qcow2 image with only what LOKA needs:
-#  - Alpine base (~4MB minirootfs)
-#  - OpenRC init, networking, SSH
-#  - Docker, curl, iptables, e2fsprogs
-#  - LOKA binaries pre-installed
+#  Takes the Alpine cloud image, injects LOKA binaries and
+#  pre-configures everything so no provision step is needed.
+#  Result: a bootable qcow2 ready for Lima.
 #
 #  Usage:
-#    bash scripts/build-lima-image.sh           # build for current arch
+#    bash scripts/build-lima-image.sh
 #    ARCH=amd64 bash scripts/build-lima-image.sh
 #
 #  Requires: Docker
@@ -25,13 +23,13 @@ esac
 
 OUT_DIR="${OUT_DIR:-./build}"
 IMAGE_NAME="loka-lima-${GOARCH}.qcow2"
-ALPINE_VERSION="3.21"
-ALPINE_MINOR="3.21.3"
-DISK_SIZE_MB=2048
+ALPINE_IMG="nocloud_alpine-3.23.3-${ARCH}-uefi-cloudinit-r0.qcow2"
+ALPINE_URL="https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/${ALPINE_IMG}"
 
 echo ""
 echo "  Building LOKA Lima image"
 echo "  Arch: ${ARCH} (${GOARCH})"
+echo "  Base: ${ALPINE_IMG}"
 echo "  Output: ${OUT_DIR}/${IMAGE_NAME}"
 echo ""
 
@@ -45,138 +43,108 @@ GOOS=linux GOARCH=$GOARCH go build -trimpath -ldflags="-s -w" -o "$OUT_DIR/loka-
 GOOS=linux GOARCH=$GOARCH CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "$OUT_DIR/loka-supervisor" ./cmd/loka-supervisor 2>/dev/null
 echo "  Done"
 
-# ── Build image inside privileged Docker container ───────
+# ── Customize Alpine cloud image in Docker ───────────────
 
-echo "==> Building qcow2 image in Docker"
+echo "==> Customizing Alpine cloud image in Docker"
 
-cat > "$OUT_DIR/build-image.sh" << 'BUILDSCRIPT'
+cat > "$OUT_DIR/customize.sh" << 'SCRIPT'
 #!/bin/sh
 set -eux
 
 ARCH="$1"
-ALPINE_VERSION="$2"
-ALPINE_MINOR="$3"
-DISK_SIZE_MB="$4"
+ALPINE_URL="$2"
 
-cd /build
+apk add --no-cache qemu-img e2fsprogs e2fsprogs-extra curl parted sgdisk >/dev/null 2>&1
 
-# Download Alpine minirootfs.
-curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/releases/${ARCH}/alpine-minirootfs-${ALPINE_MINOR}-${ARCH}.tar.gz" \
-  -o minirootfs.tar.gz
+cd /work
 
-# Create raw disk image.
-dd if=/dev/zero of=disk.raw bs=1M count=${DISK_SIZE_MB} 2>/dev/null
-mkfs.ext4 -F -L loka disk.raw >/dev/null 2>&1
+# Download Alpine cloud image.
+echo "Downloading Alpine cloud image..."
+curl -fsSL "$ALPINE_URL" -o base.qcow2
 
-# Mount and populate.
+# Convert to raw and expand for extra space.
+qemu-img convert -f qcow2 -O raw base.qcow2 disk.raw
+rm base.qcow2
+qemu-img resize -f raw disk.raw 2G
+
+# Fix GPT after resize and expand root partition to fill disk.
+# Alpine cloud images: partition 1 = EFI, partition 2 = root.
+sgdisk -e disk.raw
+parted -s disk.raw resizepart 2 100%
+
+# Find the root partition offset and resize filesystem.
+ROOT_START=$(parted -s disk.raw unit B print | awk '/^ 2/{print $2}' | tr -d 'B')
+ROOT_SIZE=$(parted -s disk.raw unit B print | awk '/^ 2/{print $4}' | tr -d 'B')
+if [ -z "$ROOT_START" ]; then
+  echo "ERROR: cannot find root partition"; exit 1
+fi
+echo "Root partition at offset $ROOT_START, size $ROOT_SIZE"
+
+# Resize the filesystem to fill the expanded partition.
+# Use a temp loop device for e2fsck/resize2fs.
+LOOP=$(losetup -f)
+losetup -o "$ROOT_START" "$LOOP" disk.raw
+e2fsck -fy "$LOOP" || true
+resize2fs "$LOOP"
+losetup -d "$LOOP"
+
+# Mount the root partition.
 mkdir -p /mnt/rootfs
-mount -o loop disk.raw /mnt/rootfs
-tar xzf minirootfs.tar.gz -C /mnt/rootfs
+mount -o loop,offset=$ROOT_START disk.raw /mnt/rootfs
 
-# Set up Alpine repositories.
-echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/main" > /mnt/rootfs/etc/apk/repositories
-echo "https://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VERSION}/community" >> /mnt/rootfs/etc/apk/repositories
+# ── Install LOKA binaries ────────────────────────────────
+cp /work/lokad /mnt/rootfs/usr/local/bin/lokad
+cp /work/loka-worker /mnt/rootfs/usr/local/bin/loka-worker
+cp /work/loka-supervisor /mnt/rootfs/usr/local/bin/loka-supervisor
+chmod +x /mnt/rootfs/usr/local/bin/lokad /mnt/rootfs/usr/local/bin/loka-worker /mnt/rootfs/usr/local/bin/loka-supervisor
 
-# Install packages via chroot.
+# ── Install packages via chroot ──────────────────────────
 cp /etc/resolv.conf /mnt/rootfs/etc/resolv.conf
 mount -t proc proc /mnt/rootfs/proc
 mount -t sysfs sys /mnt/rootfs/sys
 mount --bind /dev /mnt/rootfs/dev
 
 chroot /mnt/rootfs /bin/sh -c '
-  apk update
-  apk add --no-cache \
-    openrc busybox-openrc \
-    openssh-server \
-    dhcpcd \
-    iproute2 iptables e2fsprogs \
-    curl docker \
-    sudo shadow
-'
+  apk update >/dev/null 2>&1
+  apk add --no-cache docker iptables iproute2 e2fsprogs curl >/dev/null 2>&1
 
-# Configure system.
-chroot /mnt/rootfs /bin/sh -c '
-  # Enable essential services.
-  rc-update add devfs sysinit
-  rc-update add dmesg sysinit
-  rc-update add mdev sysinit
-  rc-update add hwclock boot
-  rc-update add modules boot
-  rc-update add sysctl boot
-  rc-update add hostname boot
-  rc-update add bootmisc boot
-  rc-update add networking boot
-  rc-update add sshd default
-  rc-update add docker default
-  rc-update add dhcpcd default
-  rc-update add local default
-
-  # Configure networking.
-  printf "auto lo\niface lo inet loopback\n\nauto eth0\niface eth0 inet dhcp\n" > /etc/network/interfaces
-
-  # Configure SSH.
-  sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
-  sed -i "s/#PasswordAuthentication.*/PasswordAuthentication yes/" /etc/ssh/sshd_config
-  ssh-keygen -A
-
-  # Create user for Lima.
-  adduser -D -s /bin/sh lima
-  echo "lima:lima" | chpasswd
-  echo "lima ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-  mkdir -p /home/lima/.ssh && chmod 700 /home/lima/.ssh
-  chown -R lima:lima /home/lima
-
-  # Root password.
-  echo "root:root" | chpasswd
-
-  # KVM module.
+  # Enable Docker and KVM.
+  rc-update add docker default 2>/dev/null || true
   echo "kvm" >> /etc/modules
 
-  # Hostname.
-  echo "loka" > /etc/hostname
+  # Create LOKA data directories.
+  mkdir -p /var/loka/kernel /var/loka/artifacts /var/loka/worker /var/loka/raft /var/loka/tls
+  mkdir -p /tmp/loka-data/kernel /tmp/loka-data/rootfs /tmp/loka-data/objstore /tmp/loka-data/worker-data
 
-  # Inittab.
-  printf "::sysinit:/sbin/openrc sysinit\n::sysinit:/sbin/openrc boot\n::wait:/sbin/openrc default\nttyS0::respawn:/sbin/getty 115200 ttyS0\n::ctrlaltdel:/sbin/reboot\n::shutdown:/sbin/openrc shutdown\n" > /etc/inittab
-
-  # Cloud-init seed directory for Lima.
-  mkdir -p /var/lib/cloud/seed/nocloud-net
+  # Clean caches.
+  rm -rf /var/cache/apk/*
 '
 
-# Create LOKA data dirs.
-mkdir -p /mnt/rootfs/var/loka/kernel /mnt/rootfs/var/loka/artifacts /mnt/rootfs/var/loka/worker /mnt/rootfs/var/loka/raft /mnt/rootfs/var/loka/tls
-mkdir -p /mnt/rootfs/tmp/loka-data/kernel /mnt/rootfs/tmp/loka-data/rootfs /mnt/rootfs/tmp/loka-data/objstore /mnt/rootfs/tmp/loka-data/worker-data
-
-# Unmount chroot mounts.
 umount /mnt/rootfs/dev /mnt/rootfs/proc /mnt/rootfs/sys
-
-# Install LOKA binaries.
-cp /build/lokad /mnt/rootfs/usr/local/bin/lokad
-cp /build/loka-worker /mnt/rootfs/usr/local/bin/loka-worker
-cp /build/loka-supervisor /mnt/rootfs/usr/local/bin/loka-supervisor
-chmod +x /mnt/rootfs/usr/local/bin/lokad /mnt/rootfs/usr/local/bin/loka-worker /mnt/rootfs/usr/local/bin/loka-supervisor
-
-# Cleanup caches.
-rm -rf /mnt/rootfs/var/cache/apk/*
-
 umount /mnt/rootfs
 
-# Convert to qcow2 (compressed).
-qemu-img convert -f raw -O qcow2 -c disk.raw /build/output.qcow2
-echo "==> Image size: $(du -h /build/output.qcow2 | awk '{print $1}')"
-BUILDSCRIPT
+# ── Recompress to qcow2 ─────────────────────────────────
+qemu-img convert -f raw -O qcow2 -c disk.raw /work/output.qcow2
+rm disk.raw
 
-chmod +x "$OUT_DIR/build-image.sh"
+echo "==> Image size: $(du -h /work/output.qcow2 | awk '{print $1}')"
+SCRIPT
+
+chmod +x "$OUT_DIR/customize.sh"
 
 docker run --rm --privileged \
   --platform "$PLATFORM" \
-  -v "$(cd "$OUT_DIR" && pwd):/build" \
+  -v "$(cd "$OUT_DIR" && pwd):/work" \
   alpine:3.21 \
-  /bin/sh -c "apk add --no-cache qemu-img e2fsprogs curl tar >/dev/null 2>&1 && /build/build-image.sh $ARCH $ALPINE_VERSION $ALPINE_MINOR $DISK_SIZE_MB"
+  /work/customize.sh "$ARCH" "$ALPINE_URL"
 
 mv "$OUT_DIR/output.qcow2" "$OUT_DIR/${IMAGE_NAME}"
-rm -f "$OUT_DIR/build-image.sh" "$OUT_DIR/lokad" "$OUT_DIR/loka-worker" "$OUT_DIR/loka-supervisor" "$OUT_DIR/disk.raw" "$OUT_DIR/minirootfs.tar.gz"
+rm -f "$OUT_DIR/customize.sh" "$OUT_DIR/lokad" "$OUT_DIR/loka-worker" "$OUT_DIR/loka-supervisor"
 
 SIZE=$(du -h "$OUT_DIR/${IMAGE_NAME}" | awk '{print $1}')
 echo ""
 echo "  Image built: ${OUT_DIR}/${IMAGE_NAME} (${SIZE})"
+echo ""
+echo "  Upload to GitHub release:"
+echo "    gh release upload v\$(cat pkg/version/version.go | grep Version | grep -o 'v[0-9.]*') ${OUT_DIR}/${IMAGE_NAME}"
 echo ""
