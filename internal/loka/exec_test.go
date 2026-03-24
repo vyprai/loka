@@ -8,10 +8,12 @@ func TestExecutionIsTerminal(t *testing.T) {
 		terminal bool
 	}{
 		{ExecStatusPending, false},
+		{ExecStatusPendingApproval, false},
 		{ExecStatusRunning, false},
 		{ExecStatusSuccess, true},
 		{ExecStatusFailed, true},
 		{ExecStatusCanceled, true},
+		{ExecStatusRejected, true},
 	}
 
 	for _, tt := range tests {

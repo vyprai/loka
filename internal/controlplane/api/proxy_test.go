@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/vyprai/loka/internal/loka"
 )
@@ -206,6 +207,32 @@ func TestAddRoute_OverwriteUpdatesPort(t *testing.T) {
 	// Should still be only 1 route.
 	if routes := p.ListRoutes(); len(routes) != 1 {
 		t.Errorf("expected 1 route after overwrite, got %d", len(routes))
+	}
+}
+
+func TestDomainProxy_SharedHTTPClient(t *testing.T) {
+	p := newTestProxy(t)
+
+	// Verify the shared HTTP client is initialized (not nil).
+	if p.httpClient == nil {
+		t.Fatal("expected non-nil httpClient")
+	}
+
+	// Verify the client has a reasonable timeout.
+	if p.httpClient.Timeout != 30*time.Second {
+		t.Errorf("httpClient.Timeout = %v, want 30s", p.httpClient.Timeout)
+	}
+
+	// Verify transport is configured for connection reuse.
+	transport, ok := p.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatal("expected *http.Transport")
+	}
+	if transport.MaxIdleConns != 100 {
+		t.Errorf("MaxIdleConns = %d, want 100", transport.MaxIdleConns)
+	}
+	if transport.MaxIdleConnsPerHost != 10 {
+		t.Errorf("MaxIdleConnsPerHost = %d, want 10", transport.MaxIdleConnsPerHost)
 	}
 }
 

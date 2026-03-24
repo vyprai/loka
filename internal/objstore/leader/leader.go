@@ -3,6 +3,7 @@ package leader
 import (
 	"context"
 	"io"
+	"net"
 	"time"
 
 	"github.com/vyprai/loka/internal/objstore"
@@ -126,14 +127,15 @@ func (s *Store) List(ctx context.Context, bucket, prefix string) ([]objstore.Obj
 	return s.writeStore().List(ctx, bucket, prefix)
 }
 
+// splitHostPort extracts host and port from an address string.
+// Uses net.SplitHostPort which correctly handles IPv6 addresses like [::1]:8080.
 func splitHostPort(addr string) (string, string, error) {
-	// Simple split — handles "host:port" format.
-	for i := len(addr) - 1; i >= 0; i-- {
-		if addr[i] == ':' {
-			return addr[:i], addr[i+1:], nil
-		}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		// If no port separator found, return the whole address as host.
+		return addr, "", nil
 	}
-	return addr, "", nil
+	return host, port, nil
 }
 
 var _ objstore.ObjectStore = (*Store)(nil)

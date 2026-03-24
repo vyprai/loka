@@ -591,6 +591,11 @@ func (sp *ServiceProcess) restartLoop() {
 
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
+	const maxRestarts = 5
+	const maxRestartWindow = 5 * time.Minute
+
+	// Track recent failure timestamps to detect rapid restart loops.
+	var recentFailures []time.Time
 
 	for {
 		// Wait for the current process to exit.
@@ -640,6 +645,25 @@ func (sp *ServiceProcess) restartLoop() {
 			return
 		}
 
+		// Track this failure and check for restart loop.
+		now := time.Now()
+		recentFailures = append(recentFailures, now)
+		// Prune failures outside the window.
+		cutoff := now.Add(-maxRestartWindow)
+		pruned := recentFailures[:0]
+		for _, t := range recentFailures {
+			if t.After(cutoff) {
+				pruned = append(pruned, t)
+			}
+		}
+		recentFailures = pruned
+
+		if len(recentFailures) >= maxRestarts {
+			// Too many restarts within the window — stop restarting.
+			fmt.Fprintf(os.Stderr, "service exceeded max restarts (%d in %s) — stopping\n", maxRestarts, maxRestartWindow)
+			return
+		}
+
 		// Backoff before restart.
 		select {
 		case <-sp.ctx.Done():
@@ -653,7 +677,11 @@ func (sp *ServiceProcess) restartLoop() {
 		sp.mu.Unlock()
 
 		if err := sp.startOnce(); err != nil {
-			// Failed to restart — give up.
+			// Failed to restart — log the error and update status.
+			sp.mu.Lock()
+			sp.running = false
+			sp.mu.Unlock()
+			fmt.Fprintf(os.Stderr, "service restart failed permanently: %v\n", err)
 			return
 		}
 

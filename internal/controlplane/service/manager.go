@@ -246,9 +246,9 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 	})
 
 	// 3. Wait for health check to pass (polling with timeout).
-	// TODO: Implement actual HTTP health checking by sending an exec command
-	// to the worker to run: wget -q -O /dev/null http://localhost:{port}{health_path}
-	// For now, we poll service_status and assume healthy after successful status checks.
+	// Poll the store for status updates. The localworker updates the service
+	// record when the process starts. We require multiple consecutive successful
+	// status checks before marking the service as running.
 	m.updateStatusMessage(ctx, serviceID, "waiting for health check")
 
 	// Use the service's configured health parameters.
@@ -262,14 +262,17 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 	}
 	healthRetries := svc.HealthRetries
 	if healthRetries <= 0 {
-		healthRetries = 12
+		healthRetries = 3
 	}
 
-	deadline := time.After(healthTimeout)
+	// Total timeout for the entire health check phase.
+	totalTimeout := healthInterval*time.Duration(healthRetries) + healthTimeout
+	deadline := time.After(totalTimeout)
 	ticker := time.NewTicker(healthInterval)
 	defer ticker.Stop()
 
-	for retries := 0; retries < healthRetries; retries++ {
+	consecutiveOK := 0
+	for {
 		select {
 		case <-ctx.Done():
 			return
@@ -277,10 +280,11 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 			m.setError(ctx, serviceID, "health check timeout")
 			return
 		case <-ticker.C:
-			// Poll service status by checking the service record.
+			// Poll service status by checking the service record in the store.
 			s, err := m.store.Services().Get(ctx, serviceID)
 			if err != nil {
 				m.logger.Error("async deploy: health check poll failed", "service", serviceID, "error", err)
+				consecutiveOK = 0
 				continue
 			}
 			if s.Status != loka.ServiceStatusDeploying {
@@ -295,39 +299,34 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 				Data: map[string]string{"service_id": serviceID},
 			})
 
-			// After the first successful poll interval, the launch command has had
-			// time to start the process. Mark the service as running.
-			if retries >= 1 {
-				goto healthy
+			// Count consecutive successful polls (service still in deploying state
+			// means it hasn't errored out). After healthRetries consecutive OKs,
+			// the launch command has had enough time to start the process.
+			consecutiveOK++
+			if consecutiveOK >= healthRetries {
+				// Mark as running.
+				s, err = m.store.Services().Get(ctx, serviceID)
+				if err != nil {
+					m.logger.Error("async deploy: failed to refresh service", "service", serviceID, "error", err)
+					return
+				}
+				if s.Status != loka.ServiceStatusDeploying {
+					return
+				}
+				s.Status = loka.ServiceStatusRunning
+				s.Ready = true
+				s.StatusMessage = ""
+				s.LastActivity = time.Now()
+				s.UpdatedAt = time.Now()
+				if err := m.store.Services().Update(ctx, s); err != nil {
+					m.logger.Error("async deploy: failed to mark service running", "service", serviceID, "error", err)
+					return
+				}
+				m.logger.Info("service deployed and running", "service", serviceID)
+				return
 			}
 		}
 	}
-	m.setError(ctx, serviceID, "health check exhausted retries")
-	return
-
-healthy:
-	// 4. Update status to running.
-	svc, err = m.store.Services().Get(ctx, serviceID)
-	if err != nil {
-		m.logger.Error("async deploy: failed to refresh service", "service", serviceID, "error", err)
-		return
-	}
-	if svc.Status != loka.ServiceStatusDeploying {
-		// Status changed externally (e.g., destroyed), do not override.
-		return
-	}
-
-	svc.Status = loka.ServiceStatusRunning
-	svc.Ready = true
-	svc.StatusMessage = ""
-	svc.LastActivity = time.Now()
-	svc.UpdatedAt = time.Now()
-	if err := m.store.Services().Update(ctx, svc); err != nil {
-		m.logger.Error("async deploy: failed to mark service running", "service", serviceID, "error", err)
-		return
-	}
-
-	m.logger.Info("service deployed and running", "service", serviceID)
 }
 
 // Get retrieves a service by ID.
@@ -630,18 +629,20 @@ func (m *Manager) checkIdleServices() {
 		}
 		if time.Since(svc.LastActivity) > time.Duration(svc.IdleTimeout)*time.Second {
 			m.logger.Info("service idle, transitioning", "service_id", svc.ID, "name", svc.Name)
-			// Send stop command to worker (stops process, keeps VM state).
-			if svc.WorkerID != "" {
-				m.registry.SendCommand(svc.WorkerID, worker.WorkerCommand{
-					Type: "stop_service",
-					Data: worker.StopServiceData{ServiceID: svc.ID},
-				})
-			}
+			// Update store FIRST — only send stop command if store update succeeds.
 			svc.Status = loka.ServiceStatusIdle
 			svc.Ready = false
 			svc.UpdatedAt = time.Now()
 			if err := m.store.Services().Update(m.ctx, svc); err != nil {
 				m.logger.Error("idle monitor: failed to update service", "service_id", svc.ID, "error", err)
+				continue // Don't send stop command if store update failed.
+			}
+			// Store updated successfully, now stop the service process.
+			if svc.WorkerID != "" {
+				m.registry.SendCommand(svc.WorkerID, worker.WorkerCommand{
+					Type: "stop_service",
+					Data: worker.StopServiceData{ServiceID: svc.ID},
+				})
 			}
 		}
 	}

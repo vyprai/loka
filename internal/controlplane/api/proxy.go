@@ -39,6 +39,11 @@ type DomainProxy struct {
 	// wakeMu protects wakeInFlight to coalesce concurrent wake requests.
 	wakeMu       sync.Mutex
 	wakeInFlight map[string]*wakeState // serviceID -> in-progress wake
+
+	// httpClient is a shared, reusable HTTP client for proxying requests.
+	// Avoids creating a new client (and transport) per request, enabling
+	// connection reuse and reducing GC pressure.
+	httpClient *http.Client
 }
 
 // wakeState tracks an in-progress wake so concurrent requests for the same
@@ -62,6 +67,14 @@ func NewDomainProxy(baseDomain string, sm *session.Manager, registry *worker.Reg
 		logger:       logger,
 		routes:       make(map[string]*loka.DomainRoute),
 		wakeInFlight: make(map[string]*wakeState),
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+			},
+		},
 	}
 }
 
@@ -357,8 +370,7 @@ func (p *DomainProxy) proxyHTTP(w http.ResponseWriter, r *http.Request, targetAd
 		proxyReq.Header.Set("X-Loka-Service", route.ServiceID)
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(proxyReq)
+	resp, err := p.httpClient.Do(proxyReq)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Backend unreachable: %v", err), http.StatusBadGateway)
 		return
@@ -402,6 +414,15 @@ func (p *DomainProxy) proxyWebSocket(w http.ResponseWriter, r *http.Request, tar
 		return
 	}
 	defer clientConn.Close()
+
+	// Set read deadlines on both connections to prevent indefinite blocking.
+	const wsIdleTimeout = 30 * time.Minute
+	if tc, ok := clientConn.(*net.TCPConn); ok {
+		tc.SetReadDeadline(time.Now().Add(wsIdleTimeout))
+	}
+	if tc, ok := backendConn.(*net.TCPConn); ok {
+		tc.SetReadDeadline(time.Now().Add(wsIdleTimeout))
+	}
 
 	// Forward the original request to the backend.
 	r.Write(backendConn)

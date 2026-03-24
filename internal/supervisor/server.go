@@ -132,13 +132,17 @@ func (s *Server) handleRPC(req vm.RPCRequest) vm.RPCResponse {
 		var params struct {
 			Mode string `json:"mode"`
 		}
-		json.Unmarshal(req.Params, &params)
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+		}
 		s.executor.SetMode(loka.ExecMode(params.Mode))
 		return vm.RPCResponse{ID: req.ID, Result: jsonRaw(`"ok"`)}
 
 	case "set_policy":
 		var policy loka.ExecPolicy
-		json.Unmarshal(req.Params, &policy)
+		if err := json.Unmarshal(req.Params, &policy); err != nil {
+			return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+		}
 		s.executor.SetPolicy(policy)
 		return vm.RPCResponse{ID: req.ID, Result: jsonRaw(`"ok"`)}
 
@@ -147,7 +151,9 @@ func (s *Server) handleRPC(req vm.RPCRequest) vm.RPCResponse {
 			CommandID      string `json:"command_id"`
 			AddToWhitelist bool   `json:"add_to_whitelist"`
 		}
-		json.Unmarshal(req.Params, &params)
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+		}
 		if err := s.executor.Gate().Approve(params.CommandID, params.AddToWhitelist); err != nil {
 			return rpcError(req.ID, err)
 		}
@@ -158,7 +164,9 @@ func (s *Server) handleRPC(req vm.RPCRequest) vm.RPCResponse {
 			CommandID string `json:"command_id"`
 			Reason    string `json:"reason"`
 		}
-		json.Unmarshal(req.Params, &params)
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+		}
 		if err := s.executor.Gate().Deny(params.CommandID, params.Reason); err != nil {
 			return rpcError(req.ID, err)
 		}
@@ -181,7 +189,9 @@ func (s *Server) handleRPC(req vm.RPCRequest) vm.RPCResponse {
 		var params struct {
 			CommandID string `json:"command_id"`
 		}
-		json.Unmarshal(req.Params, &params)
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+		}
 		if params.CommandID != "" {
 			s.executor.Cancel(params.CommandID)
 		} else {
@@ -216,7 +226,9 @@ func (s *Server) handleRPC(req vm.RPCRequest) vm.RPCResponse {
 
 func (s *Server) handleExec(req vm.RPCRequest) vm.RPCResponse {
 	var params vm.ExecRequest
-	json.Unmarshal(req.Params, &params)
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+	}
 
 	var results []loka.CommandResult
 	var status string
@@ -327,7 +339,9 @@ func (s *Server) handleServiceStop(req vm.RPCRequest) vm.RPCResponse {
 		Signal  string `json:"signal"`
 		Timeout int    `json:"timeout"`
 	}
-	json.Unmarshal(req.Params, &params)
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+	}
 
 	sig := syscall.SIGTERM
 	if params.Signal != "" {
@@ -376,7 +390,9 @@ func (s *Server) handleServiceLogs(req vm.RPCRequest) vm.RPCResponse {
 		Lines  int  `json:"lines"`
 		Stream bool `json:"stream"`
 	}
-	json.Unmarshal(req.Params, &params)
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+	}
 
 	lines := params.Lines
 	if lines <= 0 {

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestGenerateCA(t *testing.T) {
@@ -215,6 +216,56 @@ func TestLoadServerTLS(t *testing.T) {
 	}
 	if cfg.ClientAuth != tls.VerifyClientCertIfGiven {
 		t.Errorf("ClientAuth = %d, want VerifyClientCertIfGiven", cfg.ClientAuth)
+	}
+}
+
+func TestCertExpiryDetection(t *testing.T) {
+	// Generate a CA and server cert, then verify we can detect expiry.
+	caDir := t.TempDir()
+	caCertPath, caKeyPath, err := GenerateCA(caDir)
+	if err != nil {
+		t.Fatalf("GenerateCA: %v", err)
+	}
+
+	serverDir := t.TempDir()
+	certPath, _, err := GenerateServerCert(caCertPath, caKeyPath, serverDir, nil)
+	if err != nil {
+		t.Fatalf("GenerateServerCert: %v", err)
+	}
+
+	// Read the generated cert and check its NotAfter.
+	certPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("failed to decode cert PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+
+	// Server cert should expire in ~365 days. Verify time.Until works.
+	remaining := time.Until(cert.NotAfter)
+	if remaining < 364*24*time.Hour || remaining > 366*24*time.Hour {
+		t.Errorf("cert expiry remaining = %v, expected ~365 days", remaining)
+	}
+
+	// Verify that a cert expiring in > 30 days would NOT trigger renewal.
+	if remaining < 30*24*time.Hour {
+		t.Error("fresh cert should not be within 30-day renewal window")
+	}
+
+	// Verify certStillValid returns true for valid cert.
+	if !certStillValid(certPath) {
+		t.Error("certStillValid returned false for valid cert")
+	}
+
+	// Verify certStillValid returns false for non-existent file.
+	if certStillValid("/nonexistent/cert.pem") {
+		t.Error("certStillValid returned true for non-existent file")
 	}
 }
 

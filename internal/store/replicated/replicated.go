@@ -392,10 +392,12 @@ func (r *replicatedWorkerRepo) List(ctx context.Context, filter store.WorkerFilt
 	return r.s.local.Workers().List(ctx, filter)
 }
 func (r *replicatedWorkerRepo) UpdateHeartbeat(ctx context.Context, id string, hb *loka.Heartbeat) error {
-	// Heartbeats are ephemeral — bypass Raft and write directly to local store.
-	// This avoids ~10 Raft ops/sec at 100 workers with 10s heartbeat intervals.
-	// If a node dies, heartbeats are lost anyway; leader election doesn't depend
-	// on heartbeat state; the worker record itself IS replicated via Create/Update.
+	// Heartbeats bypass Raft consensus intentionally. Tradeoff:
+	// - Pro: Reduces Raft write pressure by ~10 ops/sec per 100 workers
+	// - Con: After leader failover, new leader has up to 10s of stale heartbeat data
+	// - Mitigation: Worker health checks use 30s timeout, so 10s staleness is tolerable
+	// The worker record itself IS replicated via Create/Update; only the ephemeral
+	// heartbeat timestamp is local-only.
 	return r.s.local.Workers().UpdateHeartbeat(ctx, id, hb)
 }
 

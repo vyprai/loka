@@ -309,6 +309,91 @@ func TestSweep_RespectsContext(t *testing.T) {
 	}
 }
 
+func TestRun_StartsAndCleansUp(t *testing.T) {
+	ret := config.RetentionConfig{
+		SessionTTL:      "1ms",
+		ExecutionTTL:    "1ms",
+		TokenTTL:        "1ms",
+		ImageTTL:        "720h",
+		CleanupInterval: "100ms", // Very short interval for testing.
+	}
+	gc, db := setupGCTest(t, ret)
+	ctx := context.Background()
+
+	// Create an old terminated session.
+	oldTime := time.Now().Add(-48 * time.Hour)
+	oldSess := &loka.Session{
+		ID:        uuid.New().String(),
+		Name:      "gc-run-test",
+		Status:    loka.SessionStatusTerminated,
+		Mode:      loka.ModeExplore,
+		Labels:    map[string]string{},
+		VCPUs:     1,
+		MemoryMB:  512,
+		CreatedAt: oldTime,
+		UpdatedAt: oldTime,
+	}
+	if err := db.Sessions().Create(ctx, oldSess); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+
+	// Verify the session exists before GC runs.
+	_, err := db.Sessions().Get(ctx, oldSess.ID)
+	if err != nil {
+		t.Fatalf("session should exist before GC: %v", err)
+	}
+
+	// Start the GC in a goroutine with a cancellable context.
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		gc.Run(runCtx)
+		close(done)
+	}()
+
+	// Wait for GC to run at least one sweep. The Run() method calls Sweep()
+	// immediately on start, then enters a ticker loop. We poll for the result
+	// rather than relying on a fixed sleep.
+	deadline := time.After(5 * time.Second)
+	for {
+		result := gc.LastResult()
+		if result != nil && result.SessionsPurged >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			cancel()
+			<-done
+			result := gc.LastResult()
+			if result == nil {
+				t.Fatal("GC never ran (LastResult is nil)")
+			}
+			t.Fatalf("timed out waiting for GC to purge session (SessionsPurged=%d)", result.SessionsPurged)
+		case <-time.After(50 * time.Millisecond):
+			// Keep polling.
+		}
+	}
+	cancel()
+	<-done
+
+	// Verify the old terminated session was cleaned up by Run().
+	_, err = db.Sessions().Get(ctx, oldSess.ID)
+	if err == nil {
+		t.Error("expected old terminated session to be purged by GC Run()")
+	}
+
+	// Verify LastResult was populated.
+	result := gc.LastResult()
+	if result == nil {
+		t.Fatal("expected non-nil LastResult after Run()")
+	}
+	if result.SessionsPurged < 1 {
+		t.Errorf("SessionsPurged = %d, want >= 1", result.SessionsPurged)
+	}
+}
+
 func TestLastResult(t *testing.T) {
 	ret := config.RetentionConfig{
 		SessionTTL:      "168h",

@@ -95,7 +95,7 @@ func (r *Registry) Register(ctx context.Context, hostname, ipAddr, provider, reg
 	r.mu.Lock()
 	r.workers[w.ID] = &WorkerConn{
 		Worker:  w,
-		CmdChan: make(chan WorkerCommand, 32),
+		CmdChan: make(chan WorkerCommand, 256),
 	}
 	r.mu.Unlock()
 
@@ -141,11 +141,22 @@ func (r *Registry) SendCommand(workerID string, cmd WorkerCommand) error {
 	if !ok {
 		return fmt.Errorf("worker %s not connected", workerID)
 	}
+
+	// Log warning when channel is >75% full.
+	chanLen := len(conn.CmdChan)
+	chanCap := cap(conn.CmdChan)
+	if chanCap > 0 && chanLen > chanCap*3/4 {
+		r.logger.Warn("worker command channel nearly full",
+			"worker", workerID,
+			"usage", fmt.Sprintf("%d/%d", chanLen, chanCap),
+		)
+	}
+
 	select {
 	case conn.CmdChan <- cmd:
 		return nil
 	default:
-		return fmt.Errorf("worker %s command channel full", workerID)
+		return fmt.Errorf("worker %s command channel full (%d/%d)", workerID, chanLen, chanCap)
 	}
 }
 

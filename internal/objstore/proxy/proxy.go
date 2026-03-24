@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/vyprai/loka/internal/objstore"
@@ -18,6 +19,7 @@ import (
 //   - Workers writing data through the leader CP
 //   - HA non-leader CPs forwarding writes to the leader
 type Store struct {
+	mu         sync.RWMutex
 	baseURL    string       // e.g. "https://leader:6840"
 	httpClient *http.Client
 	token      string // Worker token or internal auth token.
@@ -48,6 +50,8 @@ func New(cfg Config) *Store {
 }
 
 func (s *Store) url(path string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.baseURL + "/api/internal/objstore" + path
 }
 
@@ -194,7 +198,10 @@ func (s *Store) List(ctx context.Context, bucket, prefix string) ([]objstore.Obj
 }
 
 // SetBaseURL updates the base URL (used when leader changes in HA).
+// Thread-safe: protected by mutex since this may be called during request handling.
 func (s *Store) SetBaseURL(baseURL string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.baseURL = baseURL
 }
 

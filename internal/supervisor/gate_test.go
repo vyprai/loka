@@ -180,3 +180,65 @@ func TestGate_ApproveNonexistent(t *testing.T) {
 		t.Error("approving nonexistent should error")
 	}
 }
+
+func TestGate_ApproveRemovesFromPending(t *testing.T) {
+	gate := NewApprovalGate(5*time.Second, nil)
+	cmd := loka.Command{ID: "cmd-cleanup-1", Command: "test"}
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		gate.Suspend(ctx, "session-1", cmd, "waiting")
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Approve should immediately remove from pending.
+	if err := gate.Approve("cmd-cleanup-1", false); err != nil {
+		t.Fatal(err)
+	}
+
+	// Double approve should fail — already removed.
+	err := gate.Approve("cmd-cleanup-1", false)
+	if err == nil {
+		t.Error("second Approve should fail because entry was already removed")
+	}
+
+	wg.Wait()
+	if gate.PendingCount() != 0 {
+		t.Errorf("pending count = %d, want 0", gate.PendingCount())
+	}
+}
+
+func TestGate_DenyRemovesFromPending(t *testing.T) {
+	gate := NewApprovalGate(5*time.Second, nil)
+	cmd := loka.Command{ID: "cmd-cleanup-2", Command: "test"}
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		gate.Suspend(ctx, "session-1", cmd, "waiting")
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Deny should immediately remove from pending.
+	if err := gate.Deny("cmd-cleanup-2", "nope"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Double deny should fail — already removed.
+	err := gate.Deny("cmd-cleanup-2", "nope again")
+	if err == nil {
+		t.Error("second Deny should fail because entry was already removed")
+	}
+
+	wg.Wait()
+	if gate.PendingCount() != 0 {
+		t.Errorf("pending count = %d, want 0", gate.PendingCount())
+	}
+}

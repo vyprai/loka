@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	crypto_tls "crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,12 +14,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 
 	"github.com/vyprai/loka/internal/config"
 	"github.com/vyprai/loka/internal/controlplane"
 	"github.com/vyprai/loka/internal/controlplane/api"
+	"github.com/vyprai/loka/internal/controlplane/gc"
 	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/internal/controlplane/ha"
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
@@ -255,18 +259,23 @@ func main() {
 	// Initialize drainer with migration callback.
 	drainer := worker.NewDrainer(registry, db, sm.MigrateSession, logger)
 
-	// Start worker health monitor (only on leader in HA mode).
+	// Initialize garbage collector.
+	collector := gc.New(db, objStore, registry, imgMgr, cfg.Retention, logger)
+
+	// Start worker health monitor and GC (only on leader in HA mode).
 	monitor := worker.NewMonitor(registry, db, sm.MigrateSession, worker.DefaultMonitorConfig(), logger)
 
 	if cfg.Mode == "ha" {
-		// In HA mode, only the leader runs the monitor.
+		// In HA mode, only the leader runs the monitor and GC.
 		go coordinator.ElectLeader(ctx, "control-plane", func(leaderCtx context.Context) {
 			logger.Info("this instance is the leader")
 			monitor.Start(leaderCtx)
+			go collector.Run(leaderCtx)
 		})
 	} else {
-		// Single mode — always run the monitor.
+		// Single mode — always run the monitor and GC.
 		go monitor.Start(ctx)
+		go collector.Run(ctx)
 	}
 
 	// Start embedded local worker unless running as control plane only.
@@ -353,6 +362,23 @@ func main() {
 			}
 		} else {
 			certsFromObjStore = false
+		}
+
+		// Check if loaded certs are expiring within 30 days and regenerate if so.
+		if certsFromObjStore {
+			certPath := filepath.Join(tlsDir, "server.crt")
+			if data, err := os.ReadFile(certPath); err == nil {
+				if block, _ := pem.Decode(data); block != nil {
+					if x509Cert, err := x509.ParseCertificate(block.Bytes); err == nil {
+						if time.Until(x509Cert.NotAfter) < 30*24*time.Hour {
+							logger.Warn("TLS cert expires soon, regenerating",
+								"expires", x509Cert.NotAfter,
+								"remaining", time.Until(x509Cert.NotAfter).Round(time.Hour))
+							certsFromObjStore = false // Force regeneration below.
+						}
+					}
+				}
+			}
 		}
 
 		if certsFromObjStore {

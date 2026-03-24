@@ -151,17 +151,21 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 			s.StatusMessage = "pulling image"
 
 			// Async: pull image, then mark session running.
+			// Capture values to avoid race on launchData and session fields.
+			sessionID := s.ID
+			workerID := s.WorkerID
+			imageRef := s.ImageRef
 			go func() {
 				pullCtx := context.Background()
-				m.logger.Info("pulling image for session", "session", s.ID, "image", s.ImageRef)
+				m.logger.Info("pulling image for session", "session", sessionID, "image", imageRef)
 
-				m.UpdateStatusMessage(pullCtx, s.ID, "pulling image")
-				img, err := m.images.Pull(pullCtx, s.ImageRef)
+				m.UpdateStatusMessage(pullCtx, sessionID, "pulling image")
+				img, err := m.images.Pull(pullCtx, imageRef)
 				if err != nil {
-					m.logger.Error("image pull failed", "session", s.ID, "error", err)
-					m.UpdateStatusMessage(pullCtx, s.ID, "image pull failed: "+err.Error())
+					m.logger.Error("image pull failed", "session", sessionID, "error", err)
+					m.UpdateStatusMessage(pullCtx, sessionID, "image pull failed: "+err.Error())
 					// Set session to error.
-					if ss, e := m.store.Sessions().Get(pullCtx, s.ID); e == nil {
+					if ss, e := m.store.Sessions().Get(pullCtx, sessionID); e == nil {
 						ss.Status = loka.SessionStatusError
 						ss.StatusMessage = "image pull failed: " + err.Error()
 						m.store.Sessions().Update(pullCtx, ss)
@@ -169,39 +173,58 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 					return
 				}
 
-				// Update launch data with image paths.
+				// Update launch data with image paths — use a copy to avoid races.
 				rootfs, resolveErr := m.images.ResolveRootfsPath(pullCtx, img.ID)
 				if resolveErr != nil {
-					m.logger.Error("resolve rootfs path failed", "session", s.ID, "error", resolveErr)
+					m.logger.Error("resolve rootfs path failed", "session", sessionID, "error", resolveErr)
+					// Set session to error state instead of leaving it in provisioning.
+					if ss, e := m.store.Sessions().Get(pullCtx, sessionID); e == nil {
+						ss.Status = loka.SessionStatusError
+						ss.StatusMessage = fmt.Sprintf("image resolve failed: %v", resolveErr)
+						m.store.Sessions().Update(pullCtx, ss)
+					}
 					return
 				}
-				launchData.RootfsPath = rootfs
-				launchData.SnapshotMemPath = img.SnapshotMem
-				launchData.SnapshotVMStatePath = img.SnapshotVMState
+				ld := launchData // copy the struct
+				ld.RootfsPath = rootfs
+				ld.SnapshotMemPath = img.SnapshotMem
+				ld.SnapshotVMStatePath = img.SnapshotVMState
 
-				m.UpdateStatusMessage(pullCtx, s.ID, "booting")
+				m.UpdateStatusMessage(pullCtx, sessionID, "booting")
 
 				// Send launch command to worker.
-				m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+				if err := m.registry.SendCommand(workerID, worker.WorkerCommand{
 					ID:   uuid.New().String(),
 					Type: "launch_session",
-					Data: launchData,
-				})
+					Data: ld,
+				}); err != nil {
+					m.logger.Error("failed to send launch command after image pull", "session", sessionID, "worker", workerID, "error", err)
+					if ss, e := m.store.Sessions().Get(pullCtx, sessionID); e == nil {
+						ss.Status = loka.SessionStatusError
+						ss.StatusMessage = fmt.Sprintf("failed to dispatch to worker: %v", err)
+						m.store.Sessions().Update(pullCtx, ss)
+					}
+					return
+				}
 
 				// Mark session as running.
-				m.MarkReady(pullCtx, s.ID)
-				m.logger.Info("session provisioned", "session", s.ID, "image", s.ImageRef)
+				m.MarkReady(pullCtx, sessionID)
+				m.logger.Info("session provisioned", "session", sessionID, "image", imageRef)
 			}()
 		}
 
 		// Only send launch command immediately if the image is already cached.
 		// Provisioning sessions send it after the image pull completes (in the goroutine above).
 		if imageReady || s.ImageRef == "" || m.images == nil {
-			m.registry.SendCommand(wConn.Worker.ID, worker.WorkerCommand{
+			if err := m.registry.SendCommand(wConn.Worker.ID, worker.WorkerCommand{
 				ID:   uuid.New().String(),
 				Type: "launch_session",
 				Data: launchData,
-			})
+			}); err != nil {
+				m.logger.Error("failed to send launch command", "session", s.ID, "worker", wConn.Worker.ID, "error", err)
+				s.Status = loka.SessionStatusError
+				s.StatusMessage = fmt.Sprintf("failed to dispatch to worker: %v", err)
+			}
 		}
 		m.logger.Info("session scheduled to worker", "session", s.ID, "worker", wConn.Worker.ID, "image_ready", imageReady)
 	}
@@ -286,11 +309,13 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 
 	// Send stop command to worker if assigned.
 	if s.WorkerID != "" {
-		m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+		if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 			ID:   uuid.New().String(),
 			Type: "stop_session",
 			Data: map[string]string{"session_id": s.ID},
-		})
+		}); err != nil {
+			m.logger.Error("failed to send stop command to worker", "session", s.ID, "worker", s.WorkerID, "error", err)
+		}
 	}
 
 	s.Status = loka.SessionStatusTerminated
@@ -314,11 +339,13 @@ func (m *Manager) Purge(ctx context.Context, id string) error {
 
 	// Send cleanup command to worker if assigned.
 	if s.WorkerID != "" {
-		m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+		if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 			ID:   uuid.New().String(),
 			Type: "cleanup_session",
 			Data: worker.CleanupSessionData{SessionID: s.ID},
-		})
+		}); err != nil {
+			m.logger.Error("failed to send cleanup command to worker", "session", s.ID, "worker", s.WorkerID, "error", err)
+		}
 	}
 
 	// Delete all checkpoints for this session.
@@ -472,11 +499,13 @@ func (m *Manager) SetMode(ctx context.Context, id string, mode loka.ExecMode) (*
 
 	// Send mode change to worker.
 	if s.WorkerID != "" {
-		m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+		if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 			ID:   uuid.New().String(),
 			Type: "set_mode",
 			Data: map[string]interface{}{"session_id": s.ID, "mode": string(mode)},
-		})
+		}); err != nil {
+			return nil, fmt.Errorf("failed to send mode change to worker: %w", err)
+		}
 	}
 
 	s.Mode = mode
@@ -542,7 +571,7 @@ func (m *Manager) Exec(ctx context.Context, sessionID string, commands []loka.Co
 
 	// Always dispatch to worker — the gate handles suspension.
 	if s.WorkerID != "" {
-		m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+		if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 			ID:   uuid.New().String(),
 			Type: "exec",
 			Data: worker.ExecCommandData{
@@ -551,7 +580,12 @@ func (m *Manager) Exec(ctx context.Context, sessionID string, commands []loka.Co
 				Commands:  commands,
 				Parallel:  parallel,
 			},
-		})
+		}); err != nil {
+			exec.Status = loka.ExecStatusFailed
+			exec.UpdatedAt = time.Now()
+			m.store.Executions().Update(ctx, exec)
+			return exec, fmt.Errorf("failed to dispatch exec to worker: %w", err)
+		}
 	} else {
 		exec.Status = loka.ExecStatusFailed
 		exec.UpdatedAt = time.Now()
@@ -590,7 +624,7 @@ func (m *Manager) ApproveExecution(ctx context.Context, sessionID, execID string
 
 	// Send approve to the gate for each command — this RESUMES the suspended goroutine.
 	for _, cmd := range exec.Commands {
-		m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+		if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 			ID:   uuid.New().String(),
 			Type: "approve_gate",
 			Data: worker.ApproveOnGateData{
@@ -598,15 +632,22 @@ func (m *Manager) ApproveExecution(ctx context.Context, sessionID, execID string
 				CommandID:      cmd.ID,
 				AddToWhitelist: wantWhitelist,
 			},
-		})
+		}); err != nil {
+			m.logger.Error("failed to send approve command to worker", "session", sessionID, "command", cmd.ID, "error", err)
+			return nil, fmt.Errorf("failed to send approve to worker: %w", err)
+		}
 	}
 
 	// Update the session's whitelist if requested.
 	if wantWhitelist {
+		// Copy the slice before appending to avoid races with concurrent readers.
+		newAllowed := make([]string, len(s.ExecPolicy.AllowedCommands))
+		copy(newAllowed, s.ExecPolicy.AllowedCommands)
 		for _, cmd := range exec.Commands {
 			binary := extractBinary(cmd.Command)
-			s.ExecPolicy.AllowedCommands = append(s.ExecPolicy.AllowedCommands, binary)
+			newAllowed = append(newAllowed, binary)
 		}
+		s.ExecPolicy.AllowedCommands = newAllowed
 		s.UpdatedAt = time.Now()
 		m.store.Sessions().Update(ctx, s)
 	}
@@ -650,7 +691,7 @@ func (m *Manager) RejectExecution(ctx context.Context, sessionID, execID, reason
 	// Send deny to the gate for each command — this UNBLOCKS the suspended goroutine with an error.
 	if s.WorkerID != "" {
 		for _, cmd := range exec.Commands {
-			m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+			if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 				ID:   uuid.New().String(),
 				Type: "deny_gate",
 				Data: worker.DenyOnGateData{
@@ -658,7 +699,9 @@ func (m *Manager) RejectExecution(ctx context.Context, sessionID, execID, reason
 					CommandID: cmd.ID,
 					Reason:    reason,
 				},
-			})
+			}); err != nil {
+				m.logger.Error("failed to send deny command to worker", "session", sessionID, "command", cmd.ID, "error", err)
+			}
 		}
 	}
 
@@ -717,11 +760,13 @@ func (m *Manager) CancelExecution(ctx context.Context, sessionID, execID string)
 
 	// Send cancel to worker.
 	if s.WorkerID != "" {
-		m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+		if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 			ID:   uuid.New().String(),
 			Type: "cancel_exec",
 			Data: map[string]string{"session_id": sessionID, "exec_id": execID},
-		})
+		}); err != nil {
+			m.logger.Error("failed to send cancel command to worker", "session", sessionID, "exec", execID, "error", err)
+		}
 	}
 
 	exec.Status = loka.ExecStatusCanceled
@@ -754,7 +799,7 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sessionID, checkpointID 
 
 	// Dispatch to worker.
 	if s.WorkerID != "" {
-		m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+		if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 			ID:   uuid.New().String(),
 			Type: "create_checkpoint",
 			Data: worker.CreateCheckpointData{
@@ -762,7 +807,11 @@ func (m *Manager) CreateCheckpoint(ctx context.Context, sessionID, checkpointID 
 				CheckpointID: checkpointID,
 				Type:         cpType,
 			},
-		})
+		}); err != nil {
+			cp.Status = loka.CheckpointStatusFailed
+			m.store.Checkpoints().Create(ctx, cp)
+			return cp, fmt.Errorf("failed to dispatch checkpoint to worker: %w", err)
+		}
 	} else {
 		// No worker — immediately mark as failed.
 		cp.Status = loka.CheckpointStatusFailed
@@ -804,7 +853,7 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, sessionID, checkpointID
 		return fmt.Errorf("checkpoint %s is not ready (status: %s)", checkpointID, cp.Status)
 	}
 	if s.WorkerID != "" {
-		m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+		if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 			ID:   uuid.New().String(),
 			Type: "restore_checkpoint",
 			Data: worker.RestoreCheckpointData{
@@ -812,7 +861,9 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, sessionID, checkpointID
 				CheckpointID: checkpointID,
 				OverlayKey:   cp.OverlayPath,
 			},
-		})
+		}); err != nil {
+			return fmt.Errorf("failed to dispatch checkpoint restore to worker: %w", err)
+		}
 	}
 	m.logger.Info("checkpoint restore dispatched", "checkpoint", checkpointID, "session", sessionID)
 	return nil
@@ -922,11 +973,13 @@ func (m *Manager) ListArtifacts(ctx context.Context, sessionID, checkpointID str
 	}
 
 	// Send list_artifacts command to the worker.
-	m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+	if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 		ID:   uuid.New().String(),
 		Type: "list_artifacts",
 		Data: map[string]string{"session_id": sessionID},
-	})
+	}); err != nil {
+		m.logger.Error("failed to send list_artifacts to worker", "session", sessionID, "error", err)
+	}
 
 	// Also try objstore as fallback for immediate response.
 	key := fmt.Sprintf("%s/artifacts/manifest.json", sessionID)
@@ -996,12 +1049,17 @@ func (m *Manager) DownloadArtifact(ctx context.Context, sessionID, path string) 
 	}
 
 	// Send read_file command to the worker.
-	m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+	if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 		ID:   uuid.New().String(),
 		Type: "read_file",
 		Data: map[string]string{"session_id": sessionID, "path": path},
-	})
+	}); err != nil {
+		m.logger.Error("failed to dispatch read_file to worker", "session", sessionID, "path", path, "error", err)
+		return nil, fmt.Errorf("failed to dispatch read_file: %w", err)
+	}
 
+	// The worker will upload the artifact to objstore asynchronously.
+	// Return empty bytes — caller should retry after the worker uploads.
 	m.logger.Info("read_file dispatched", "session", sessionID, "path", path, "worker", s.WorkerID)
 	return []byte{}, nil
 }
@@ -1023,11 +1081,14 @@ func (m *Manager) DownloadArtifactsTar(ctx context.Context, sessionID string) ([
 	}
 
 	// Send download_artifacts_tar command to the worker.
-	m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
+	if err := m.registry.SendCommand(s.WorkerID, worker.WorkerCommand{
 		ID:   uuid.New().String(),
 		Type: "download_artifacts_tar",
 		Data: map[string]string{"session_id": sessionID},
-	})
+	}); err != nil {
+		m.logger.Error("failed to send download_artifacts_tar to worker", "session", sessionID, "error", err)
+		return nil, fmt.Errorf("failed to dispatch download_artifacts_tar: %w", err)
+	}
 
 	// In production, the worker would stream the tar archive back.
 	// For now, return a placeholder.

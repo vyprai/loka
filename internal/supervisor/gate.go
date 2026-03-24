@@ -65,9 +65,13 @@ func NewApprovalGate(timeout time.Duration, onPending func(*PendingApproval)) *A
 	}
 }
 
+const maxApprovalTimeout = 10 * time.Minute
+
 // Suspend parks a command at the gate and blocks until a decision is made.
 // Returns nil if approved (caller should proceed to execute).
 // Returns an error if denied or timed out.
+// A hard maximum timeout of 10 minutes is enforced regardless of the
+// configured timeout or context, to prevent goroutine leaks.
 func (g *ApprovalGate) Suspend(ctx context.Context, sessionID string, cmd loka.Command, reason string) (*ApprovalDecision, error) {
 	pa := &PendingApproval{
 		ID:        cmd.ID,
@@ -88,9 +92,16 @@ func (g *ApprovalGate) Suspend(ctx context.Context, sessionID string, cmd loka.C
 		g.onPending(pa)
 	}
 
+	// Use the configured timeout, but cap at the hard maximum.
+	timeout := g.timeout
+	if timeout > maxApprovalTimeout || timeout <= 0 {
+		timeout = maxApprovalTimeout
+	}
+
 	// Block until decision, timeout, or context cancellation.
 	select {
 	case decision := <-pa.resultCh:
+		// Approve/Deny already removed from pending map; clean up just in case.
 		g.mu.Lock()
 		if decision.Approved {
 			pa.Status = ApprovalStatusApproved
@@ -109,12 +120,12 @@ func (g *ApprovalGate) Suspend(ctx context.Context, sessionID string, cmd loka.C
 		}
 		return &decision, nil
 
-	case <-time.After(g.timeout):
+	case <-time.After(timeout):
 		g.mu.Lock()
 		pa.Status = ApprovalStatusTimeout
 		delete(g.pending, cmd.ID)
 		g.mu.Unlock()
-		return nil, fmt.Errorf("command %q approval timed out after %s", cmd.Command, g.timeout)
+		return nil, fmt.Errorf("command %q approval timed out after %s", cmd.Command, timeout)
 
 	case <-ctx.Done():
 		g.mu.Lock()
@@ -128,6 +139,9 @@ func (g *ApprovalGate) Suspend(ctx context.Context, sessionID string, cmd loka.C
 func (g *ApprovalGate) Approve(cmdID string, addToWhitelist bool) error {
 	g.mu.Lock()
 	pa, ok := g.pending[cmdID]
+	if ok {
+		delete(g.pending, cmdID) // Clean up immediately to prevent double approve/deny.
+	}
 	g.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("no pending approval for command %s", cmdID)
@@ -141,6 +155,9 @@ func (g *ApprovalGate) Approve(cmdID string, addToWhitelist bool) error {
 func (g *ApprovalGate) Deny(cmdID string, reason string) error {
 	g.mu.Lock()
 	pa, ok := g.pending[cmdID]
+	if ok {
+		delete(g.pending, cmdID) // Clean up immediately to prevent double approve/deny.
+	}
 	g.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("no pending approval for command %s", cmdID)

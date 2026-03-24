@@ -51,7 +51,7 @@ type Execution struct {
 // IsTerminal returns true if the execution is in a final state.
 func (e *Execution) IsTerminal() bool {
 	switch e.Status {
-	case ExecStatusSuccess, ExecStatusFailed, ExecStatusCanceled:
+	case ExecStatusSuccess, ExecStatusFailed, ExecStatusCanceled, ExecStatusRejected:
 		return true
 	}
 	return false

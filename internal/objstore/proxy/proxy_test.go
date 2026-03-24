@@ -203,6 +203,38 @@ func TestProxy_SetBaseURL(t *testing.T) {
 	}
 }
 
+func TestProxy_SetBaseURL_ThreadSafe(t *testing.T) {
+	ts, _ := testObjStoreServer(t)
+	proxy := New(Config{BaseURL: ts.URL})
+	ctx := context.Background()
+
+	// Pre-populate some data.
+	proxy.Put(ctx, "bucket", "key", bytes.NewReader([]byte("data")), 4)
+
+	// Concurrently call SetBaseURL and url() (via Get) to verify no data race.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			proxy.SetBaseURL(ts.URL)
+		}
+	}()
+
+	for i := 0; i < 100; i++ {
+		proxy.Exists(ctx, "bucket", "key")
+	}
+	<-done
+
+	// After concurrent access, verify the proxy still works.
+	exists, err := proxy.Exists(ctx, "bucket", "key")
+	if err != nil {
+		t.Fatalf("Exists after concurrent SetBaseURL: %v", err)
+	}
+	if !exists {
+		t.Error("expected exists after concurrent SetBaseURL")
+	}
+}
+
 // Ensure interface compliance.
 var _ objstore.ObjectStore = (*Store)(nil)
 

@@ -270,3 +270,36 @@ func TestServiceProcessStdout(t *testing.T) {
 		t.Errorf("expected 'hello' in stdout, got %v", lines)
 	}
 }
+
+func TestServiceProcessMaxRestarts(t *testing.T) {
+	// Process exits immediately with code 1. With on-failure policy
+	// the restart loop should stop after 5 consecutive failures.
+	sp := NewServiceProcess("sh", []string{"-c", "exit 1"}, map[string]string{}, "", "on-failure")
+	if err := sp.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+
+	// Wait for the stopped channel to close — the restart loop should
+	// exit after hitting the max restarts limit (5 restarts with backoff).
+	select {
+	case <-sp.stopped:
+		// Good — the loop stopped.
+	case <-time.After(60 * time.Second):
+		sp.Stop(syscall.SIGTERM, 5*time.Second)
+		t.Fatal("restart loop did not stop within timeout — max restart limit not enforced")
+	}
+
+	status := sp.Status()
+	if status.Running {
+		t.Error("process should not be running after max restarts")
+	}
+	// Should have restarted at least once but eventually stopped.
+	if status.Restarts < 1 {
+		t.Errorf("expected at least 1 restart, got %d", status.Restarts)
+	}
+	// With backoff (1s, 2s, 4s, 8s) and max 5 failures in 5 min window,
+	// it should stop after around 4 restarts.
+	if status.Restarts > 6 {
+		t.Errorf("expected at most 6 restarts, got %d (max restart limit not working)", status.Restarts)
+	}
+}

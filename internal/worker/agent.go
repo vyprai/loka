@@ -547,7 +547,10 @@ func (a *Agent) extractBundle(ctx context.Context, vsock *vm.VsockClient, bundle
 				op = ">"
 				first = false
 			}
-			cmd := fmt.Sprintf("echo '%s' | base64 -d %s /tmp/bundle.tar.gz", encoded, op)
+			// Safe: base64 output only contains [A-Za-z0-9+/=\n], so single quotes
+			// cannot be escaped. Using printf '%s' is still safer than echo since
+			// echo may interpret backslash sequences on some platforms.
+			cmd := fmt.Sprintf("printf '%%s' '%s' | base64 -d %s /tmp/bundle.tar.gz", encoded, op)
 			chunkResp, chunkErr := vsock.Execute(vm.ExecRequest{
 				Commands: []loka.Command{
 					{
