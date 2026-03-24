@@ -16,6 +16,13 @@ func (s *Server) registerInternalRoutes() {
 		r.Post("/workers/register", s.internalRegisterWorker)
 		r.Post("/exec/complete", s.internalExecComplete)
 		r.Post("/sessions/status", s.internalSessionStatus)
+
+		// Object store proxy — workers and HA non-leaders read/write through the leader.
+		r.Put("/objstore/objects/{bucket}/*", s.objStorePut)
+		r.Get("/objstore/objects/{bucket}/*", s.objStoreGet)
+		r.Head("/objstore/objects/{bucket}/*", s.objStoreHead)
+		r.Delete("/objstore/objects/{bucket}/*", s.objStoreDelete)
+		r.Get("/objstore/list/{bucket}", s.objStoreList)
 	})
 }
 

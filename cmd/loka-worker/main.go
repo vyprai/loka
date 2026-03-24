@@ -11,7 +11,7 @@ import (
 
 	"github.com/vyprai/loka/internal/config"
 	"github.com/vyprai/loka/internal/loka"
-	localobjstore "github.com/vyprai/loka/internal/objstore/local"
+	proxyobjstore "github.com/vyprai/loka/internal/objstore/proxy"
 	"github.com/vyprai/loka/internal/worker"
 	"github.com/vyprai/loka/internal/worker/vm"
 	"github.com/vyprai/loka/pkg/version"
@@ -36,12 +36,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Create local object store for the worker.
-	objStore, err := localobjstore.New(cfg.DataDir + "/objstore")
-	if err != nil {
-		logger.Error("failed to create object store", "error", err)
-		os.Exit(1)
+	// Create proxy object store — all writes go through the control plane.
+	scheme := "https"
+	if cfg.ControlPlane.Insecure && !cfg.ControlPlane.TLS {
+		scheme = "http"
 	}
+	cpURL := fmt.Sprintf("%s://%s", scheme, cfg.ControlPlane.Address)
+	objStore := proxyobjstore.New(proxyobjstore.Config{
+		BaseURL:  cpURL,
+		Token:    cfg.Token,
+		Insecure: cfg.ControlPlane.Insecure,
+	})
 
 	// Create worker agent with Firecracker config.
 	fcConfig := vm.FirecrackerConfig{
@@ -57,11 +62,6 @@ func main() {
 	}
 
 	// Create CP client.
-	scheme := "https"
-	if cfg.ControlPlane.Insecure && !cfg.ControlPlane.TLS {
-		scheme = "http"
-	}
-	cpURL := fmt.Sprintf("%s://%s", scheme, cfg.ControlPlane.Address)
 	var tlsOpts *worker.CPClientTLS
 	if scheme == "https" {
 		tlsOpts = &worker.CPClientTLS{

@@ -1,8 +1,12 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"strings"
 	"time"
@@ -13,6 +17,7 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/objstore"
 	"github.com/vyprai/loka/internal/store"
 )
 
@@ -32,18 +37,21 @@ type CreateOpts struct {
 	IdleTimeout  int                  // Seconds before auto-idle (0 = never).
 }
 
+const artifactBucket = "sessions"
+
 // Manager orchestrates session lifecycle.
 type Manager struct {
 	store     store.Store
 	registry  *worker.Registry
 	scheduler *scheduler.Scheduler
 	images    *image.Manager
+	objStore  objstore.ObjectStore
 	logger    *slog.Logger
 }
 
 // NewManager creates a new session manager.
-func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler, imgMgr *image.Manager, logger *slog.Logger) *Manager {
-	return &Manager{store: s, registry: reg, scheduler: sched, images: imgMgr, logger: logger}
+func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler, imgMgr *image.Manager, objStore objstore.ObjectStore, logger *slog.Logger) *Manager {
+	return &Manager{store: s, registry: reg, scheduler: sched, images: imgMgr, objStore: objStore, logger: logger}
 }
 
 // Create creates a new session and schedules it to a worker.
@@ -120,7 +128,12 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 		if m.images != nil {
 			if img, ok := m.images.GetByRef(s.ImageRef); ok {
 				s.ImageID = img.ID
-				launchData.RootfsPath = img.RootfsPath
+				rootfs, err := m.images.ResolveRootfsPath(ctx, img.ID)
+				if err != nil {
+					m.logger.Error("resolve rootfs path failed", "image", img.ID, "error", err)
+				} else {
+					launchData.RootfsPath = rootfs
+				}
 				launchData.SnapshotMemPath = img.SnapshotMem
 				launchData.SnapshotVMStatePath = img.SnapshotVMState
 				imageReady = true
@@ -157,7 +170,12 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 				}
 
 				// Update launch data with image paths.
-				launchData.RootfsPath = img.RootfsPath
+				rootfs, resolveErr := m.images.ResolveRootfsPath(pullCtx, img.ID)
+				if resolveErr != nil {
+					m.logger.Error("resolve rootfs path failed", "session", s.ID, "error", resolveErr)
+					return
+				}
+				launchData.RootfsPath = rootfs
 				launchData.SnapshotMemPath = img.SnapshotMem
 				launchData.SnapshotVMStatePath = img.SnapshotVMState
 
@@ -864,7 +882,7 @@ func (m *Manager) ListArtifacts(ctx context.Context, sessionID, checkpointID str
 	}
 
 	if checkpointID != "" {
-		// Return artifacts stored with the checkpoint overlay metadata.
+		// Return artifacts stored with the checkpoint.
 		cp, err := m.store.Checkpoints().Get(ctx, checkpointID)
 		if err != nil {
 			return nil, fmt.Errorf("checkpoint not found: %w", err)
@@ -872,19 +890,34 @@ func (m *Manager) ListArtifacts(ctx context.Context, sessionID, checkpointID str
 		if cp.SessionID != sessionID {
 			return nil, fmt.Errorf("checkpoint %s does not belong to session %s", checkpointID, sessionID)
 		}
-		// In production, read the overlay metadata from the object store
-		// at cp.MetadataPath to reconstruct the artifact list.
-		// For now, return an empty list as a placeholder.
-		return []*loka.Artifact{}, nil
+		// Read manifest from objstore. If not found, return empty list (no artifacts uploaded yet).
+		key := fmt.Sprintf("%s/checkpoints/%s/artifacts/manifest.json", sessionID, checkpointID)
+		arts, err := m.readArtifactManifest(ctx, key)
+		if err != nil {
+			return []*loka.Artifact{}, nil
+		}
+		return arts, nil
 	}
 
-	// Live diff: ensure the session is running then ask the worker.
+	// Live diff: try the worker first, fall back to objstore manifest.
 	s, err = m.ensureRunning(ctx, s)
 	if err != nil {
+		// Session not running — try reading persisted manifest from objstore.
+		key := fmt.Sprintf("%s/artifacts/manifest.json", sessionID)
+		arts, objErr := m.readArtifactManifest(ctx, key)
+		if objErr == nil {
+			return arts, nil
+		}
 		return nil, err
 	}
 
 	if s.WorkerID == "" {
+		// No worker — try objstore fallback.
+		key := fmt.Sprintf("%s/artifacts/manifest.json", sessionID)
+		arts, objErr := m.readArtifactManifest(ctx, key)
+		if objErr == nil {
+			return arts, nil
+		}
 		return nil, fmt.Errorf("session has no assigned worker")
 	}
 
@@ -895,26 +928,71 @@ func (m *Manager) ListArtifacts(ctx context.Context, sessionID, checkpointID str
 		Data: map[string]string{"session_id": sessionID},
 	})
 
-	// In production, the worker would respond with the file list via a
-	// report channel. For now, return an empty list as a placeholder.
+	// Also try objstore as fallback for immediate response.
+	key := fmt.Sprintf("%s/artifacts/manifest.json", sessionID)
+	arts, objErr := m.readArtifactManifest(ctx, key)
+	if objErr == nil && len(arts) > 0 {
+		return arts, nil
+	}
+
 	m.logger.Info("list_artifacts dispatched", "session", sessionID, "worker", s.WorkerID)
 	return []*loka.Artifact{}, nil
 }
 
+// readArtifactManifest reads and decodes an artifact manifest from the object store.
+func (m *Manager) readArtifactManifest(ctx context.Context, key string) ([]*loka.Artifact, error) {
+	if m.objStore == nil {
+		return nil, fmt.Errorf("object store not configured")
+	}
+	reader, err := m.objStore.Get(ctx, artifactBucket, key)
+	if err != nil {
+		return nil, fmt.Errorf("manifest not found in objstore: %w", err)
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read manifest: %w", err)
+	}
+
+	var arts []*loka.Artifact
+	if err := json.Unmarshal(data, &arts); err != nil {
+		return nil, fmt.Errorf("failed to decode manifest: %w", err)
+	}
+	return arts, nil
+}
+
 // DownloadArtifact reads a single file from the session's overlay.
+// It first tries the object store, falling back to the worker if not found.
 func (m *Manager) DownloadArtifact(ctx context.Context, sessionID, path string) ([]byte, error) {
 	s, err := m.store.Sessions().Get(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session not found: %w", err)
 	}
 
+	// Try reading from objstore first.
+	if m.objStore != nil {
+		pathHash := fmt.Sprintf("%x", sha256.Sum256([]byte(path)))
+		key := fmt.Sprintf("%s/artifacts/%s.dat", sessionID, pathHash)
+		reader, objErr := m.objStore.Get(ctx, artifactBucket, key)
+		if objErr == nil {
+			defer reader.Close()
+			data, err := io.ReadAll(reader)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read artifact from objstore: %w", err)
+			}
+			return data, nil
+		}
+	}
+
+	// Fall back to worker dispatch.
 	s, err = m.ensureRunning(ctx, s)
 	if err != nil {
 		return nil, err
 	}
 
 	if s.WorkerID == "" {
-		return nil, fmt.Errorf("session has no assigned worker")
+		return nil, fmt.Errorf("session has no assigned worker and artifact not in object store")
 	}
 
 	// Send read_file command to the worker.
@@ -924,8 +1002,6 @@ func (m *Manager) DownloadArtifact(ctx context.Context, sessionID, path string) 
 		Data: map[string]string{"session_id": sessionID, "path": path},
 	})
 
-	// In production, the worker would stream the file content back.
-	// For now, return a placeholder.
 	m.logger.Info("read_file dispatched", "session", sessionID, "path", path, "worker", s.WorkerID)
 	return []byte{}, nil
 }
@@ -957,4 +1033,34 @@ func (m *Manager) DownloadArtifactsTar(ctx context.Context, sessionID string) ([
 	// For now, return a placeholder.
 	m.logger.Info("download_artifacts_tar dispatched", "session", sessionID, "worker", s.WorkerID)
 	return []byte{}, nil
+}
+
+// UploadArtifacts persists artifact files and manifest to the object store.
+// Called by the worker after exec completes to store changed files.
+func (m *Manager) UploadArtifacts(ctx context.Context, sessionID string, artifacts []loka.Artifact, files map[string][]byte) error {
+	if m.objStore == nil {
+		return fmt.Errorf("object store not configured")
+	}
+	// Upload each file.
+	for path, data := range files {
+		pathHash := fmt.Sprintf("%x", sha256.Sum256([]byte(path)))
+		key := fmt.Sprintf("%s/artifacts/%s.dat", sessionID, pathHash)
+		if err := m.objStore.Put(ctx, artifactBucket, key, bytes.NewReader(data), int64(len(data))); err != nil {
+			return fmt.Errorf("failed to upload artifact %s: %w", path, err)
+		}
+		m.logger.Debug("uploaded artifact", "session", sessionID, "path", path, "key", key, "size", len(data))
+	}
+
+	// Write manifest.json with the artifact list.
+	manifestData, err := json.Marshal(artifacts)
+	if err != nil {
+		return fmt.Errorf("failed to marshal artifact manifest: %w", err)
+	}
+	manifestKey := fmt.Sprintf("%s/artifacts/manifest.json", sessionID)
+	if err := m.objStore.Put(ctx, artifactBucket, manifestKey, bytes.NewReader(manifestData), int64(len(manifestData))); err != nil {
+		return fmt.Errorf("failed to upload artifact manifest: %w", err)
+	}
+
+	m.logger.Info("artifacts uploaded", "session", sessionID, "count", len(artifacts), "files", len(files))
+	return nil
 }

@@ -6,6 +6,7 @@ type ControlPlaneConfig struct {
 	Mode        string            `yaml:"mode"`        // "single" or "ha"
 	ListenAddr  string            `yaml:"listen_addr"` // REST API listen address (default ":6840")
 	GRPCAddr    string            `yaml:"grpc_addr"`   // gRPC listen address for workers (default ":6841")
+	DataDir     string            `yaml:"data_dir"`    // Local data directory for worker files, caches, etc.
 	Database    DatabaseConfig    `yaml:"database"`
 	Coordinator CoordinatorConfig `yaml:"coordinator"`
 	ObjectStore ObjectStoreConfig `yaml:"objectstore"`
@@ -63,10 +64,12 @@ type CoordinatorConfig struct {
 
 // ObjectStoreConfig selects and configures the object store.
 type ObjectStoreConfig struct {
-	Type   string `yaml:"type"`   // "local", "s3", "gcs"
-	Path   string `yaml:"path"`   // Local filesystem path (type=local).
-	Bucket string `yaml:"bucket"` // S3/GCS bucket name.
-	Region string `yaml:"region"` // S3 region.
+	Type     string `yaml:"type"`     // "local", "s3", "gcs", "azure"
+	Path     string `yaml:"path"`     // Local/embedded filesystem path.
+	Bucket   string `yaml:"bucket"`   // S3/GCS bucket name or Azure container name.
+	Region   string `yaml:"region"`   // S3/Azure region.
+	Endpoint string `yaml:"endpoint"` // Custom S3 endpoint (for MinIO, R2, etc).
+	Account  string `yaml:"account"`  // Azure storage account name.
 }
 
 // SchedulerConfig configures the session scheduler.
@@ -107,12 +110,14 @@ func (c *ControlPlaneConfig) Defaults() {
 	if c.Coordinator.Type == "" {
 		c.Coordinator.Type = "local"
 	}
+	if c.DataDir == "" {
+		c.DataDir = "/tmp/loka-data"
+	}
 	if c.ObjectStore.Type == "" {
 		c.ObjectStore.Type = "local"
 	}
 	if c.ObjectStore.Path == "" && c.ObjectStore.Type == "local" {
-		// Use a temp dir for development; /var/loka requires root.
-		c.ObjectStore.Path = "/tmp/loka-data/artifacts"
+		c.ObjectStore.Path = c.DataDir + "/objstore"
 	}
 	if c.Scheduler.Strategy == "" {
 		c.Scheduler.Strategy = "spread"

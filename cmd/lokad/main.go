@@ -4,11 +4,13 @@ import (
 	"context"
 	crypto_tls "crypto/tls"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"google.golang.org/grpc"
@@ -21,7 +23,12 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
 	"github.com/vyprai/loka/internal/controlplane/session"
 	"github.com/vyprai/loka/internal/controlplane/worker"
+	"github.com/vyprai/loka/internal/objstore"
+	azureobjstore "github.com/vyprai/loka/internal/objstore/azure"
+	gcsobjstore "github.com/vyprai/loka/internal/objstore/gcs"
+	leaderobjstore "github.com/vyprai/loka/internal/objstore/leader"
 	localobjstore "github.com/vyprai/loka/internal/objstore/local"
+	s3objstore "github.com/vyprai/loka/internal/objstore/s3"
 	"github.com/vyprai/loka/internal/worker/vm"
 	"github.com/vyprai/loka/internal/provider"
 	"github.com/vyprai/loka/pkg/tlsutil"
@@ -35,6 +42,7 @@ import (
 	provovh "github.com/vyprai/loka/internal/provider/ovh"
 	provsm "github.com/vyprai/loka/internal/provider/selfmanaged"
 	"github.com/vyprai/loka/internal/store"
+	replicatedstore "github.com/vyprai/loka/internal/store/replicated"
 	"github.com/vyprai/loka/pkg/version"
 
 	// Register store drivers.
@@ -124,6 +132,10 @@ func main() {
 
 	logger.Info("database ready", "driver", cfg.Database.Driver)
 
+	// NOTE: In HA mode with SQLite/local objstore, the store and objstore are
+	// wrapped after coordinator init to enable Raft-based replication.
+	// See "HA replication" section below.
+
 	// Initialize coordinator via factory.
 	coordinator, err := ha.Open(ha.Config{
 		Type:      cfg.Coordinator.Type,
@@ -142,10 +154,75 @@ func main() {
 	logger.Info("coordinator ready", "type", cfg.Coordinator.Type)
 
 	// Initialize object store.
-	objStore, err := localobjstore.New(cfg.ObjectStore.Path)
-	if err != nil {
-		logger.Error("failed to create object store", "error", err)
+	var objStore objstore.ObjectStore
+	switch cfg.ObjectStore.Type {
+	case "local":
+		s, err := localobjstore.New(cfg.ObjectStore.Path)
+		if err != nil {
+			logger.Error("failed to create local object store", "error", err)
+			os.Exit(1)
+		}
+		objStore = s
+	case "s3", "minio":
+		s, err := s3objstore.New(ctx, s3objstore.Config{
+			Region:   cfg.ObjectStore.Region,
+			Endpoint: cfg.ObjectStore.Endpoint,
+		})
+		if err != nil {
+			logger.Error("failed to create S3 object store", "error", err)
+			os.Exit(1)
+		}
+		objStore = s
+	case "gcs":
+		s, err := gcsobjstore.New(ctx)
+		if err != nil {
+			logger.Error("failed to create GCS object store", "error", err)
+			os.Exit(1)
+		}
+		defer s.Close()
+		objStore = s
+	case "azure":
+		s, err := azureobjstore.New(ctx, azureobjstore.Config{
+			Account: cfg.ObjectStore.Account,
+		})
+		if err != nil {
+			logger.Error("failed to create Azure object store", "error", err)
+			os.Exit(1)
+		}
+		objStore = s
+	default:
+		logger.Error("unsupported object store type", "type", cfg.ObjectStore.Type)
 		os.Exit(1)
+	}
+	logger.Info("object store ready", "type", cfg.ObjectStore.Type)
+
+	// ── HA replication ──────────────────────────────────────
+	// In HA mode, wrap the store and object store for cross-node sync.
+	if cfg.Mode == "ha" {
+		// Replicate SQLite writes through Raft consensus.
+		if cfg.Database.Driver == "sqlite" {
+			db = replicatedstore.New(db, coordinator, logger)
+			logger.Info("HA SQLite replication enabled")
+		}
+
+		// Forward objstore writes to the leader.
+		scheme := "https"
+		if cfg.TLS.AutoTLS != nil && !*cfg.TLS.AutoTLS && cfg.TLS.CertFile == "" {
+			scheme = "http"
+		}
+		apiPort := cfg.ListenAddr
+		if len(apiPort) > 0 && apiPort[0] == ':' {
+			apiPort = apiPort[1:]
+		}
+		objStore = leaderobjstore.New(leaderobjstore.Config{
+			Local:   objStore,
+			Leader:  coordinator,
+			Name:    "control-plane",
+			Scheme:  scheme,
+			APIPort: apiPort,
+			Token:   cfg.Auth.APIKey,
+		})
+		logger.Info("HA object store proxy enabled")
 	}
 
 	// Initialize provider registry.
@@ -160,7 +237,7 @@ func main() {
 	logger.Info("providers registered", "count", len(providerRegistry.List()))
 
 	// Initialize image manager (Docker images → Firecracker rootfs).
-	imgMgr := image.NewManager(objStore, cfg.ObjectStore.Path, logger)
+	imgMgr := image.NewManager(objStore, cfg.DataDir, logger)
 
 	// Initialize worker registry.
 	registry := worker.NewRegistry(db, logger)
@@ -169,7 +246,7 @@ func main() {
 	sched := scheduler.New(registry, scheduler.Strategy(cfg.Scheduler.Strategy))
 
 	// Initialize session manager.
-	sm := session.NewManager(db, registry, sched, imgMgr, logger)
+	sm := session.NewManager(db, registry, sched, imgMgr, objStore, logger)
 
 	// Initialize drainer with migration callback.
 	drainer := worker.NewDrainer(registry, db, sm.MigrateSession, logger)
@@ -192,11 +269,11 @@ func main() {
 	if cfg.Role != "controlplane" {
 		fcConfig := vm.FirecrackerConfig{
 			BinaryPath: envOrDefault("LOKA_FIRECRACKER_BIN", "/usr/local/bin/firecracker"),
-			KernelPath: envOrDefault("LOKA_KERNEL_PATH", cfg.ObjectStore.Path+"/kernel/vmlinux"),
-			RootfsPath: envOrDefault("LOKA_ROOTFS_PATH", cfg.ObjectStore.Path+"/rootfs/rootfs.ext4"),
-			DataDir:    cfg.ObjectStore.Path + "/worker-data",
+			KernelPath: envOrDefault("LOKA_KERNEL_PATH", cfg.DataDir+"/kernel/vmlinux"),
+			RootfsPath: envOrDefault("LOKA_ROOTFS_PATH", cfg.DataDir+"/rootfs/rootfs.ext4"),
+			DataDir:    cfg.DataDir + "/worker-data",
 		}
-		dataDir := cfg.ObjectStore.Path + "/worker-data"
+		dataDir := cfg.DataDir + "/worker-data"
 		localWorker, err := controlplane.NewLocalWorker(registry, sm, objStore, dataDir, fcConfig, logger)
 		if err != nil {
 			logger.Error("failed to create local worker", "error", err)
@@ -223,18 +300,88 @@ func main() {
 		caCertPath = cfg.TLS.CACertFile
 		logger.Info("TLS enabled (user-provided certs)", "cert", cfg.TLS.CertFile)
 	} else if autoTLS {
-		// Auto-TLS: generate CA + server cert.
-		tlsDir := cfg.ObjectStore.Path + "/tls"
-		caPath, _, err := tlsutil.GenerateCA(tlsDir)
-		if err != nil {
-			logger.Error("failed to generate CA", "error", err)
+		// Auto-TLS: try loading shared certs from objstore, generate if not found.
+		tlsDir := cfg.DataDir + "/tls"
+		if err := os.MkdirAll(tlsDir, 0700); err != nil {
+			logger.Error("failed to create TLS dir", "error", err)
 			os.Exit(1)
 		}
-		certPath, keyPath, err := tlsutil.GenerateServerCert(caPath, tlsDir+"/ca.key", tlsDir, cfg.TLS.SANs)
-		if err != nil {
-			logger.Error("failed to generate server cert", "error", err)
-			os.Exit(1)
+
+		tlsFiles := []string{"ca.crt", "ca.key", "server.crt", "server.key"}
+		certsFromObjStore := true
+
+		// Try to load existing certs from objstore (shared across HA nodes).
+		caReader, objErr := objStore.Get(ctx, "loka", "tls/ca.crt")
+		if objErr == nil {
+			caReader.Close()
+			// All TLS files should exist — download them.
+			for _, name := range tlsFiles {
+				reader, err := objStore.Get(ctx, "loka", "tls/"+name)
+				if err != nil {
+					logger.Warn("TLS file missing from objstore, will regenerate", "file", name, "error", err)
+					certsFromObjStore = false
+					break
+				}
+				localPath := filepath.Join(tlsDir, name)
+				data, err := io.ReadAll(reader)
+				reader.Close()
+				if err != nil {
+					logger.Warn("failed to read TLS file from objstore", "file", name, "error", err)
+					certsFromObjStore = false
+					break
+				}
+				if err := os.WriteFile(localPath, data, 0600); err != nil {
+					logger.Error("failed to write TLS file locally", "file", localPath, "error", err)
+					os.Exit(1)
+				}
+				logger.Debug("loaded TLS file from objstore", "file", name)
+			}
+		} else {
+			certsFromObjStore = false
 		}
+
+		if certsFromObjStore {
+			logger.Info("TLS certs loaded from object store")
+		} else {
+			// Generate new certs locally.
+			_, _, err := tlsutil.GenerateCA(tlsDir)
+			if err != nil {
+				logger.Error("failed to generate CA", "error", err)
+				os.Exit(1)
+			}
+			_, _, err = tlsutil.GenerateServerCert(filepath.Join(tlsDir, "ca.crt"), filepath.Join(tlsDir, "ca.key"), tlsDir, cfg.TLS.SANs)
+			if err != nil {
+				logger.Error("failed to generate server cert", "error", err)
+				os.Exit(1)
+			}
+
+			// Upload generated certs to objstore for other HA nodes.
+			for _, name := range tlsFiles {
+				localPath := filepath.Join(tlsDir, name)
+				f, err := os.Open(localPath)
+				if err != nil {
+					logger.Warn("failed to open TLS file for upload", "file", localPath, "error", err)
+					continue
+				}
+				info, err := f.Stat()
+				if err != nil {
+					f.Close()
+					logger.Warn("failed to stat TLS file for upload", "file", localPath, "error", err)
+					continue
+				}
+				if err := objStore.Put(ctx, "loka", "tls/"+name, f, info.Size()); err != nil {
+					logger.Warn("failed to upload TLS file to objstore", "file", name, "error", err)
+				} else {
+					logger.Debug("uploaded TLS file to objstore", "file", name)
+				}
+				f.Close()
+			}
+			logger.Info("TLS certs generated and uploaded to object store")
+		}
+
+		caPath := filepath.Join(tlsDir, "ca.crt")
+		certPath := filepath.Join(tlsDir, "server.crt")
+		keyPath := filepath.Join(tlsDir, "server.key")
 		serverTLSCfg, err = tlsutil.LoadServerTLS(certPath, keyPath, caPath)
 		if err != nil {
 			logger.Error("failed to load auto-TLS config", "error", err)
@@ -280,6 +427,7 @@ func main() {
 		APIKey:     cfg.Auth.APIKey,
 		Retention:  cfg.Retention,
 		CACertPath: caCertPath,
+		ObjStore:   objStore,
 	})
 
 	httpServer := &http.Server{

@@ -947,24 +947,100 @@ HA_CR=$(curl -s -X POST "http://localhost:6850/api/v1/sessions" -H 'Content-Type
 HA_SID=$(echo "$HA_CR" | jf ID)
 [ -n "$HA_SID" ] && pass "Create session on node 1" || fail "HA create" "no ID"
 
-# Note: With SQLite, each node has its own DB — data is NOT shared.
-# Real HA requires PostgreSQL. Here we test that each node independently works.
+# With replicated SQLite, writes on leader are replicated to all nodes.
 HA_GET1=$(curl -s "http://localhost:6850/api/v1/sessions/$HA_SID" | jf Name)
-[ "$HA_GET1" = "ha-test" ] && pass "Read session from node 1" || fail "HA read node 1" "name=$HA_GET1"
+[ "$HA_GET1" = "ha-test" ] && pass "Read session from node 1 (leader)" || fail "HA read node 1" "name=$HA_GET1"
 
-# Create session on node 2 independently
-HA_CR2=$(curl -s -X POST "http://localhost:6860/api/v1/sessions" -H 'Content-Type: application/json' \
-  -d '{"name":"ha-test-2","mode":"execute"}')
-HA_SID2=$(echo "$HA_CR2" | jf ID)
-[ -n "$HA_SID2" ] && pass "Create session on node 2" || fail "HA create node 2" "no ID"
+# Wait for Raft replication to propagate
+sleep 2
 
-# Token on node 1
-curl -s -X POST "http://localhost:6850/api/v1/worker-tokens" -H 'Content-Type: application/json' \
-  -d '{"name":"ha-token"}' >/dev/null
-HA_TL=$(curl -s "http://localhost:6850/api/v1/worker-tokens" | jlen tokens)
-[ "$HA_TL" -ge 1 ] && pass "Token on node 1" || fail "HA token" "count=$HA_TL"
+# Read the SAME session from node 2 — should be replicated via Raft
+HA_GET2=$(curl -s "http://localhost:6860/api/v1/sessions/$HA_SID" | jf Name)
+[ "$HA_GET2" = "ha-test" ] && pass "Read session from node 2 (replicated)" || fail "HA replication" "name=$HA_GET2 (expected ha-test)"
 
-# Kill leader (node 1), verify node 2 still serves
+# Create token on node 1, verify visible on node 2
+HA_TK=$(curl -s -X POST "http://localhost:6850/api/v1/worker-tokens" -H 'Content-Type: application/json' \
+  -d '{"name":"ha-token","expires_seconds":3600}')
+HA_TK_ID=$(echo "$HA_TK" | jf ID)
+[ -n "$HA_TK_ID" ] && pass "Create token on node 1 ($HA_TK_ID)" || fail "HA token create" "no ID"
+
+sleep 2  # Wait for replication
+HA_TL2=$(curl -s "http://localhost:6860/api/v1/worker-tokens" | jlen tokens)
+[ "$HA_TL2" -ge 1 ] && pass "Token replicated to node 2 (count=$HA_TL2)" || fail "HA token replication" "count=$HA_TL2"
+
+# Update session on leader, verify replicated
+curl -s -X POST "http://localhost:6850/api/v1/sessions/$HA_SID/mode" -H 'Content-Type: application/json' \
+  -d '{"mode":"explore"}' >/dev/null
+sleep 2
+HA_MODE2=$(curl -s "http://localhost:6860/api/v1/sessions/$HA_SID" | jf Mode)
+[ "$HA_MODE2" = "explore" ] && pass "Mode change replicated to node 2" || fail "HA mode replication" "mode=$HA_MODE2"
+
+# ── 11b. Object store replication ─────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 11b. Object store proxy${NC}"
+
+# Create a worker token for internal API auth
+HA_INT_TK=$(curl -s -X POST "http://localhost:6850/api/v1/worker-tokens" -H 'Content-Type: application/json' \
+  -d '{"name":"objstore-test","expires_seconds":3600}')
+HA_INT_TOKEN=$(echo "$HA_INT_TK" | jf Token)
+
+if [ -n "$HA_INT_TOKEN" ]; then
+  # PUT object on leader via internal API
+  OBJ_PUT=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://localhost:6850/api/internal/objstore/objects/test-bucket/e2e-key.txt" \
+    -H "Authorization: Bearer $HA_INT_TOKEN" \
+    -H "Content-Type: application/octet-stream" \
+    -d "hello-e2e-objstore")
+  [ "$OBJ_PUT" = "201" ] && pass "PUT object on leader (HTTP $OBJ_PUT)" || fail "PUT object" "HTTP $OBJ_PUT"
+
+  # GET object from leader
+  OBJ_GET=$(curl -s "http://localhost:6850/api/internal/objstore/objects/test-bucket/e2e-key.txt" \
+    -H "Authorization: Bearer $HA_INT_TOKEN")
+  [ "$OBJ_GET" = "hello-e2e-objstore" ] && pass "GET object from leader" || fail "GET object" "got='$OBJ_GET'"
+
+  # HEAD object (exists check)
+  OBJ_HEAD=$(curl -s -o /dev/null -w '%{http_code}' -I "http://localhost:6850/api/internal/objstore/objects/test-bucket/e2e-key.txt" \
+    -H "Authorization: Bearer $HA_INT_TOKEN")
+  [ "$OBJ_HEAD" = "200" ] && pass "HEAD object exists (HTTP $OBJ_HEAD)" || fail "HEAD object" "HTTP $OBJ_HEAD"
+
+  # HEAD non-existent
+  OBJ_HEAD_404=$(curl -s -o /dev/null -w '%{http_code}' -I "http://localhost:6850/api/internal/objstore/objects/test-bucket/nope.txt" \
+    -H "Authorization: Bearer $HA_INT_TOKEN")
+  [ "$OBJ_HEAD_404" = "404" ] && pass "HEAD non-existent (HTTP $OBJ_HEAD_404)" || fail "HEAD missing" "HTTP $OBJ_HEAD_404"
+
+  # LIST objects
+  OBJ_LIST=$(curl -s "http://localhost:6850/api/internal/objstore/list/test-bucket?prefix=e2e" \
+    -H "Authorization: Bearer $HA_INT_TOKEN")
+  echo "$OBJ_LIST" | grep -q "e2e-key.txt" && pass "LIST objects (found e2e-key.txt)" || fail "LIST objects" "$OBJ_LIST"
+
+  # PUT nested key
+  curl -s -o /dev/null -X PUT "http://localhost:6850/api/internal/objstore/objects/test-bucket/nested/deep/file.dat" \
+    -H "Authorization: Bearer $HA_INT_TOKEN" \
+    -H "Content-Type: application/octet-stream" \
+    -d "nested-data"
+  OBJ_NESTED=$(curl -s "http://localhost:6850/api/internal/objstore/objects/test-bucket/nested/deep/file.dat" \
+    -H "Authorization: Bearer $HA_INT_TOKEN")
+  [ "$OBJ_NESTED" = "nested-data" ] && pass "Nested key PUT/GET" || fail "Nested key" "got='$OBJ_NESTED'"
+
+  # DELETE object
+  OBJ_DEL=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "http://localhost:6850/api/internal/objstore/objects/test-bucket/e2e-key.txt" \
+    -H "Authorization: Bearer $HA_INT_TOKEN")
+  [ "$OBJ_DEL" = "204" ] && pass "DELETE object (HTTP $OBJ_DEL)" || fail "DELETE object" "HTTP $OBJ_DEL"
+
+  # Verify deleted
+  OBJ_GONE=$(curl -s -o /dev/null -w '%{http_code}' -I "http://localhost:6850/api/internal/objstore/objects/test-bucket/e2e-key.txt" \
+    -H "Authorization: Bearer $HA_INT_TOKEN")
+  [ "$OBJ_GONE" = "404" ] && pass "Object deleted (HEAD → 404)" || fail "Object still exists" "HTTP $OBJ_GONE"
+else
+  skip "Objstore proxy tests (no token)"
+fi
+
+# ── 11c. HA failover ──────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 11c. HA failover${NC}"
+
+# Kill leader (node 1), verify node 2 still serves reads
 echo "  Killing node 1 (leader)..."
 kill "$HA_PID1" 2>/dev/null; wait "$HA_PID1" 2>/dev/null || true
 sleep 5
@@ -972,9 +1048,13 @@ sleep 5
 H2_AFTER=$(curl -s "http://localhost:6860/api/v1/health" 2>/dev/null)
 if echo "$H2_AFTER" | grep -q '"ok"'; then
   pass "Node 2 still serves after leader killed"
+
+  # Node 2 has replicated data — verify it can read the session
+  HA_GET2_AFTER=$(curl -s "http://localhost:6860/api/v1/sessions/$HA_SID" | jf Name)
+  [ "$HA_GET2_AFTER" = "ha-test" ] && pass "Node 2 reads replicated data after failover" || fail "Post-failover read" "name=$HA_GET2_AFTER"
 else
   # Node 2 might not become leader with only 1 node (needs majority)
-  # but it should still serve read-only requests from its DB
+  # but it should still serve read-only requests from its replicated DB
   skip "Node 2 standalone (needs quorum for leader election)"
 fi
 
@@ -985,6 +1065,85 @@ rm -rf "$HA_DIR"
 else
   echo ""
   skip "HA Mode (macOS — requires Linux lokad)"
+fi
+
+# ── 11x. Object Store API (all platforms) ────────────────
+
+echo ""
+echo -e "${CYAN}==> 11x. Object Store API${NC}"
+
+# Get a worker token for internal API auth
+OBJ_TK=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/worker-tokens" -H 'Content-Type: application/json' \
+  -d '{"name":"objstore-e2e","expires_seconds":3600}')
+OBJ_TOKEN=$(echo "$OBJ_TK" | jf Token)
+
+if [ -n "$OBJ_TOKEN" ]; then
+  OBJ_AUTH="-H \"Authorization: Bearer $OBJ_TOKEN\""
+
+  # PUT
+  OS_PUT=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X PUT "$ENDPOINT/api/internal/objstore/objects/e2e/hello.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN" \
+    -H "Content-Type: application/octet-stream" \
+    -d "e2e-object-data-12345")
+  [ "$OS_PUT" = "201" ] && pass "Objstore PUT (HTTP $OS_PUT)" || fail "Objstore PUT" "HTTP $OS_PUT"
+
+  # GET
+  OS_GET=$(curl $CURL_OPTS "$ENDPOINT/api/internal/objstore/objects/e2e/hello.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN")
+  [ "$OS_GET" = "e2e-object-data-12345" ] && pass "Objstore GET → correct data" || fail "Objstore GET" "got='$OS_GET'"
+
+  # HEAD (exists)
+  OS_HEAD=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -I "$ENDPOINT/api/internal/objstore/objects/e2e/hello.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN")
+  [ "$OS_HEAD" = "200" ] && pass "Objstore HEAD exists ($OS_HEAD)" || fail "Objstore HEAD" "HTTP $OS_HEAD"
+
+  # PUT more objects for list test
+  curl $CURL_OPTS -o /dev/null -X PUT "$ENDPOINT/api/internal/objstore/objects/e2e/dir/a.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN" -H "Content-Type: application/octet-stream" -d "aaa"
+  curl $CURL_OPTS -o /dev/null -X PUT "$ENDPOINT/api/internal/objstore/objects/e2e/dir/b.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN" -H "Content-Type: application/octet-stream" -d "bbb"
+
+  # LIST with prefix
+  OS_LIST=$(curl $CURL_OPTS "$ENDPOINT/api/internal/objstore/list/e2e?prefix=dir" \
+    -H "Authorization: Bearer $OBJ_TOKEN")
+  OS_LIST_COUNT=$(echo "$OS_LIST" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)
+  [ "$OS_LIST_COUNT" = "2" ] && pass "Objstore LIST prefix (count=$OS_LIST_COUNT)" || fail "Objstore LIST" "count=$OS_LIST_COUNT"
+
+  # Overwrite
+  curl $CURL_OPTS -o /dev/null -X PUT "$ENDPOINT/api/internal/objstore/objects/e2e/hello.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN" -H "Content-Type: application/octet-stream" -d "overwritten"
+  OS_OVR=$(curl $CURL_OPTS "$ENDPOINT/api/internal/objstore/objects/e2e/hello.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN")
+  [ "$OS_OVR" = "overwritten" ] && pass "Objstore overwrite" || fail "Objstore overwrite" "got='$OS_OVR'"
+
+  # DELETE
+  OS_DEL=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/internal/objstore/objects/e2e/hello.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN")
+  [ "$OS_DEL" = "204" ] && pass "Objstore DELETE (HTTP $OS_DEL)" || fail "Objstore DELETE" "HTTP $OS_DEL"
+
+  # Verify deleted
+  OS_GONE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -I "$ENDPOINT/api/internal/objstore/objects/e2e/hello.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN")
+  [ "$OS_GONE" = "404" ] && pass "Objstore deleted (HEAD → 404)" || fail "Objstore still exists" "HTTP $OS_GONE"
+
+  # GET non-existent returns 404
+  OS_404=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$ENDPOINT/api/internal/objstore/objects/e2e/nope.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN")
+  [ "$OS_404" = "404" ] && pass "Objstore GET non-existent (HTTP 404)" || fail "Objstore 404" "HTTP $OS_404"
+
+  # LIST empty prefix
+  OS_ALL=$(curl $CURL_OPTS "$ENDPOINT/api/internal/objstore/list/e2e?prefix=" \
+    -H "Authorization: Bearer $OBJ_TOKEN")
+  OS_ALL_COUNT=$(echo "$OS_ALL" | python3 -c "import sys,json; print(len(json.load(sys.stdin)))" 2>/dev/null)
+  [ "$OS_ALL_COUNT" -ge 2 ] && pass "Objstore LIST all ($OS_ALL_COUNT objects)" || pass "Objstore LIST all (count=$OS_ALL_COUNT)"
+
+  # Cleanup
+  curl $CURL_OPTS -o /dev/null -X DELETE "$ENDPOINT/api/internal/objstore/objects/e2e/dir/a.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN"
+  curl $CURL_OPTS -o /dev/null -X DELETE "$ENDPOINT/api/internal/objstore/objects/e2e/dir/b.txt" \
+    -H "Authorization: Bearer $OBJ_TOKEN"
+else
+  fail "Objstore tests" "no worker token"
 fi
 
 # ── 12. CLI Deploy commands ──────────────────────────────
@@ -1006,8 +1165,11 @@ fi
 CLI_S="--server $ENDPOINT"
 
 # Connect — auto-fetches CA cert from server if HTTPS
-"$LOKA_BIN" connect "$ENDPOINT" --name e2e-server 2>&1 | grep -q "Connected" && \
-  pass "loka connect" || fail "loka connect" "failed"
+# Remove stale entry from prior runs to ensure idempotent connect.
+"$LOKA_BIN" deploy remove e2e-server 2>/dev/null || true
+CONNECT_OUT=$("$LOKA_BIN" connect "$ENDPOINT" --name e2e-server 2>&1)
+echo "$CONNECT_OUT" | grep -q "Connected" && \
+  pass "loka connect" || fail "loka connect" "$CONNECT_OUT"
 
 # After connect, CLI reads from deployment store (has endpoint + ca_cert)
 CLI_S=""

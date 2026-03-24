@@ -484,6 +484,103 @@ LIMAEOF
   echo ""
 }
 
+# ── Uninstall previous installation ─────────────────────
+
+uninstall_previous() {
+  local found=false
+
+  # Check for existing LOKA binaries.
+  for bin in loka lokad loka-worker loka-supervisor; do
+    if [ -f "${INSTALL_DIR}/$bin" ]; then
+      found=true
+      break
+    fi
+  done
+
+  if [ "$found" = false ]; then
+    return
+  fi
+
+  echo ""
+  info "Existing LOKA installation detected"
+
+  # Stop running lokad (Linux: direct process, macOS: via CLI or Lima).
+  if pgrep -x lokad &>/dev/null; then
+    info "Stopping running lokad..."
+    if command -v loka &>/dev/null; then
+      loka deploy down 2>/dev/null || true
+      sleep 1
+    fi
+    # If still running, kill directly.
+    if pgrep -x lokad &>/dev/null; then
+      $SUDO pkill -x lokad 2>/dev/null || true
+      sleep 1
+    fi
+    ok "lokad stopped"
+  fi
+
+  # On macOS: stop Lima VM if running.
+  if [ "$OS" = "darwin" ] && command -v limactl &>/dev/null; then
+    if limactl list 2>/dev/null | grep "$LIMA_INSTANCE" | grep -q Running; then
+      info "Stopping Lima VM '${LIMA_INSTANCE}'..."
+      limactl stop "$LIMA_INSTANCE" 2>/dev/null || true
+      ok "Lima VM stopped"
+    fi
+    if limactl list -q 2>/dev/null | grep -q "^${LIMA_INSTANCE}$"; then
+      info "Removing Lima VM '${LIMA_INSTANCE}'..."
+      limactl delete "$LIMA_INSTANCE" --force 2>/dev/null || true
+      ok "Lima VM removed"
+    fi
+  fi
+
+  # Remove binaries.
+  info "Removing old binaries..."
+  for bin in loka lokad loka-worker loka-supervisor; do
+    if [ -f "${INSTALL_DIR}/$bin" ]; then
+      $SUDO rm -f "${INSTALL_DIR}/$bin"
+      ok "Removed ${INSTALL_DIR}/$bin"
+    fi
+  done
+
+  # Remove Firecracker binary (Linux only).
+  if [ "$OS" = "linux" ] && [ -f "${INSTALL_DIR}/firecracker" ]; then
+    $SUDO rm -f "${INSTALL_DIR}/firecracker"
+    ok "Removed ${INSTALL_DIR}/firecracker"
+  fi
+
+  # Remove data directory.
+  if [ -d "$DATA_DIR" ]; then
+    info "Removing data directory ${DATA_DIR}..."
+    $SUDO rm -rf "$DATA_DIR"
+    ok "Removed ${DATA_DIR}"
+  fi
+
+  # Remove temp data.
+  if [ -d "/tmp/loka-data" ]; then
+    $SUDO rm -rf /tmp/loka-data
+    ok "Removed /tmp/loka-data"
+  fi
+
+  # Remove config (Linux only).
+  if [ "$OS" = "linux" ] && [ -d "/etc/loka" ]; then
+    $SUDO rm -rf /etc/loka
+    ok "Removed /etc/loka"
+  fi
+
+  # Remove client config.
+  if [ -d "$HOME/.loka" ]; then
+    rm -rf "$HOME/.loka"
+    ok "Removed ~/.loka"
+  fi
+
+  # Remove shell completions.
+  $SUDO rm -f /etc/bash_completion.d/loka 2>/dev/null || true
+  $SUDO rm -f /usr/local/share/zsh/site-functions/_loka 2>/dev/null || true
+
+  echo ""
+  ok "Previous installation cleaned up"
+}
+
 # ── Main ─────────────────────────────────────────────────
 
 main() {
@@ -500,6 +597,8 @@ main() {
   need_cmd tar
 
   setup_sudo
+
+  uninstall_previous
   echo ""
 
   case "$OS" in

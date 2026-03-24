@@ -63,7 +63,12 @@ func setupTestManager(t *testing.T) *testEnv {
 
 	sched := scheduler.New(reg, scheduler.StrategySpread)
 
-	mgr := NewManager(st, reg, sched, nil, logger)
+	objStore, err := local.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("create local objstore: %v", err)
+	}
+
+	mgr := NewManager(st, reg, sched, nil, objStore, logger)
 
 	return &testEnv{
 		store:    st,
@@ -1615,7 +1620,7 @@ func TestProvisioningSession_WithImageManager(t *testing.T) {
 		Status:    loka.ImageStatusReady,
 	})
 
-	mgr := NewManager(st, reg, sched, imgMgr, logger)
+	mgr := NewManager(st, reg, sched, imgMgr, objStore, logger)
 
 	s, err := mgr.Create(ctx, CreateOpts{
 		Name:     "with-imgmgr",

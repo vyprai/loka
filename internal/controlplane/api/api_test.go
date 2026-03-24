@@ -70,7 +70,7 @@ func setupTestServer(t *testing.T, opts ...ServerOpts) *testServer {
 		})
 	}
 
-	mgr := session.NewManager(db, reg, sched, imgMgr, logger)
+	mgr := session.NewManager(db, reg, sched, imgMgr, objStore, logger)
 
 	provReg := provider.NewRegistry()
 

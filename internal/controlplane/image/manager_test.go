@@ -217,9 +217,9 @@ func TestRegisterOverwrite(t *testing.T) {
 	}
 }
 
-func TestManager_RootfsPath_NotFound(t *testing.T) {
+func TestManager_ResolveRootfsPath_NotFound(t *testing.T) {
 	m := newTestManager(t)
-	_, err := m.RootfsPath(nil, "nonexistent")
+	_, err := m.ResolveRootfsPath(nil, "nonexistent")
 	if err == nil {
 		t.Error("expected error for nonexistent image")
 	}

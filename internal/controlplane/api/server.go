@@ -13,6 +13,7 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/internal/controlplane/session"
 	"github.com/vyprai/loka/internal/controlplane/worker"
+	"github.com/vyprai/loka/internal/objstore"
 	"github.com/vyprai/loka/internal/provider"
 	"github.com/vyprai/loka/internal/store"
 )
@@ -26,6 +27,7 @@ type Server struct {
 	imageManager     *image.Manager
 	drainer          *worker.Drainer
 	store            store.Store
+	objStore         objstore.ObjectStore
 	logger           *slog.Logger
 	apiKey           string
 	gc               GCRunner
@@ -35,10 +37,11 @@ type Server struct {
 
 // ServerOpts holds optional configuration for the API server.
 type ServerOpts struct {
-	APIKey     string              // If set, require this key for API access.
-	GC         GCRunner            // Garbage collector (optional).
-	CACertPath string              // Path to CA certificate for /ca.crt endpoint.
-	Retention config.RetentionConfig // Retention configuration.
+	APIKey     string                  // If set, require this key for API access.
+	GC         GCRunner                // Garbage collector (optional).
+	CACertPath string                  // Path to CA certificate for /ca.crt endpoint.
+	Retention  config.RetentionConfig  // Retention configuration.
+	ObjStore   objstore.ObjectStore    // Object store (exposed to workers/HA nodes).
 }
 
 // NewServer creates a new API server.
@@ -55,6 +58,7 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		imageManager:     imgMgr,
 		drainer:          drainer,
 		store:            s,
+		objStore:         o.ObjStore,
 		logger:           logger,
 		apiKey:           o.APIKey,
 		gc:               o.GC,

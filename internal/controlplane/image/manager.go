@@ -91,7 +91,7 @@ func (m *Manager) Pull(ctx context.Context, reference string) (*loka.Image, erro
 	if info != nil {
 		img.SizeMB = info.Size() / (1024 * 1024)
 	}
-	img.RootfsPath = rootfsPath // Full local path for VM launch.
+	img.RootfsPath = fmt.Sprintf("images/%s/rootfs.ext4", id) // Normalized object store key.
 
 	// Step 3: Upload to object store.
 	f, err := os.Open(rootfsPath)
@@ -220,14 +220,15 @@ func (m *Manager) Delete(id string) error {
 	return nil
 }
 
-// RootfsPath returns the local rootfs path for an image, downloading if needed.
-func (m *Manager) RootfsPath(ctx context.Context, imageID string) (string, error) {
+// ResolveRootfsPath returns the local cache path for an image's rootfs,
+// downloading from object store on cache miss.
+func (m *Manager) ResolveRootfsPath(ctx context.Context, imageID string) (string, error) {
 	img, ok := m.images[imageID]
 	if !ok {
 		return "", fmt.Errorf("image %s not found", imageID)
 	}
 
-	localPath := filepath.Join(m.dataDir, "images", imageID, "rootfs.ext4")
+	localPath := filepath.Join(m.dataDir, "cache", "images", imageID, "rootfs.ext4")
 	if _, err := os.Stat(localPath); err == nil {
 		return localPath, nil // Already cached locally.
 	}

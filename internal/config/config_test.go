@@ -26,7 +26,7 @@ func TestControlPlaneConfigDefaults(t *testing.T) {
 		{"Database.DSN", c.Database.DSN, "loka.db"},
 		{"Coordinator.Type", c.Coordinator.Type, "local"},
 		{"ObjectStore.Type", c.ObjectStore.Type, "local"},
-		{"ObjectStore.Path", c.ObjectStore.Path, "/tmp/loka-data/artifacts"},
+		{"ObjectStore.Path", c.ObjectStore.Path, "/tmp/loka-data/objstore"},
 		{"Scheduler.Strategy", c.Scheduler.Strategy, "spread"},
 	}
 
@@ -108,7 +108,7 @@ func TestControlPlaneConfigDefaultsObjectStorePathOnlyForLocal(t *testing.T) {
 	}
 	c.Defaults()
 
-	if c.ObjectStore.Path == "/tmp/loka-data/artifacts" {
+	if c.ObjectStore.Path == "/tmp/loka-data/objstore" {
 		t.Error("ObjectStore.Path should not be set for s3 type")
 	}
 }

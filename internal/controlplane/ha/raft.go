@@ -137,7 +137,8 @@ func NewRaftCoordinator(cfg RaftConfig, logger *slog.Logger) (*RaftCoordinator, 
 
 	// FSM.
 	fsm := &lokaFSM{
-		locks: make(map[string]lockEntry),
+		locks:    make(map[string]lockEntry),
+		handlers: make(map[string]func([]byte) interface{}),
 	}
 
 	// Create Raft instance.
@@ -279,6 +280,37 @@ func (c *RaftCoordinator) IsLeader(name string) bool {
 	return c.raft.State() == raft.Leader
 }
 
+// LeaderAddr returns the Raft leader's address.
+func (c *RaftCoordinator) LeaderAddr() string {
+	addr, _ := c.raft.LeaderWithID()
+	return string(addr)
+}
+
+// Apply sends an arbitrary command through Raft consensus.
+// The command is applied on all nodes via the FSM.
+func (c *RaftCoordinator) Apply(ctx context.Context, cmd []byte) (interface{}, error) {
+	if c.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("not the leader")
+	}
+	f := c.raft.Apply(cmd, 10*time.Second)
+	if err := f.Error(); err != nil {
+		return nil, fmt.Errorf("raft apply: %w", err)
+	}
+	resp := f.Response()
+	if errStr, ok := resp.(string); ok && errStr != "" {
+		return nil, fmt.Errorf("%s", errStr)
+	}
+	return resp, nil
+}
+
+// RegisterHandler registers a callback for a given operation type.
+// The handler is called on ALL nodes when the FSM applies a command with that op.
+func (c *RaftCoordinator) RegisterHandler(op string, fn func(data []byte) interface{}) {
+	c.fsm.handlersMu.Lock()
+	c.fsm.handlers[op] = fn
+	c.fsm.handlersMu.Unlock()
+}
+
 // Close shuts down the Raft node.
 func (c *RaftCoordinator) Close() error {
 	f := c.raft.Shutdown()
@@ -318,6 +350,10 @@ type lokaFSM struct {
 
 	// Set by the coordinator after construction.
 	coordinator *RaftCoordinator
+
+	// External handlers registered for custom operations.
+	handlersMu sync.RWMutex
+	handlers   map[string]func([]byte) interface{}
 }
 
 func (f *lokaFSM) Apply(l *raft.Log) interface{} {
@@ -349,9 +385,17 @@ func (f *lokaFSM) Apply(l *raft.Log) interface{} {
 			f.coordinator.notify(cmd.Key, cmd.Value)
 		}
 		return ""
-	}
 
-	return "unknown op"
+	default:
+		// Dispatch to registered external handlers.
+		f.handlersMu.RLock()
+		fn, ok := f.handlers[cmd.Op]
+		f.handlersMu.RUnlock()
+		if ok {
+			return fn(l.Data)
+		}
+		return "unknown op: " + cmd.Op
+	}
 }
 
 func (f *lokaFSM) Snapshot() (raft.FSMSnapshot, error) {

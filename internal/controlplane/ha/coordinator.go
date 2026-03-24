@@ -27,6 +27,19 @@ type Coordinator interface {
 	// IsLeader returns whether this instance currently holds leadership.
 	IsLeader(name string) bool
 
+	// LeaderAddr returns the address of the current leader.
+	// Returns empty string if unknown or if this is a local coordinator.
+	LeaderAddr() string
+
+	// Apply sends an arbitrary command through consensus.
+	// In Raft mode, the command is replicated to all nodes.
+	// In local mode, the handler is called directly.
+	Apply(ctx context.Context, cmd []byte) (interface{}, error)
+
+	// RegisterHandler registers a callback for a given operation type.
+	// The handler is invoked on ALL nodes when a command with that op is applied.
+	RegisterHandler(op string, fn func(data []byte) interface{})
+
 	Close() error
 }
 

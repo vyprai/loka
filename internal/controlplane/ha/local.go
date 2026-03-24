@@ -2,6 +2,8 @@ package ha
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -20,14 +22,16 @@ type LocalCoordinator struct {
 	leaders  map[string]bool
 	subs     map[string][]chan []byte
 	subsMu   sync.RWMutex
+	handlers map[string]func([]byte) interface{}
 }
 
 // NewLocalCoordinator creates a new in-process coordinator.
 func NewLocalCoordinator() *LocalCoordinator {
 	return &LocalCoordinator{
-		locks:   make(map[string]*sync.Mutex),
-		leaders: make(map[string]bool),
-		subs:    make(map[string][]chan []byte),
+		locks:    make(map[string]*sync.Mutex),
+		leaders:  make(map[string]bool),
+		subs:     make(map[string][]chan []byte),
+		handlers: make(map[string]func([]byte) interface{}),
 	}
 }
 
@@ -102,6 +106,32 @@ func (c *LocalCoordinator) IsLeader(name string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.leaders[name]
+}
+
+func (c *LocalCoordinator) LeaderAddr() string {
+	return "" // Local coordinator is always the leader.
+}
+
+func (c *LocalCoordinator) Apply(_ context.Context, cmd []byte) (interface{}, error) {
+	var envelope struct {
+		Op string `json:"op"`
+	}
+	if err := json.Unmarshal(cmd, &envelope); err != nil {
+		return nil, fmt.Errorf("unmarshal command: %w", err)
+	}
+	c.mu.Lock()
+	fn, ok := c.handlers[envelope.Op]
+	c.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("no handler for op %q", envelope.Op)
+	}
+	return fn(cmd), nil
+}
+
+func (c *LocalCoordinator) RegisterHandler(op string, fn func([]byte) interface{}) {
+	c.mu.Lock()
+	c.handlers[op] = fn
+	c.mu.Unlock()
 }
 
 func (c *LocalCoordinator) Close() error {
