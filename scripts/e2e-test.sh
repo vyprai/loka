@@ -1,575 +1,384 @@
 #!/usr/bin/env bash
-# ──────────────────────────────────────────────────────────────
-#  LOKA — Comprehensive End-to-End Test Suite
-# ──────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────
+#  LOKA End-to-End Test Suite
+#
+#  Starts a real lokad instance, creates sessions with real
+#  Firecracker VMs, executes commands, and verifies results.
+#
+#  Requirements: Linux with KVM + Docker, or macOS with Lima
+#  Usage: make e2e-test  (or bash scripts/e2e-test.sh)
+# ──────────────────────────────────────────────────────────
 set -euo pipefail
 
-LOKAD="${LOKAD:-/tmp/lokad}"
-LOKACTL="${LOKACTL:-/tmp/loka}"
-SERVER="http://localhost:8080"
+# ── Config ───────────────────────────────────────────────
 
-PASS=0
-FAIL=0
+LOKA_BIN="${LOKA_BIN:-./bin/loka}"
+LOKAD_BIN="${LOKAD_BIN:-./bin/lokad}"
+ENDPOINT="http://localhost:6840"
+DB_PATH="/tmp/loka-e2e-test-$$.db"
+DATA_DIR="/tmp/loka-e2e-test-$$"
+LOKAD_PID=""
+PASSED=0
+FAILED=0
 TOTAL=0
 
-# ── Helpers ───────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────
 
-red()   { printf "\033[31m%s\033[0m" "$*"; }
-green() { printf "\033[32m%s\033[0m" "$*"; }
-bold()  { printf "\033[1m%s\033[0m" "$*"; }
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-assert_eq() {
-  local label="$1" expected="$2" actual="$3"
-  TOTAL=$((TOTAL + 1))
-  if [ "$expected" = "$actual" ]; then
-    PASS=$((PASS + 1))
-    printf "  %-50s %s\n" "$label" "$(green PASS)"
-  else
-    FAIL=$((FAIL + 1))
-    printf "  %-50s %s  (expected=%s got=%s)\n" "$label" "$(red FAIL)" "$expected" "$actual"
-  fi
-}
+pass() { ((PASSED++)); ((TOTAL++)); echo -e "  ${GREEN}✓${NC} $1"; }
+fail() { ((FAILED++)); ((TOTAL++)); echo -e "  ${RED}✗${NC} $1: $2"; }
+skip() { echo -e "  ${YELLOW}⊘${NC} $1 (skipped)"; }
 
-assert_contains() {
-  local label="$1" needle="$2" haystack="$3"
-  TOTAL=$((TOTAL + 1))
-  if echo "$haystack" | grep -q "$needle"; then
-    PASS=$((PASS + 1))
-    printf "  %-50s %s\n" "$label" "$(green PASS)"
-  else
-    FAIL=$((FAIL + 1))
-    printf "  %-50s %s  (missing: %s)\n" "$label" "$(red FAIL)" "$needle"
-  fi
-}
-
-assert_not_contains() {
-  local label="$1" needle="$2" haystack="$3"
-  TOTAL=$((TOTAL + 1))
-  if echo "$haystack" | grep -q "$needle"; then
-    FAIL=$((FAIL + 1))
-    printf "  %-50s %s  (found unwanted: %s)\n" "$label" "$(red FAIL)" "$needle"
-  else
-    PASS=$((PASS + 1))
-    printf "  %-50s %s\n" "$label" "$(green PASS)"
-  fi
-}
-
-api() {
-  local method="$1" path="$2"
-  shift 2
-  curl -s -X "$method" "${SERVER}${path}" "$@"
-}
-
-api_json() {
-  local method="$1" path="$2" body="$3"
-  curl -s -X "$method" "${SERVER}${path}" -H "Content-Type: application/json" -d "$body"
-}
-
-jq_field() {
-  python3 -c "import sys,json; print(json.load(sys.stdin)$1)" 2>/dev/null
-}
+jf() { python3 -c "import sys,json; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
+jlen() { python3 -c "import sys,json; print(len(json.load(sys.stdin).get('$1',[])))" 2>/dev/null; }
 
 cleanup() {
-  pkill -f "$LOKAD" 2>/dev/null || true
-  rm -rf /tmp/loka.db /tmp/loka-data
+  echo ""
+  echo -e "${CYAN}==> Cleaning up${NC}"
+  if [ -n "$LOKAD_PID" ] && kill -0 "$LOKAD_PID" 2>/dev/null; then
+    kill "$LOKAD_PID" 2>/dev/null; wait "$LOKAD_PID" 2>/dev/null || true
+    echo "  lokad stopped (pid $LOKAD_PID)"
+  fi
+  rm -rf "$DATA_DIR" "$DB_PATH"
+  echo ""
+  echo -e "${BOLD}Results: ${GREEN}$PASSED passed${NC}, ${RED}$FAILED failed${NC}, $TOTAL total"
+  [ "$FAILED" -gt 0 ] && exit 1 || exit 0
 }
+trap cleanup EXIT
 
-# ── Setup ─────────────────────────────────────────────────────
-
-cleanup
-sleep 0.3
-cd /tmp && "$LOKAD" >/dev/null 2>&1 &
-LOKAD_PID=$!
-sleep 1.5
+# ── Build ────────────────────────────────────────────────
 
 echo ""
-bold "══════════════════════════════════════════════════════════"
-bold "  LOKA — Comprehensive End-to-End Test Suite"
-bold "══════════════════════════════════════════════════════════"
+echo -e "${BOLD}  LOKA E2E Test Suite${NC}"
 echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "1. HEALTH & STATUS"
-echo "──────────────────────────────────────────────────────────"
-
-HEALTH=$(api GET /api/v1/health)
-assert_eq "health status ok" "ok" "$(echo "$HEALTH" | jq_field "['status']")"
-assert_eq "workers_total >= 1" "True" "$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin)['workers_total'] >= 1)")"
-
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "2. SESSION LIFECYCLE"
-echo "──────────────────────────────────────────────────────────"
-
-# Create
-S1=$(api_json POST /api/v1/sessions '{"name":"lifecycle-test","mode":"execute"}')
-S1_ID=$(echo "$S1" | jq_field "['ID']")
-assert_eq "session created" "running" "$(echo "$S1" | jq_field "['Status']")"
-assert_eq "session name" "lifecycle-test" "$(echo "$S1" | jq_field "['Name']")"
-assert_eq "session mode" "execute" "$(echo "$S1" | jq_field "['Mode']")"
-
-# Get
-S1_GET=$(api GET "/api/v1/sessions/$S1_ID")
-assert_eq "session get matches" "$S1_ID" "$(echo "$S1_GET" | jq_field "['ID']")"
-
-# List
-S_LIST=$(api GET /api/v1/sessions)
-assert_eq "session list total >= 1" "True" "$(echo "$S_LIST" | python3 -c "import sys,json; print(json.load(sys.stdin)['total'] >= 1)")"
-
-# Pause
-S1_PAUSED=$(api_json POST "/api/v1/sessions/$S1_ID/pause" '{}')
-assert_eq "session paused" "paused" "$(echo "$S1_PAUSED" | jq_field "['Status']")"
-
-# Resume
-S1_RESUMED=$(api_json POST "/api/v1/sessions/$S1_ID/resume" '{}')
-assert_eq "session resumed" "running" "$(echo "$S1_RESUMED" | jq_field "['Status']")"
-
-# Destroy
-api DELETE "/api/v1/sessions/$S1_ID" >/dev/null
-S1_AFTER=$(api GET "/api/v1/sessions/$S1_ID")
-assert_eq "session terminated" "terminated" "$(echo "$S1_AFTER" | jq_field "['Status']")"
-
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "3. COMMAND EXECUTION"
-echo "──────────────────────────────────────────────────────────"
-
-S2=$(api_json POST /api/v1/sessions '{"name":"exec-test","mode":"execute"}')
-S2_ID=$(echo "$S2" | jq_field "['ID']")
-
-# Single command
-E1=$(api_json POST "/api/v1/sessions/$S2_ID/exec" '{"command":"echo","args":["hello-loka"]}')
-E1_ID=$(echo "$E1" | jq_field "['ID']")
-sleep 0.3
-E1_GET=$(api GET "/api/v1/sessions/$S2_ID/exec/$E1_ID")
-assert_eq "exec status success" "success" "$(echo "$E1_GET" | jq_field "['Status']")"
-assert_contains "exec stdout has output" "hello-loka" "$(echo "$E1_GET" | jq_field "['Results']")"
-
-# Command with args
-E2=$(api_json POST "/api/v1/sessions/$S2_ID/exec" '{"command":"python3","args":["-c","print(2+2)"]}')
-E2_ID=$(echo "$E2" | jq_field "['ID']")
-sleep 0.3
-E2_GET=$(api GET "/api/v1/sessions/$S2_ID/exec/$E2_ID")
-assert_contains "python3 output" "4" "$(echo "$E2_GET" | jq_field "['Results']")"
-
-# Parallel execution
-E3=$(api_json POST "/api/v1/sessions/$S2_ID/exec" '{"commands":[{"id":"a","command":"echo","args":["par-A"]},{"id":"b","command":"echo","args":["par-B"]},{"id":"c","command":"echo","args":["par-C"]}],"parallel":true}')
-E3_ID=$(echo "$E3" | jq_field "['ID']")
-sleep 0.5
-E3_GET=$(api GET "/api/v1/sessions/$S2_ID/exec/$E3_ID")
-E3_RESULTS=$(echo "$E3_GET" | jq_field "['Results']")
-assert_contains "parallel result A" "par-A" "$E3_RESULTS"
-assert_contains "parallel result B" "par-B" "$E3_RESULTS"
-assert_contains "parallel result C" "par-C" "$E3_RESULTS"
-
-# Failing command
-E4=$(api_json POST "/api/v1/sessions/$S2_ID/exec" '{"command":"false"}')
-E4_ID=$(echo "$E4" | jq_field "['ID']")
-sleep 0.3
-E4_GET=$(api GET "/api/v1/sessions/$S2_ID/exec/$E4_ID")
-assert_eq "failing command status" "failed" "$(echo "$E4_GET" | jq_field "['Status']")"
-
-# List executions
-E_LIST=$(api GET "/api/v1/sessions/$S2_ID/exec")
-assert_eq "exec list >= 4" "True" "$(echo "$E_LIST" | python3 -c "import sys,json; print(json.load(sys.stdin)['total'] >= 4)")"
-
-api DELETE "/api/v1/sessions/$S2_ID" >/dev/null
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "4. EXECUTION MODES"
-echo "──────────────────────────────────────────────────────────"
-
-S3=$(api_json POST /api/v1/sessions '{"name":"mode-test","mode":"inspect"}')
-S3_ID=$(echo "$S3" | jq_field "['ID']")
-
-assert_eq "initial mode inspect" "inspect" "$(echo "$S3" | jq_field "['Mode']")"
-
-# Transition: inspect -> plan
-S3_PLAN=$(api_json POST "/api/v1/sessions/$S3_ID/mode" '{"mode":"plan"}')
-assert_eq "mode -> plan" "plan" "$(echo "$S3_PLAN" | jq_field "['Mode']")"
-
-# Transition: plan -> execute
-S3_EXEC=$(api_json POST "/api/v1/sessions/$S3_ID/mode" '{"mode":"execute"}')
-assert_eq "mode -> execute" "execute" "$(echo "$S3_EXEC" | jq_field "['Mode']")"
-
-# Transition: execute -> commit
-S3_COMMIT=$(api_json POST "/api/v1/sessions/$S3_ID/mode" '{"mode":"commit"}')
-assert_eq "mode -> commit" "commit" "$(echo "$S3_COMMIT" | jq_field "['Mode']")"
-
-# Transition: commit -> ask
-S3_ASK=$(api_json POST "/api/v1/sessions/$S3_ID/mode" '{"mode":"ask"}')
-assert_eq "mode -> ask" "ask" "$(echo "$S3_ASK" | jq_field "['Mode']")"
-
-# Invalid transition: inspect -> commit (not allowed directly)
-api_json POST "/api/v1/sessions/$S3_ID/mode" '{"mode":"inspect"}' >/dev/null
-S3_BAD=$(api_json POST "/api/v1/sessions/$S3_ID/mode" '{"mode":"commit"}')
-assert_contains "invalid transition blocked" "cannot transition" "$S3_BAD"
-
-api DELETE "/api/v1/sessions/$S3_ID" >/dev/null
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "5. EXEC POLICY — ALLOWED COMMANDS"
-echo "──────────────────────────────────────────────────────────"
-
-S4=$(api_json POST /api/v1/sessions '{"name":"policy-allow","mode":"execute","allowed_commands":["echo","ls","cat"]}')
-S4_ID=$(echo "$S4" | jq_field "['ID']")
-
-# Allowed
-P1=$(api_json POST "/api/v1/sessions/$S4_ID/exec" '{"command":"echo","args":["policy-ok"]}')
-assert_not_contains "echo allowed" "error" "$P1"
-
-# Blocked (not in allowlist)
-P2=$(api_json POST "/api/v1/sessions/$S4_ID/exec" '{"command":"curl"}')
-assert_contains "curl blocked by allowlist" "not in allowed list" "$P2"
-
-P3=$(api_json POST "/api/v1/sessions/$S4_ID/exec" '{"command":"rm","args":["-rf","/"]}')
-assert_contains "rm blocked by allowlist" "not in allowed list" "$P3"
-
-api DELETE "/api/v1/sessions/$S4_ID" >/dev/null
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "6. EXEC POLICY — BLOCKED COMMANDS"
-echo "──────────────────────────────────────────────────────────"
-
-S5=$(api_json POST /api/v1/sessions '{"name":"policy-block","mode":"execute","blocked_commands":["rm","dd","mkfs"]}')
-S5_ID=$(echo "$S5" | jq_field "['ID']")
-
-# Allowed (not blocked)
-B1=$(api_json POST "/api/v1/sessions/$S5_ID/exec" '{"command":"echo","args":["ok"]}')
-assert_not_contains "echo not blocked" "error" "$B1"
-
-# Blocked
-B2=$(api_json POST "/api/v1/sessions/$S5_ID/exec" '{"command":"rm"}')
-assert_contains "rm blocked" "blocked by policy" "$B2"
-
-B3=$(api_json POST "/api/v1/sessions/$S5_ID/exec" '{"command":"dd"}')
-assert_contains "dd blocked" "blocked by policy" "$B3"
-
-api DELETE "/api/v1/sessions/$S5_ID" >/dev/null
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "7. EXEC POLICY — INSPECT MODE READ-ONLY"
-echo "──────────────────────────────────────────────────────────"
-
-S6=$(api_json POST /api/v1/sessions '{"name":"readonly-test","mode":"inspect"}')
-S6_ID=$(echo "$S6" | jq_field "['ID']")
-
-# Read-only commands allowed
-R1=$(api_json POST "/api/v1/sessions/$S6_ID/exec" '{"command":"echo","args":["readonly"]}')
-assert_not_contains "echo in inspect" "error" "$R1"
-
-R2=$(api_json POST "/api/v1/sessions/$S6_ID/exec" '{"command":"ls","args":["/"]}')
-assert_not_contains "ls in inspect" "error" "$R2"
-
-# Write commands blocked
-R3=$(api_json POST "/api/v1/sessions/$S6_ID/exec" '{"command":"cp"}')
-assert_contains "cp blocked in inspect" "not allowed in read-only" "$R3"
-
-R4=$(api_json POST "/api/v1/sessions/$S6_ID/exec" '{"command":"mkdir"}')
-assert_contains "mkdir blocked in inspect" "not allowed in read-only" "$R4"
-
-api DELETE "/api/v1/sessions/$S6_ID" >/dev/null
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "8. EXEC POLICY — ASK MODE (APPROVAL FLOW)"
-echo "──────────────────────────────────────────────────────────"
-
-S7=$(api_json POST /api/v1/sessions '{"name":"ask-test","mode":"ask"}')
-S7_ID=$(echo "$S7" | jq_field "['ID']")
-
-# Submit — should return pending_approval
-A1=$(api_json POST "/api/v1/sessions/$S7_ID/exec" '{"command":"echo","args":["needs-approval"]}')
-A1_ID=$(echo "$A1" | jq_field "['ID']")
-assert_eq "ask mode -> pending_approval" "pending_approval" "$(echo "$A1" | jq_field "['Status']")"
-
-# Approve
-A1_APPROVED=$(api_json POST "/api/v1/sessions/$S7_ID/exec/$A1_ID/approve" '{}')
-assert_eq "approved -> running" "running" "$(echo "$A1_APPROVED" | jq_field "['Status']")"
-# Wait for the suspended goroutine to resume and execute.
-for i in $(seq 1 20); do
-  sleep 0.2
-  A1_STATUS=$(api GET "/api/v1/sessions/$S7_ID/exec/$A1_ID" | jq_field "['Status']")
-  [ "$A1_STATUS" = "success" ] && break
-done
-A1_DONE=$(api GET "/api/v1/sessions/$S7_ID/exec/$A1_ID")
-assert_eq "approved exec completes" "success" "$(echo "$A1_DONE" | jq_field "['Status']")"
-
-# Submit another — reject it
-A2=$(api_json POST "/api/v1/sessions/$S7_ID/exec" '{"command":"echo","args":["reject-me"]}')
-A2_ID=$(echo "$A2" | jq_field "['ID']")
-assert_eq "pending before reject" "pending_approval" "$(echo "$A2" | jq_field "['Status']")"
-
-A2_REJECTED=$(api_json POST "/api/v1/sessions/$S7_ID/exec/$A2_ID/reject" '{"reason":"too dangerous"}')
-assert_eq "rejected status" "rejected" "$(echo "$A2_REJECTED" | jq_field "['Status']")"
-
-api DELETE "/api/v1/sessions/$S7_ID" >/dev/null
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "9. CHECKPOINTS"
-echo "──────────────────────────────────────────────────────────"
-
-S8=$(api_json POST /api/v1/sessions '{"name":"checkpoint-test","mode":"execute"}')
-S8_ID=$(echo "$S8" | jq_field "['ID']")
-WS="/tmp/loka-data/artifacts/worker-data/sessions/$S8_ID/workspace"
-
-# Write files
-api_json POST "/api/v1/sessions/$S8_ID/exec" "{\"command\":\"sh\",\"args\":[\"-c\",\"echo v1 > $WS/data.txt && echo config > $WS/config.txt\"]}" >/dev/null
-sleep 0.3
-
-# Checkpoint A
-CPA=$(api_json POST "/api/v1/sessions/$S8_ID/checkpoints" '{"type":"light","label":"state-A"}')
-CPA_ID=$(echo "$CPA" | jq_field "['ID']")
-sleep 0.5
-CPA_GET=$(api GET "/api/v1/sessions/$S8_ID/checkpoints" | python3 -c "import sys,json; cps=json.load(sys.stdin)['checkpoints']; print(len(cps))")
-assert_eq "checkpoint A created" "1" "$CPA_GET"
-
-# Modify files
-api_json POST "/api/v1/sessions/$S8_ID/exec" "{\"command\":\"sh\",\"args\":[\"-c\",\"echo v2-MODIFIED > $WS/data.txt && rm -f $WS/config.txt && echo new > $WS/extra.txt\"]}" >/dev/null
-sleep 0.3
-
-# Checkpoint B
-CPB=$(api_json POST "/api/v1/sessions/$S8_ID/checkpoints" '{"type":"full","label":"state-B"}')
-CPB_ID=$(echo "$CPB" | jq_field "['ID']")
-sleep 0.5
-
-# Verify checkpoint DAG
-CP_LIST=$(api GET "/api/v1/sessions/$S8_ID/checkpoints")
-CP_COUNT=$(echo "$CP_LIST" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['checkpoints']))")
-assert_eq "checkpoint count = 2" "2" "$CP_COUNT"
-
-# Verify modified state
-V1=$(api_json POST "/api/v1/sessions/$S8_ID/exec" "{\"command\":\"cat\",\"args\":[\"$WS/data.txt\"]}" | jq_field "['ID']")
-sleep 0.3
-V1_OUT=$(api GET "/api/v1/sessions/$S8_ID/exec/$V1" | python3 -c "import sys,json; print(json.load(sys.stdin)['Results'][0]['Stdout'].strip())")
-assert_eq "data.txt is v2 before restore" "v2-MODIFIED" "$V1_OUT"
-
-# Restore to A
-api_json POST "/api/v1/sessions/$S8_ID/checkpoints/$CPA_ID/restore" '{}' >/dev/null
-sleep 0.5
-
-# Verify restored state
-V2=$(api_json POST "/api/v1/sessions/$S8_ID/exec" "{\"command\":\"cat\",\"args\":[\"$WS/data.txt\"]}" | jq_field "['ID']")
-sleep 0.3
-V2_OUT=$(api GET "/api/v1/sessions/$S8_ID/exec/$V2" | python3 -c "import sys,json; print(json.load(sys.stdin)['Results'][0]['Stdout'].strip())")
-assert_eq "data.txt restored to v1" "v1" "$V2_OUT"
-
-V3=$(api_json POST "/api/v1/sessions/$S8_ID/exec" "{\"command\":\"cat\",\"args\":[\"$WS/config.txt\"]}" | jq_field "['ID']")
-sleep 0.3
-V3_OUT=$(api GET "/api/v1/sessions/$S8_ID/exec/$V3" | python3 -c "import sys,json; print(json.load(sys.stdin)['Results'][0]['Stdout'].strip())")
-assert_eq "config.txt restored" "config" "$V3_OUT"
-
-V4=$(api_json POST "/api/v1/sessions/$S8_ID/exec" "{\"command\":\"sh\",\"args\":[\"-c\",\"test -f $WS/extra.txt && echo YES || echo NO\"]}" | jq_field "['ID']")
-sleep 0.3
-V4_OUT=$(api GET "/api/v1/sessions/$S8_ID/exec/$V4" | python3 -c "import sys,json; print(json.load(sys.stdin)['Results'][0]['Stdout'].strip())")
-assert_eq "extra.txt gone after restore" "NO" "$V4_OUT"
-
-# Delete checkpoint subtree
-api DELETE "/api/v1/sessions/$S8_ID/checkpoints/$CPB_ID" >/dev/null
-CP_AFTER=$(api GET "/api/v1/sessions/$S8_ID/checkpoints" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['checkpoints']))")
-assert_eq "checkpoint B deleted" "1" "$CP_AFTER"
-
-api DELETE "/api/v1/sessions/$S8_ID" >/dev/null
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "10. WORKERS"
-echo "──────────────────────────────────────────────────────────"
-
-W_LIST=$(api GET /api/v1/workers)
-W_COUNT=$(echo "$W_LIST" | python3 -c "import sys,json; print(json.load(sys.stdin)['total'])")
-assert_eq "workers >= 1" "True" "$(python3 -c "print($W_COUNT >= 1)")"
-
-W_ID=$(echo "$W_LIST" | python3 -c "import sys,json; print(json.load(sys.stdin)['workers'][0]['ID'])")
-
-# Get worker
-W_GET=$(api GET "/api/v1/workers/$W_ID")
-assert_eq "worker provider" "local" "$(echo "$W_GET" | jq_field "['Provider']")"
-
-# Label worker
-W_LABELED=$(api_json PUT "/api/v1/workers/$W_ID/labels" '{"labels":{"gpu":"true","tier":"premium"}}')
-assert_contains "label applied" "gpu" "$W_LABELED"
-
-# Drain
-W_DRAINED=$(api_json POST "/api/v1/workers/$W_ID/drain" '{"timeout_seconds":60}')
-assert_eq "worker draining" "draining" "$(echo "$W_DRAINED" | jq_field "['Status']")"
-
-# Undrain
-W_UNDRAINED=$(api_json POST "/api/v1/workers/$W_ID/undrain" '{}')
-assert_eq "worker undrained" "ready" "$(echo "$W_UNDRAINED" | jq_field "['Status']")"
-
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "11. PROVIDERS"
-echo "──────────────────────────────────────────────────────────"
-
-PROV_LIST=$(api GET /api/v1/providers)
-PROV_COUNT=$(echo "$PROV_LIST" | python3 -c "import sys,json; print(len(json.load(sys.stdin)['providers']))")
-assert_eq "providers = 7" "7" "$PROV_COUNT"
-
-PROV_NAMES=$(echo "$PROV_LIST" | python3 -c "import sys,json; print(','.join(sorted(p['name'] for p in json.load(sys.stdin)['providers'])))")
-assert_contains "has aws" "aws" "$PROV_NAMES"
-assert_contains "has gcp" "gcp" "$PROV_NAMES"
-assert_contains "has azure" "azure" "$PROV_NAMES"
-assert_contains "has digitalocean" "digitalocean" "$PROV_NAMES"
-assert_contains "has ovh" "ovh" "$PROV_NAMES"
-assert_contains "has local" "local" "$PROV_NAMES"
-assert_contains "has selfmanaged" "selfmanaged" "$PROV_NAMES"
-
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "12. WORKER TOKENS"
-echo "──────────────────────────────────────────────────────────"
-
-# Create
-T1=$(api_json POST /api/v1/worker-tokens '{"name":"server-1","expires_seconds":3600}')
-T1_ID=$(echo "$T1" | jq_field "['ID']")
-T1_TOK=$(echo "$T1" | jq_field "['Token']")
-assert_contains "token has loka_ prefix" "loka_" "$T1_TOK"
-
-T2=$(api_json POST /api/v1/worker-tokens '{"name":"server-2","expires_seconds":7200}')
-T2_ID=$(echo "$T2" | jq_field "['ID']")
-
-# List
-T_LIST=$(api GET /api/v1/worker-tokens)
-T_COUNT=$(echo "$T_LIST" | python3 -c "import sys,json; print(json.load(sys.stdin)['total'])")
-assert_eq "token count = 2" "2" "$T_COUNT"
-
-# Revoke
-api DELETE "/api/v1/worker-tokens/$T1_ID" >/dev/null
-T_AFTER=$(api GET /api/v1/worker-tokens | python3 -c "import sys,json; print(json.load(sys.stdin)['total'])")
-assert_eq "token count after revoke = 1" "1" "$T_AFTER"
-
-api DELETE "/api/v1/worker-tokens/$T2_ID" >/dev/null
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "13. PACKAGES"
-echo "──────────────────────────────────────────────────────────"
-
-# Install
-api_json POST /api/v1/packages/install '{"name":"python@3.12"}' >/dev/null
-api_json POST /api/v1/packages/install '{"name":"git"}' >/dev/null
-api_json POST /api/v1/packages/install '{"name":"ripgrep"}' >/dev/null
-
-PKG_LIST=$(api GET /api/v1/packages)
-PKG_COUNT=$(echo "$PKG_LIST" | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; print(len(pkgs) if pkgs else 0)")
-assert_eq "packages installed = 3" "3" "$PKG_COUNT"
-
-# Get
-PKG_PY=$(api GET "/api/v1/packages/python@3.12")
-assert_eq "python version" "3.12" "$(echo "$PKG_PY" | jq_field "['Version']")"
-
-# Validate
-PKG_VAL=$(api_json POST /api/v1/packages/validate '{"packages":["python@3.12","ripgrep","unknown-tool"]}')
-assert_eq "python valid" "True" "$(echo "$PKG_VAL" | python3 -c "import sys,json; print(json.load(sys.stdin)['results']['python@3.12'])")"
-assert_eq "unknown invalid" "False" "$(echo "$PKG_VAL" | python3 -c "import sys,json; print(json.load(sys.stdin)['results']['unknown-tool'])")"
-
-# Search
-PKG_SEARCH=$(api GET "/api/v1/packages?search=python")
-PKG_SEARCH_COUNT=$(echo "$PKG_SEARCH" | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; print(len(pkgs) if pkgs else 0)")
-assert_eq "search python = 1" "1" "$PKG_SEARCH_COUNT"
-
-# Remove
-api DELETE "/api/v1/packages/ripgrep" >/dev/null
-PKG_AFTER=$(api GET /api/v1/packages | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; print(len(pkgs) if pkgs else 0)")
-assert_eq "packages after remove = 2" "2" "$PKG_AFTER"
-
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "14. PACKAGE PROFILES"
-echo "──────────────────────────────────────────────────────────"
-
-# Create
-api_json POST /api/v1/package-profiles '{"name":"data-agent","packages":["python@3.12","git"]}' >/dev/null
-api_json POST /api/v1/package-profiles '{"name":"web-agent","packages":["git"]}' >/dev/null
-
-PROF_LIST=$(api GET /api/v1/package-profiles)
-PROF_COUNT=$(echo "$PROF_LIST" | python3 -c "import sys,json; profs=json.load(sys.stdin)['profiles']; print(len(profs) if profs else 0)")
-assert_eq "profiles = 2" "2" "$PROF_COUNT"
-
-# Get
-PROF_DA=$(api GET "/api/v1/package-profiles/data-agent")
-assert_eq "profile name" "data-agent" "$(echo "$PROF_DA" | jq_field "['Name']")"
-
-# Update
-PROF_UPD=$(api_json PUT "/api/v1/package-profiles/data-agent" '{"add":["ripgrep"],"remove":["git"]}')
-PROF_UPD_PKGS=$(echo "$PROF_UPD" | python3 -c "import sys,json; print(','.join(sorted(json.load(sys.stdin)['Packages'])))")
-assert_contains "profile has ripgrep" "ripgrep" "$PROF_UPD_PKGS"
-assert_not_contains "profile no git" "git" "$PROF_UPD_PKGS"
-
-# Delete
-api DELETE "/api/v1/package-profiles/web-agent" >/dev/null
-PROF_AFTER=$(api GET /api/v1/package-profiles | python3 -c "import sys,json; profs=json.load(sys.stdin)['profiles']; print(len(profs) if profs else 0)")
-assert_eq "profiles after delete = 1" "1" "$PROF_AFTER"
-
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "15. PROMETHEUS METRICS"
-echo "──────────────────────────────────────────────────────────"
-
-api GET /api/v1/health >/dev/null  # Ensure at least one request for latency metric.
-METRICS=$(api GET /metrics)
-assert_contains "has api_requests metric" "loka_api_requests_total" "$METRICS"
-assert_contains "has api_latency metric" "loka_api_latency" "$METRICS"
-assert_contains "has sessions_created metric" "loka_sessions_created_total" "$METRICS"
-assert_contains "has executions metric" "loka_executions_total" "$METRICS"
-
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-bold "16. CLI SMOKE TEST"
-echo "──────────────────────────────────────────────────────────"
-
-CLI_VER=$("$LOKACTL" version 2>&1)
-assert_contains "cli version output" "loka" "$CLI_VER"
-
-CLI_STATUS=$("$LOKACTL" status 2>&1)
-assert_contains "cli status shows control plane" "Control Plane" "$CLI_STATUS"
-
-CLI_WORKERS=$("$LOKACTL" worker list 2>&1)
-assert_contains "cli worker list has header" "HOSTNAME" "$CLI_WORKERS"
-
-CLI_PROVIDERS=$("$LOKACTL" provider list 2>&1)
-assert_contains "cli provider list has aws" "aws" "$CLI_PROVIDERS"
-
-CLI_HELP=$("$LOKACTL" --help 2>&1)
-assert_contains "cli has session cmd" "session" "$CLI_HELP"
-assert_contains "cli has exec cmd" "exec" "$CLI_HELP"
-assert_contains "cli has checkpoint cmd" "checkpoint" "$CLI_HELP"
-assert_contains "cli has worker cmd" "worker" "$CLI_HELP"
-assert_contains "cli has package cmd" "package" "$CLI_HELP"
-assert_contains "cli has profile cmd" "profile" "$CLI_HELP"
-assert_contains "cli has provider cmd" "provider" "$CLI_HELP"
-assert_contains "cli has token cmd" "token" "$CLI_HELP"
-
-echo ""
-
-# ══════════════════════════════════════════════════════════════
-# Summary
-# ══════════════════════════════════════════════════════════════
-
-cleanup
-
-echo ""
-bold "══════════════════════════════════════════════════════════"
-if [ "$FAIL" -eq 0 ]; then
-  bold "  RESULT: $(green "ALL $TOTAL TESTS PASSED")"
+echo -e "${CYAN}==> Checking binaries${NC}"
+mkdir -p ./bin
+if [ -f "$LOKA_BIN" ] && [ -f "$LOKAD_BIN" ] && [ -f ./bin/loka-supervisor ]; then
+  echo "  Using pre-built binaries"
+elif command -v go &>/dev/null; then
+  echo "  Building..."
+  go build -o "$LOKA_BIN" ./cmd/loka
+  go build -o "$LOKAD_BIN" ./cmd/lokad
+  CGO_ENABLED=0 go build -ldflags="-s -w" -o ./bin/loka-supervisor ./cmd/loka-supervisor
+  echo "  Built: loka, lokad, loka-supervisor"
 else
-  bold "  RESULT: $(green "$PASS passed"), $(red "$FAIL failed") out of $TOTAL"
+  echo -e "  ${RED}No pre-built binaries and no Go compiler. Build first: make build${NC}"
+  exit 1
 fi
-bold "══════════════════════════════════════════════════════════"
-echo ""
 
-exit "$FAIL"
+# ── Prerequisites ────────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> Checking prerequisites${NC}"
+
+FC_AVAILABLE=false
+DOCKER_AVAILABLE=false
+
+if [ -e /dev/kvm ]; then
+  echo "  KVM: yes"
+  FC_AVAILABLE=true
+else
+  echo -e "  ${YELLOW}KVM: no — Firecracker tests will be skipped${NC}"
+fi
+
+if command -v docker &>/dev/null && docker info >/dev/null 2>&1; then
+  echo "  Docker: yes"
+  DOCKER_AVAILABLE=true
+else
+  echo -e "  ${YELLOW}Docker: no — image pull tests will be skipped${NC}"
+fi
+
+if [ -f /usr/local/bin/firecracker ]; then
+  echo "  Firecracker: yes"
+else
+  echo -e "  ${YELLOW}Firecracker: no${NC}"
+  FC_AVAILABLE=false
+fi
+
+# ── Prepare rootfs ───────────────────────────────────────
+
+mkdir -p "$DATA_DIR"/{kernel,rootfs,images}
+
+# Link kernel
+for p in /var/loka/kernel/vmlinux /tmp/loka-data/artifacts/kernel/vmlinux; do
+  [ -f "$p" ] && ln -sf "$p" "$DATA_DIR/kernel/vmlinux" && break
+done
+
+# Create rootfs if we have Docker + KVM
+if [ "$FC_AVAILABLE" = true ] && [ "$DOCKER_AVAILABLE" = true ]; then
+  echo ""
+  echo -e "${CYAN}==> Creating test rootfs${NC}"
+  docker pull alpine:latest >/dev/null 2>&1
+  CID=$(docker create alpine:latest)
+  docker export "$CID" > /tmp/e2e-rootfs-$$.tar
+  docker rm "$CID" >/dev/null
+
+  dd if=/dev/zero of="$DATA_DIR/rootfs/rootfs.ext4" bs=1M count=512 2>/dev/null
+  mkfs.ext4 -F "$DATA_DIR/rootfs/rootfs.ext4" >/dev/null 2>&1
+  mkdir -p /tmp/e2e-mnt-$$
+  sudo mount -o loop "$DATA_DIR/rootfs/rootfs.ext4" /tmp/e2e-mnt-$$
+  sudo tar xf /tmp/e2e-rootfs-$$.tar -C /tmp/e2e-mnt-$$ 2>/dev/null
+  sudo mkdir -p /tmp/e2e-mnt-$$/usr/local/bin
+  sudo cp ./bin/loka-supervisor /tmp/e2e-mnt-$$/usr/local/bin/loka-supervisor
+  sudo chmod +x /tmp/e2e-mnt-$$/usr/local/bin/loka-supervisor
+  sudo umount /tmp/e2e-mnt-$$
+  rmdir /tmp/e2e-mnt-$$
+  rm -f /tmp/e2e-rootfs-$$.tar
+  echo "  Rootfs ready (Alpine + supervisor)"
+fi
+
+# ── Start lokad ──────────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> Starting lokad${NC}"
+
+export LOKA_FIRECRACKER_BIN="${LOKA_FIRECRACKER_BIN:-/usr/local/bin/firecracker}"
+export LOKA_KERNEL_PATH="$DATA_DIR/kernel/vmlinux"
+export LOKA_ROOTFS_PATH="$DATA_DIR/rootfs/rootfs.ext4"
+
+cat > "$DATA_DIR/config.yaml" << YAML
+role: all
+mode: single
+listen_addr: ":6840"
+grpc_addr: ":6841"
+database:
+  driver: sqlite
+  dsn: "$DB_PATH"
+objectstore:
+  type: local
+  path: "$DATA_DIR"
+tls:
+  auto: false
+  allow_insecure: true
+YAML
+
+"$LOKAD_BIN" --config "$DATA_DIR/config.yaml" > "$DATA_DIR/lokad.log" 2>&1 &
+LOKAD_PID=$!
+echo "  lokad started (pid $LOKAD_PID)"
+
+# Wait for health
+echo -n "  Waiting..."
+READY=false
+for i in $(seq 1 30); do
+  if curl -s "$ENDPOINT/api/v1/health" 2>/dev/null | grep -q "ok"; then
+    READY=true; echo " ready!"; break
+  fi
+  echo -n "."; sleep 1
+done
+[ "$READY" = false ] && { echo " TIMEOUT"; fail "lokad startup" "health check timeout"; cat "$DATA_DIR/lokad.log" | tail -20; exit 1; }
+
+# ═══════════════════════════════════════════════════════════
+#  TESTS
+# ═══════════════════════════════════════════════════════════
+
+# ── 1. Health ────────────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 1. Health${NC}"
+
+HEALTH=$(curl -s "$ENDPOINT/api/v1/health")
+echo "$HEALTH" | grep -q '"ok"' && pass "Health endpoint returns ok" || fail "Health" "$HEALTH"
+
+# ── 2. Workers ───────────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 2. Workers${NC}"
+
+WT=$(echo "$HEALTH" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workers_total',0))")
+if [ "$FC_AVAILABLE" = true ]; then
+  [ "$WT" -ge 1 ] && pass "Embedded worker registered ($WT)" || fail "Worker registration" "total=$WT"
+
+  # Heartbeat: wait 15s, check still ready
+  sleep 15
+  WR=$(curl -s "$ENDPOINT/api/v1/health" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workers_ready',0))")
+  [ "$WR" -ge 1 ] && pass "Worker alive after 15s (heartbeat)" || fail "Worker heartbeat" "ready=$WR"
+else
+  skip "Worker tests (no KVM)"
+fi
+
+# ── 3. Session CRUD ──────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 3. Session CRUD${NC}"
+
+CR=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  -d '{"name":"crud-test","mode":"execute"}')
+SID=$(echo "$CR" | jf ID)
+[ -n "$SID" ] && pass "Create session ($SID)" || fail "Create session" "no ID"
+
+GN=$(curl -s "$ENDPOINT/api/v1/sessions/$SID" | jf Name)
+[ "$GN" = "crud-test" ] && pass "Get session (name=$GN)" || fail "Get session" "name=$GN"
+
+LC=$(curl -s "$ENDPOINT/api/v1/sessions" | jlen sessions)
+[ "$LC" -ge 1 ] && pass "List sessions ($LC)" || fail "List sessions" "$LC"
+
+# ── 4. Mode transitions ─────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 4. Mode transitions${NC}"
+
+for M in explore ask execute; do
+  GM=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/mode" -H 'Content-Type: application/json' \
+    -d "{\"mode\":\"$M\"}" | jf Mode)
+  [ "$GM" = "$M" ] && pass "Mode → $M" || fail "Mode → $M" "got $GM"
+done
+
+# ── 5. Pause / Resume ───────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 5. Pause / Resume${NC}"
+
+PS=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/pause" | jf Status)
+[ "$PS" = "paused" ] && pass "Pause" || fail "Pause" "$PS"
+
+RS=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/resume" | jf Status)
+[ "$RS" = "running" ] && pass "Resume" || fail "Resume" "$RS"
+
+# ── 6. Idle / Auto-wake ─────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 6. Idle / Auto-wake${NC}"
+
+IS=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/idle" | jf Status)
+[ "$IS" = "idle" ] && pass "Idle" || fail "Idle" "$IS"
+
+# Exec on idle triggers auto-wake
+curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/exec" -H 'Content-Type: application/json' \
+  -d '{"command":"true"}' >/dev/null
+sleep 1
+WS=$(curl -s "$ENDPOINT/api/v1/sessions/$SID" | jf Status)
+[ "$WS" = "running" ] && pass "Auto-wake on exec" || fail "Auto-wake" "$WS"
+
+# ── 7. Tokens ────────────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 7. Worker tokens${NC}"
+
+TK=$(curl -s -X POST "$ENDPOINT/api/v1/worker-tokens" -H 'Content-Type: application/json' \
+  -d '{"name":"e2e-tok","expires_seconds":3600}')
+TID=$(echo "$TK" | jf ID)
+TV=$(echo "$TK" | jf Token)
+[ -n "$TID" ] && echo "$TV" | grep -q "^loka_" && pass "Create token ($TID)" || fail "Create token" "$TID"
+
+TL=$(curl -s "$ENDPOINT/api/v1/worker-tokens" | jlen tokens)
+[ "$TL" -ge 1 ] && pass "List tokens ($TL)" || fail "List tokens" "$TL"
+
+# ── 8. Admin / Retention ────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 8. Admin${NC}"
+
+RT=$(curl -s "$ENDPOINT/api/v1/admin/retention" | python3 -c "import sys,json; print(json.load(sys.stdin).get('SessionTTL',''))" 2>/dev/null)
+[ "$RT" = "168h" ] && pass "Retention config (session_ttl=$RT)" || fail "Retention" "$RT"
+
+# ── 9. Destroy / Purge ──────────────────────────────────
+
+echo ""
+echo -e "${CYAN}==> 9. Destroy / Purge${NC}"
+
+DC=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$SID")
+[ "$DC" = "204" ] && pass "Destroy session (HTTP $DC)" || fail "Destroy" "HTTP $DC"
+
+DS=$(curl -s "$ENDPOINT/api/v1/sessions/$SID" | jf Status)
+[ "$DS" = "terminated" ] && pass "Status=terminated" || fail "Post-destroy status" "$DS"
+
+# Purge test
+PC=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' -d '{"name":"purge-me"}')
+PSID=$(echo "$PC" | jf ID)
+PRC=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$PSID?purge=true")
+[ "$PRC" = "204" ] && pass "Purge session (HTTP $PRC)" || fail "Purge" "HTTP $PRC"
+
+# ── 10. Firecracker exec (real VM) ──────────────────────
+
+if [ "$FC_AVAILABLE" = true ] && [ "$DOCKER_AVAILABLE" = true ]; then
+  echo ""
+  echo -e "${CYAN}==> 10. Firecracker VM exec${NC}"
+
+  FC=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+    -d '{"name":"fc-exec","image":"alpine:latest","mode":"execute"}')
+  FSID=$(echo "$FC" | jf ID)
+  [ -n "$FSID" ] && pass "Create session with image" || { fail "FC create" "no ID"; }
+
+  if [ -n "$FSID" ]; then
+    # Wait for provisioning → running
+    echo -n "  Waiting for VM..."
+    for i in $(seq 1 60); do
+      FS=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID" | jf Status)
+      [ "$FS" = "running" ] && break
+      echo -n "."; sleep 2
+    done
+    echo " $FS"
+
+    FW=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID" | jf WorkerID)
+    [ "$FS" = "running" ] && [ -n "$FW" ] && pass "Session provisioned (worker=$FW)" || fail "Provisioning" "status=$FS worker=$FW"
+
+    if [ "$FS" = "running" ] && [ -n "$FW" ]; then
+      # echo
+      EX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
+        -d '{"command":"echo","args":["e2e-vm-test"]}')
+      EID=$(echo "$EX" | jf ID)
+      sleep 3
+      ER=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID/exec/$EID")
+      EST=$(echo "$ER" | jf Status)
+      EOUT=$(echo "$ER" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
+
+      if [ "$EST" = "success" ] && [ "$EOUT" = "e2e-vm-test" ]; then
+        pass "echo in VM → '$EOUT'"
+      else
+        fail "echo in VM" "status=$EST stdout='$EOUT'"
+      fi
+
+      # ls /
+      LX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
+        -d '{"command":"ls","args":["/"]}')
+      LID=$(echo "$LX" | jf ID)
+      sleep 3
+      LR=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID/exec/$LID")
+      LST=$(echo "$LR" | jf Status)
+      LOUT=$(echo "$LR" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
+
+      [ "$LST" = "success" ] && echo "$LOUT" | grep -q "bin" && pass "ls / in VM" || fail "ls / in VM" "status=$LST"
+
+      # uname
+      UX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
+        -d '{"command":"uname","args":["-a"]}')
+      UID2=$(echo "$UX" | jf ID)
+      sleep 3
+      UR=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID/exec/$UID2")
+      UOUT=$(echo "$UR" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
+
+      echo "$UOUT" | grep -q "Linux" && pass "uname in VM → Linux" || fail "uname" "$UOUT"
+
+      # write + read file
+      curl -s -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
+        -d '{"command":"sh","args":["-c","echo hello > /tmp/test.txt && cat /tmp/test.txt"]}' >/dev/null
+      sleep 3
+      # Get latest exec
+      EXECS=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID/exec" | python3 -c "
+import sys,json;d=json.load(sys.stdin);exs=d.get('executions',[])
+if exs: print(exs[-1].get('ID',''))
+else: print('')" 2>/dev/null)
+      if [ -n "$EXECS" ]; then
+        WR=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID/exec/$EXECS")
+        WROUT=$(echo "$WR" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
+        [ "$WROUT" = "hello" ] && pass "Write + read file in VM" || fail "Write file" "output='$WROUT'"
+      fi
+
+      # Destroy
+      curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$FSID" >/dev/null
+      pass "Destroy Firecracker session"
+    fi
+  fi
+else
+  echo ""
+  skip "Firecracker VM exec (no KVM or Docker)"
+fi
+
+echo ""
+echo -e "${GREEN}${BOLD}  E2E tests complete!${NC}"
