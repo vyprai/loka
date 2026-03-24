@@ -1,0 +1,19 @@
+name: vite
+version: "1.0"
+description: Vite application
+before: [nodejs]
+image: node:20-slim
+port: 4173
+build:
+  - npm install
+  - npm run build
+include:
+  - package.json
+  - node_modules/
+  - dist/
+start: npx vite preview --host 0.0.0.0
+health:
+  path: /
+  interval: 10
+  timeout: 5
+  retries: 3

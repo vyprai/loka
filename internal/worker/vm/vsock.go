@@ -138,6 +138,84 @@ func (c *VsockClient) Ping() error {
 	return err
 }
 
+// ── Service Methods ─────────────────────────────────────
+
+// ServiceStatusResult describes the current state of the service.
+type ServiceStatusResult struct {
+	Running       bool    `json:"running"`
+	PID           int     `json:"pid"`
+	ExitCode      int     `json:"exit_code"`
+	Restarts      int     `json:"restarts"`
+	UptimeSeconds float64 `json:"uptime_seconds"`
+	StartedAt     string  `json:"started_at"`
+}
+
+// ServiceLogsResult contains the last N lines of service stdout/stderr.
+type ServiceLogsResult struct {
+	Stdout []string `json:"stdout"`
+	Stderr []string `json:"stderr"`
+}
+
+// ServiceStart starts a long-running service process inside the VM.
+// Only one service per VM is supported. Returns the process PID.
+func (c *VsockClient) ServiceStart(command string, args []string, env map[string]string, workdir, restartPolicy string) (int, error) {
+	params, _ := json.Marshal(map[string]any{
+		"command":        command,
+		"args":           args,
+		"env":            env,
+		"workdir":        workdir,
+		"restart_policy": restartPolicy,
+	})
+	resp, err := c.call("service_start", params)
+	if err != nil {
+		return 0, err
+	}
+	var result struct {
+		PID int `json:"pid"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return 0, fmt.Errorf("unmarshal service_start response: %w", err)
+	}
+	return result.PID, nil
+}
+
+// ServiceStop stops the running service process.
+func (c *VsockClient) ServiceStop(signal string, timeout int) error {
+	params, _ := json.Marshal(map[string]any{
+		"signal":  signal,
+		"timeout": timeout,
+	})
+	_, err := c.call("service_stop", params)
+	return err
+}
+
+// ServiceStatus returns the current state of the service process.
+func (c *VsockClient) ServiceStatus() (*ServiceStatusResult, error) {
+	resp, err := c.call("service_status", nil)
+	if err != nil {
+		return nil, err
+	}
+	var result ServiceStatusResult
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal service_status response: %w", err)
+	}
+	return &result, nil
+}
+
+// ServiceLogs returns the last N lines of service stdout/stderr.
+func (c *VsockClient) ServiceLogs(lines int) (*ServiceLogsResult, error) {
+	params, _ := json.Marshal(map[string]int{"lines": lines})
+	resp, err := c.call("service_logs", params)
+	if err != nil {
+		return nil, err
+	}
+	var result ServiceLogsResult
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal service_logs response: %w", err)
+	}
+	return &result, nil
+}
+
 // ── Low-Level Transport ─────────────────────────────────
 
 func (c *VsockClient) call(method string, params json.RawMessage) (json.RawMessage, error) {

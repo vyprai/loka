@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vyprai/loka/internal/config"
 	"github.com/vyprai/loka/internal/controlplane/image"
+	"github.com/vyprai/loka/internal/controlplane/service"
 	"github.com/vyprai/loka/internal/controlplane/session"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/objstore"
@@ -22,6 +23,7 @@ import (
 type Server struct {
 	router           *chi.Mux
 	sessionManager   *session.Manager
+	serviceManager   *service.Manager
 	workerRegistry   *worker.Registry
 	providerRegistry *provider.Registry
 	imageManager     *image.Manager
@@ -37,11 +39,12 @@ type Server struct {
 
 // ServerOpts holds optional configuration for the API server.
 type ServerOpts struct {
-	APIKey     string                  // If set, require this key for API access.
-	GC         GCRunner                // Garbage collector (optional).
-	CACertPath string                  // Path to CA certificate for /ca.crt endpoint.
-	Retention  config.RetentionConfig  // Retention configuration.
-	ObjStore   objstore.ObjectStore    // Object store (exposed to workers/HA nodes).
+	APIKey         string                  // If set, require this key for API access.
+	GC             GCRunner                // Garbage collector (optional).
+	CACertPath     string                  // Path to CA certificate for /ca.crt endpoint.
+	Retention      config.RetentionConfig  // Retention configuration.
+	ObjStore       objstore.ObjectStore    // Object store (exposed to workers/HA nodes).
+	ServiceManager *service.Manager        // Service manager (optional).
 }
 
 // NewServer creates a new API server.
@@ -53,6 +56,7 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 	srv := &Server{
 		router:           chi.NewRouter(),
 		sessionManager:   sm,
+		serviceManager:   o.ServiceManager,
 		workerRegistry:   reg,
 		providerRegistry: provReg,
 		imageManager:     imgMgr,
@@ -152,6 +156,20 @@ func (s *Server) routes() {
 
 		// Sessions - migration
 		r.Post("/sessions/{id}/migrate", s.migrateSession)
+
+		// Services
+		r.Post("/services", s.deployService)
+		r.Get("/services", s.listServices)
+		r.Get("/services/{id}", s.getService)
+		r.Delete("/services/{id}", s.destroyService)
+		r.Post("/services/{id}/stop", s.stopService)
+		r.Post("/services/{id}/redeploy", s.redeployService)
+		r.Put("/services/{id}/env", s.updateServiceEnv)
+		r.Get("/services/{id}/logs", s.getServiceLogs)
+
+		// Object store (service bundles) — public API for CLI uploads.
+		r.Put("/objstore/objects/{bucket}/*", s.objStorePut)
+		r.Get("/objstore/objects/{bucket}/*", s.objStoreGet)
 
 		// Workers
 		r.Get("/workers", s.listWorkers)

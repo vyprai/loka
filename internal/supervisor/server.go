@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/mdlayher/vsock"
@@ -23,6 +24,7 @@ type Server struct {
 	logger   *slog.Logger
 	ctx      context.Context
 	cancel   context.CancelFunc
+	service  *ServiceProcess // At most one service per VM.
 }
 
 // NewServer creates a new supervisor server.
@@ -178,6 +180,18 @@ func (s *Server) handleRPC(req vm.RPCRequest) vm.RPCResponse {
 		result, _ := json.Marshal(log)
 		return vm.RPCResponse{ID: req.ID, Result: result}
 
+	case "service_start":
+		return s.handleServiceStart(req)
+
+	case "service_stop":
+		return s.handleServiceStop(req)
+
+	case "service_status":
+		return s.handleServiceStatus(req)
+
+	case "service_logs":
+		return s.handleServiceLogs(req)
+
 	default:
 		return vm.RPCResponse{
 			ID:    req.ID,
@@ -249,4 +263,115 @@ func rpcError(id string, err error) vm.RPCResponse {
 		ID:    id,
 		Error: &vm.RPCError{Code: -1, Message: err.Error()},
 	}
+}
+
+// ── Service RPC Handlers ────────────────────────────────
+
+func (s *Server) handleServiceStart(req vm.RPCRequest) vm.RPCResponse {
+	var params struct {
+		Command       string            `json:"command"`
+		Args          []string          `json:"args"`
+		Env           map[string]string `json:"env"`
+		Workdir       string            `json:"workdir"`
+		RestartPolicy string            `json:"restart_policy"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+	}
+
+	if s.service != nil {
+		// Stop existing service first.
+		s.service.Stop(syscall.SIGTERM, 10*time.Second)
+	}
+
+	if params.RestartPolicy == "" {
+		params.RestartPolicy = "on-failure"
+	}
+
+	sp := NewServiceProcess(params.Command, params.Args, params.Env, params.Workdir, params.RestartPolicy)
+	if err := sp.Start(s.ctx); err != nil {
+		return rpcError(req.ID, fmt.Errorf("start service: %w", err))
+	}
+
+	s.service = sp
+	s.logger.Info("service started",
+		"command", params.Command,
+		"pid", sp.pid,
+		"restart_policy", params.RestartPolicy,
+	)
+
+	result, _ := json.Marshal(map[string]int{"pid": sp.pid})
+	return vm.RPCResponse{ID: req.ID, Result: result}
+}
+
+func (s *Server) handleServiceStop(req vm.RPCRequest) vm.RPCResponse {
+	if s.service == nil {
+		return rpcError(req.ID, fmt.Errorf("no service running"))
+	}
+
+	var params struct {
+		Signal  string `json:"signal"`
+		Timeout int    `json:"timeout"`
+	}
+	json.Unmarshal(req.Params, &params)
+
+	sig := syscall.SIGTERM
+	if params.Signal != "" {
+		switch strings.ToUpper(params.Signal) {
+		case "SIGKILL", "KILL":
+			sig = syscall.SIGKILL
+		case "SIGINT", "INT":
+			sig = syscall.SIGINT
+		case "SIGHUP", "HUP":
+			sig = syscall.SIGHUP
+		}
+	}
+
+	timeout := 10 * time.Second
+	if params.Timeout > 0 {
+		timeout = time.Duration(params.Timeout) * time.Second
+	}
+
+	if err := s.service.Stop(sig, timeout); err != nil {
+		return rpcError(req.ID, err)
+	}
+
+	s.service = nil
+	s.logger.Info("service stopped")
+	result, _ := json.Marshal(map[string]bool{"ok": true})
+	return vm.RPCResponse{ID: req.ID, Result: result}
+}
+
+func (s *Server) handleServiceStatus(req vm.RPCRequest) vm.RPCResponse {
+	if s.service == nil {
+		result, _ := json.Marshal(ServiceProcessStatus{})
+		return vm.RPCResponse{ID: req.ID, Result: result}
+	}
+
+	status := s.service.Status()
+	result, _ := json.Marshal(status)
+	return vm.RPCResponse{ID: req.ID, Result: result}
+}
+
+func (s *Server) handleServiceLogs(req vm.RPCRequest) vm.RPCResponse {
+	if s.service == nil {
+		return rpcError(req.ID, fmt.Errorf("no service running"))
+	}
+
+	var params struct {
+		Lines  int  `json:"lines"`
+		Stream bool `json:"stream"`
+	}
+	json.Unmarshal(req.Params, &params)
+
+	lines := params.Lines
+	if lines <= 0 {
+		lines = 100
+	}
+
+	result, _ := json.Marshal(vm.ServiceLogsResult{
+		Stdout: s.service.stdout.Lines(lines),
+		Stderr: s.service.stderr.Lines(lines),
+	})
+	return vm.RPCResponse{ID: req.ID, Result: result}
 }

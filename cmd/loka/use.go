@@ -14,7 +14,7 @@ func newCurrentCmd() *cobra.Command {
 			store, _ := loadDeployments()
 			d := store.GetActive()
 			if d == nil {
-				fmt.Println("No active server. Deploy one: loka deploy local")
+				fmt.Println("No active server. Set one up: loka setup local")
 				return nil
 			}
 			fmt.Printf("Name:     %s\n", d.Name)

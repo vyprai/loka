@@ -15,7 +15,7 @@ import (
 func newTestProxy(t *testing.T) *DomainProxy {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	return NewDomainProxy("loka.example.com", nil, nil, logger)
+	return NewDomainProxy("loka.example.com", nil, nil, logger, DomainProxyOpts{})
 }
 
 func TestAddRoute(t *testing.T) {

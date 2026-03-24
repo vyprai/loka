@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/vyprai/loka/internal/loka"
@@ -373,4 +375,370 @@ func (e *Executor) startProcess(ctx context.Context, cmd loka.Command) (*Running
 	}()
 
 	return proc, nil
+}
+
+// ── Ring Buffer ──────────────────────────────────────────
+
+// RingBuffer is a fixed-capacity circular buffer that stores the last N lines.
+type RingBuffer struct {
+	mu    sync.Mutex
+	lines []string
+	cap   int
+	pos   int
+	full  bool
+	// partial holds an incomplete line (no trailing newline yet).
+	partial string
+}
+
+// NewRingBuffer creates a ring buffer that holds up to cap lines.
+func NewRingBuffer(cap int) *RingBuffer {
+	return &RingBuffer{
+		lines: make([]string, cap),
+		cap:   cap,
+	}
+}
+
+// WriteLine adds a single line to the buffer.
+func (rb *RingBuffer) WriteLine(line string) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	rb.lines[rb.pos] = line
+	rb.pos = (rb.pos + 1) % rb.cap
+	if rb.pos == 0 {
+		rb.full = true
+	}
+}
+
+// Write implements io.Writer. It splits input on newlines and stores each line.
+func (rb *RingBuffer) Write(p []byte) (n int, err error) {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	data := rb.partial + string(p)
+	rb.partial = ""
+
+	for {
+		idx := strings.IndexByte(data, '\n')
+		if idx < 0 {
+			rb.partial = data
+			break
+		}
+		line := data[:idx]
+		data = data[idx+1:]
+		rb.lines[rb.pos] = line
+		rb.pos = (rb.pos + 1) % rb.cap
+		if rb.pos == 0 {
+			rb.full = true
+		}
+	}
+	return len(p), nil
+}
+
+// Lines returns the last n lines (or all lines if n <= 0 or n > stored count).
+func (rb *RingBuffer) Lines(n int) []string {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	total := rb.pos
+	if rb.full {
+		total = rb.cap
+	}
+	if n <= 0 || n > total {
+		n = total
+	}
+	if n == 0 {
+		return nil
+	}
+
+	result := make([]string, n)
+	start := rb.pos - n
+	if start < 0 {
+		start += rb.cap
+	}
+	for i := 0; i < n; i++ {
+		result[i] = rb.lines[(start+i)%rb.cap]
+	}
+	return result
+}
+
+// ── Service Process ─────────────────────────────────────
+
+// ServiceProcess manages a long-running service process with restart policies.
+type ServiceProcess struct {
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	pid         int
+	running     bool
+	exitCode    int
+	startedAt   time.Time
+	restarts    int
+	lastRestart time.Time
+
+	// Ring buffer for logs (last 10K lines).
+	stdout *RingBuffer
+	stderr *RingBuffer
+
+	// Config.
+	command       string
+	args          []string
+	env           map[string]string
+	workdir       string
+	restartPolicy string // "on-failure", "always", "never"
+
+	cancel  context.CancelFunc
+	ctx     context.Context
+	stopped chan struct{} // closed when the process loop has fully exited
+}
+
+// ServiceProcessStatus describes the current state of the service.
+type ServiceProcessStatus struct {
+	Running       bool      `json:"running"`
+	PID           int       `json:"pid"`
+	ExitCode      int       `json:"exit_code"`
+	Restarts      int       `json:"restarts"`
+	UptimeSeconds float64   `json:"uptime_seconds"`
+	StartedAt     time.Time `json:"started_at"`
+}
+
+// NewServiceProcess creates a new service process (not yet started).
+func NewServiceProcess(command string, args []string, env map[string]string, workdir, restartPolicy string) *ServiceProcess {
+	return &ServiceProcess{
+		command:       command,
+		args:          args,
+		env:           env,
+		workdir:       workdir,
+		restartPolicy: restartPolicy,
+		stdout:        NewRingBuffer(10000),
+		stderr:        NewRingBuffer(10000),
+		stopped:       make(chan struct{}),
+	}
+}
+
+// Start starts the service process and its restart loop.
+func (sp *ServiceProcess) Start(parentCtx context.Context) error {
+	sp.mu.Lock()
+	if sp.running {
+		sp.mu.Unlock()
+		return fmt.Errorf("service already running")
+	}
+	sp.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(parentCtx)
+	sp.mu.Lock()
+	sp.ctx = ctx
+	sp.cancel = cancel
+	sp.mu.Unlock()
+
+	if err := sp.startOnce(); err != nil {
+		cancel()
+		return err
+	}
+
+	// Restart loop goroutine.
+	go sp.restartLoop()
+	return nil
+}
+
+func (sp *ServiceProcess) startOnce() error {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	cmdPath := sp.command
+	osCmd := exec.CommandContext(sp.ctx, cmdPath, sp.args...)
+	if sp.workdir != "" {
+		osCmd.Dir = sp.workdir
+	}
+
+	// Build environment. For service processes running inside the sandboxed VM,
+	// we allow more env vars (NODE_OPTIONS, PYTHONPATH etc.) since the VM itself
+	// is the security boundary.
+	envSlice := []string{
+		"PATH=/env/bin:/usr/local/bin:/usr/bin:/bin",
+		"HOME=/workspace",
+	}
+	for k, v := range sp.env {
+		// Only block truly dangerous vars that could escape the sandbox.
+		upper := strings.ToUpper(k)
+		if upper == "LD_PRELOAD" || upper == "LD_LIBRARY_PATH" {
+			continue
+		}
+		envSlice = append(envSlice, fmt.Sprintf("%s=%s", k, v))
+	}
+	osCmd.Env = envSlice
+	osCmd.Stdout = sp.stdout
+	osCmd.Stderr = sp.stderr
+
+	if err := osCmd.Start(); err != nil {
+		return fmt.Errorf("start service: %w", err)
+	}
+
+	sp.cmd = osCmd
+	sp.pid = osCmd.Process.Pid
+	sp.running = true
+	sp.startedAt = time.Now()
+	return nil
+}
+
+func (sp *ServiceProcess) restartLoop() {
+	defer close(sp.stopped)
+
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+
+	for {
+		// Wait for the current process to exit.
+		sp.mu.Lock()
+		cmd := sp.cmd
+		sp.mu.Unlock()
+
+		var exitCode int
+		if cmd != nil && cmd.Process != nil {
+			err := cmd.Wait()
+			if err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					exitCode = exitErr.ExitCode()
+				} else {
+					exitCode = -1
+				}
+			}
+		}
+
+		sp.mu.Lock()
+		sp.running = false
+		sp.exitCode = exitCode
+		sp.mu.Unlock()
+
+		// Check if we should restart.
+		select {
+		case <-sp.ctx.Done():
+			return
+		default:
+		}
+
+		shouldRestart := false
+		sp.mu.Lock()
+		policy := sp.restartPolicy
+		sp.mu.Unlock()
+
+		switch policy {
+		case "always":
+			shouldRestart = true
+		case "on-failure":
+			shouldRestart = exitCode != 0
+		default: // "never"
+			return
+		}
+
+		if !shouldRestart {
+			return
+		}
+
+		// Backoff before restart.
+		select {
+		case <-sp.ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+
+		sp.mu.Lock()
+		sp.restarts++
+		sp.lastRestart = time.Now()
+		sp.mu.Unlock()
+
+		if err := sp.startOnce(); err != nil {
+			// Failed to restart — give up.
+			return
+		}
+
+		// Exponential backoff: 1s, 2s, 4s, 8s, ... max 30s.
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+// Stop sends a signal to the service process, then SIGKILL after timeout.
+func (sp *ServiceProcess) Stop(signal syscall.Signal, timeout time.Duration) error {
+	sp.mu.Lock()
+	cancel := sp.cancel
+	cmd := sp.cmd
+	running := sp.running
+	stopped := sp.stopped
+	sp.mu.Unlock()
+
+	if !running || cmd == nil || cmd.Process == nil {
+		if cancel != nil {
+			cancel()
+		}
+		return nil
+	}
+
+	// Send the requested signal (typically SIGTERM).
+	if err := cmd.Process.Signal(signal); err != nil {
+		// Process may have already exited.
+		if cancel != nil {
+			cancel()
+		}
+		return nil
+	}
+
+	// Wait for graceful shutdown or timeout.
+	select {
+	case <-stopped:
+		return nil
+	case <-time.After(timeout):
+		// Force kill.
+		cmd.Process.Signal(syscall.SIGKILL)
+		if cancel != nil {
+			cancel()
+		}
+		<-stopped
+		return nil
+	}
+}
+
+// Restart stops and restarts the service.
+func (sp *ServiceProcess) Restart() error {
+	if err := sp.Stop(syscall.SIGTERM, 10*time.Second); err != nil {
+		return err
+	}
+	// Create new stopped channel and context for fresh restart loop.
+	sp.mu.Lock()
+	sp.stopped = make(chan struct{})
+	sp.mu.Unlock()
+
+	ctx := context.Background()
+	newCtx, cancel := context.WithCancel(ctx)
+	sp.mu.Lock()
+	sp.ctx = newCtx
+	sp.cancel = cancel
+	sp.mu.Unlock()
+
+	if err := sp.startOnce(); err != nil {
+		cancel()
+		return err
+	}
+	go sp.restartLoop()
+	return nil
+}
+
+// Status returns the current state of the service.
+func (sp *ServiceProcess) Status() ServiceProcessStatus {
+	sp.mu.Lock()
+	defer sp.mu.Unlock()
+
+	var uptime float64
+	if sp.running && !sp.startedAt.IsZero() {
+		uptime = time.Since(sp.startedAt).Seconds()
+	}
+
+	return ServiceProcessStatus{
+		Running:       sp.running,
+		PID:           sp.pid,
+		ExitCode:      sp.exitCode,
+		Restarts:      sp.restarts,
+		UptimeSeconds: uptime,
+		StartedAt:     sp.startedAt,
+	}
 }

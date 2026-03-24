@@ -51,11 +51,12 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) Sessions() store.SessionRepository    { return &sessionRepo{db: s.db} }
-func (s *Store) Executions() store.ExecutionRepository { return &executionRepo{db: s.db} }
+func (s *Store) Sessions() store.SessionRepository      { return &sessionRepo{db: s.db} }
+func (s *Store) Executions() store.ExecutionRepository   { return &executionRepo{db: s.db} }
 func (s *Store) Checkpoints() store.CheckpointRepository { return &checkpointRepo{db: s.db} }
-func (s *Store) Workers() store.WorkerRepository      { return &workerRepo{db: s.db} }
-func (s *Store) Tokens() store.TokenRepository        { return &tokenRepo{db: s.db} }
+func (s *Store) Workers() store.WorkerRepository         { return &workerRepo{db: s.db} }
+func (s *Store) Tokens() store.TokenRepository           { return &tokenRepo{db: s.db} }
+func (s *Store) Services() store.ServiceRepository       { return &serviceRepo{db: s.db} }
 
 var _ store.Store = (*Store)(nil)
 
@@ -121,6 +122,41 @@ CREATE TABLE IF NOT EXISTS workers (
 	updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
 	last_seen     TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS services (
+	id               TEXT PRIMARY KEY,
+	name             TEXT NOT NULL DEFAULT '',
+	status           TEXT NOT NULL DEFAULT 'deploying',
+	worker_id        TEXT NOT NULL DEFAULT '',
+	image_ref        TEXT NOT NULL DEFAULT '',
+	image_id         TEXT NOT NULL DEFAULT '',
+	recipe_name      TEXT NOT NULL DEFAULT '',
+	command          TEXT NOT NULL DEFAULT '',
+	args             TEXT NOT NULL DEFAULT '[]',
+	env              TEXT NOT NULL DEFAULT '{}',
+	workdir          TEXT NOT NULL DEFAULT '',
+	port             INTEGER NOT NULL DEFAULT 0,
+	vcpus            INTEGER NOT NULL DEFAULT 1,
+	memory_mb        INTEGER NOT NULL DEFAULT 512,
+	routes           TEXT NOT NULL DEFAULT '[]',
+	bundle_key       TEXT NOT NULL DEFAULT '',
+	idle_timeout     INTEGER NOT NULL DEFAULT 0,
+	health_path      TEXT NOT NULL DEFAULT '',
+	health_interval  INTEGER NOT NULL DEFAULT 0,
+	health_timeout   INTEGER NOT NULL DEFAULT 0,
+	health_retries   INTEGER NOT NULL DEFAULT 0,
+	labels           TEXT NOT NULL DEFAULT '{}',
+	mounts           TEXT NOT NULL DEFAULT '[]',
+	autoscale        TEXT NOT NULL DEFAULT 'null',
+	snapshot_id      TEXT NOT NULL DEFAULT '',
+	ready            INTEGER NOT NULL DEFAULT 0,
+	status_message   TEXT NOT NULL DEFAULT '',
+	last_activity    TEXT NOT NULL DEFAULT (datetime('now')),
+	created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+	updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_services_worker ON services(worker_id);
+CREATE INDEX IF NOT EXISTS idx_services_status ON services(status);
 
 CREATE TABLE IF NOT EXISTS worker_tokens (
 	id         TEXT PRIMARY KEY,

@@ -27,10 +27,10 @@ func newDeployVMCmd() *cobra.Command {
 
 Examples:
   # Single node (CP + worker on same machine)
-  loka deploy vm --name dev --cp 10.0.0.1
+  loka setup vm --name dev --cp 10.0.0.1
 
   # Multi-node
-  loka deploy vm --name prod \
+  loka setup vm --name prod \
     --cp 10.0.0.1 \
     --worker 10.0.0.2 \
     --worker 10.0.0.3 \

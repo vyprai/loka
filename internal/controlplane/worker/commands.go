@@ -59,3 +59,24 @@ type SyncMountData struct {
 	Delete    bool
 	DryRun    bool
 }
+
+// LaunchServiceData is the payload for launching a service on a worker.
+type LaunchServiceData struct {
+	ServiceID     string
+	ImageRef      string
+	VCPUs         int
+	MemoryMB      int
+	RootfsPath    string
+	Command       string
+	Args          []string
+	Env           map[string]string
+	Workdir       string
+	Port          int
+	BundleKey     string
+	RestartPolicy string
+}
+
+// StopServiceData is the payload for stopping a service on a worker.
+type StopServiceData struct {
+	ServiceID string
+}

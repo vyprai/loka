@@ -357,6 +357,71 @@ func (a *Agent) DiffCheckpoints(sessionID, cpIDA, cpIDB string) ([]vm.DiffEntry,
 	return a.checkpointMgr.Diff(sessionID, layerA, layerB)
 }
 
+// ── Service Process Methods ──────────────────────────────
+
+// StartService starts a long-running service process inside the session's VM.
+func (a *Agent) StartService(ctx context.Context, sessionID string, command string, args []string, env map[string]string, workdir, restartPolicy string) error {
+	a.mu.RLock()
+	sess, ok := a.sessions[sessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	pid, err := sess.Vsock.ServiceStart(command, args, env, workdir, restartPolicy)
+	if err != nil {
+		return fmt.Errorf("start service via vsock: %w", err)
+	}
+
+	a.logger.Info("service started in VM",
+		"session", sessionID,
+		"command", command,
+		"pid", pid,
+	)
+	return nil
+}
+
+// StopService stops the running service process inside the session's VM.
+func (a *Agent) StopService(sessionID string) error {
+	a.mu.RLock()
+	sess, ok := a.sessions[sessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	if err := sess.Vsock.ServiceStop("SIGTERM", 10); err != nil {
+		return fmt.Errorf("stop service via vsock: %w", err)
+	}
+
+	a.logger.Info("service stopped in VM", "session", sessionID)
+	return nil
+}
+
+// ServiceStatus returns the status of the service process inside the session's VM.
+func (a *Agent) ServiceStatus(sessionID string) (*vm.ServiceStatusResult, error) {
+	a.mu.RLock()
+	sess, ok := a.sessions[sessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("session %s not found", sessionID)
+	}
+
+	return sess.Vsock.ServiceStatus()
+}
+
+// ServiceLogs returns the last N lines of the service's stdout/stderr.
+func (a *Agent) ServiceLogs(sessionID string, lines int) (*vm.ServiceLogsResult, error) {
+	a.mu.RLock()
+	sess, ok := a.sessions[sessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return nil, fmt.Errorf("session %s not found", sessionID)
+	}
+
+	return sess.Vsock.ServiceLogs(lines)
+}
+
 // SessionCount returns the number of active sessions.
 func (a *Agent) SessionCount() int {
 	a.mu.RLock()

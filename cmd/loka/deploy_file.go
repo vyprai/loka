@@ -54,8 +54,8 @@ func newDeployFileCmd() *cobra.Command {
 LOKA compares the file with the current state and adds/removes workers as needed.
 
 Examples:
-  loka deploy apply deployment.yml
-  loka deploy apply prod.yml
+  loka setup apply deployment.yml
+  loka setup apply prod.yml
 
 Example YAML (VM provider):
   name: production
@@ -136,7 +136,7 @@ func applyUpdate(cmd *cobra.Command, store *DeploymentStore, existing *Deploymen
 	}
 
 	fmt.Printf("Cloud provider %q update not yet implemented.\n", spec.Provider)
-	fmt.Println("Use 'loka deploy add-worker' and 'loka deploy remove-worker' to manage workers.")
+	fmt.Println("Use 'loka setup add-worker' and 'loka setup remove-worker' to manage workers.")
 	return nil
 }
 
@@ -426,16 +426,16 @@ func newDeployExportCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "export [name] [file.yml]",
 		Short: "Export a server config as YAML",
-		Long: `Export the current deployment state as a YAML file that can be used with 'deploy apply'.
+		Long: `Export the current deployment state as a YAML file that can be used with 'setup apply'.
 
 Without arguments, prints the active server's config to stdout.
 With a name, exports that server. With a file path, writes to file.
 
 Examples:
-  loka deploy export                    # Print active server YAML to stdout
-  loka deploy export prod               # Print "prod" server YAML
-  loka deploy export prod prod.yml      # Save to file
-  loka deploy export > cluster.yml      # Redirect to file`,
+  loka setup export                    # Print active server YAML to stdout
+  loka setup export prod               # Print "prod" server YAML
+  loka setup export prod prod.yml      # Save to file
+  loka setup export > cluster.yml      # Redirect to file`,
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, _ := loadDeployments()

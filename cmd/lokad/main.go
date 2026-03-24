@@ -21,6 +21,7 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/internal/controlplane/ha"
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
+	"github.com/vyprai/loka/internal/controlplane/service"
 	"github.com/vyprai/loka/internal/controlplane/session"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/objstore"
@@ -248,6 +249,9 @@ func main() {
 	// Initialize session manager.
 	sm := session.NewManager(db, registry, sched, imgMgr, objStore, logger)
 
+	// Initialize service manager.
+	svcMgr := service.NewManager(db, registry, sched, imgMgr, objStore, logger)
+
 	// Initialize drainer with migration callback.
 	drainer := worker.NewDrainer(registry, db, sm.MigrateSession, logger)
 
@@ -424,10 +428,11 @@ func main() {
 
 	// ── Initialize API server ───────────────────────────────
 	srv := api.NewServer(sm, registry, providerRegistry, imgMgr, drainer, db, logger, api.ServerOpts{
-		APIKey:     cfg.Auth.APIKey,
-		Retention:  cfg.Retention,
-		CACertPath: caCertPath,
-		ObjStore:   objStore,
+		APIKey:         cfg.Auth.APIKey,
+		Retention:      cfg.Retention,
+		CACertPath:     caCertPath,
+		ObjStore:       objStore,
+		ServiceManager: svcMgr,
 	})
 
 	httpServer := &http.Server{

@@ -1,0 +1,22 @@
+name: nextjs
+version: "1.0"
+description: Next.js application
+before: [nodejs]
+image: node:20-slim
+port: 3000
+build:
+  - npm install
+  - npm run build
+include:
+  - package.json
+  - package-lock.json
+  - node_modules/
+  - .next/
+  - public/
+  - "next.config.*"
+start: npm start
+health:
+  path: /
+  interval: 10
+  timeout: 5
+  retries: 3

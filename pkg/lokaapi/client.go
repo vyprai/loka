@@ -364,6 +364,38 @@ func (c *Client) Raw(ctx context.Context, method, path string, body any, result 
 	return c.do(ctx, method, path, body, result)
 }
 
+// UploadRaw uploads raw bytes to the given path via PUT.
+func (c *Client) UploadRaw(ctx context.Context, path string, data io.Reader, contentLength int64) error {
+	req, err := http.NewRequestWithContext(ctx, "PUT", c.baseURL+path, data)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if contentLength > 0 {
+		req.ContentLength = contentLength
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		var errResp map[string]string
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		msg := errResp["error"]
+		if msg == "" {
+			msg = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		}
+		return fmt.Errorf("%s", msg)
+	}
+	return nil
+}
+
 // ─── Health ─────────────────────────────────────────────
 
 func (c *Client) Health(ctx context.Context) error {

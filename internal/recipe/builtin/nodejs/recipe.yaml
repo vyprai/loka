@@ -1,0 +1,24 @@
+name: nodejs
+version: "1.0"
+description: Node.js application
+before: [static]
+image: node:20-slim
+port: 3000
+build:
+  - npm install
+include:
+  - package.json
+  - package-lock.json
+  - node_modules/
+  - dist/
+  - build/
+  - src/
+  - index.js
+  - server.js
+  - app.js
+start: npm start
+health:
+  path: /
+  interval: 10
+  timeout: 5
+  retries: 3

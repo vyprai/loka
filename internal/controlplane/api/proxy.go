@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,44 +12,82 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/vyprai/loka/internal/controlplane/service"
 	"github.com/vyprai/loka/internal/controlplane/session"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/loka"
 )
 
 // DomainProxy is a reverse proxy that routes HTTP requests by subdomain
-// to specific ports inside session VMs.
+// to specific ports inside session VMs or deployed services.
 //
-// Example: my-app.loka.example.com → session abc123, port 5000
+// For service routes, the proxy supports cold-start wake-on-request:
+// if a service is idle, the first request triggers a wake and blocks
+// until the service is ready (up to 30s).
+//
+// Example: my-app.loka.example.com -> session abc123, port 5000
 type DomainProxy struct {
 	baseDomain string
 	sm         *session.Manager
+	svcMgr     *service.Manager // Service manager for cold-start wake.
 	registry   *worker.Registry
 	logger     *slog.Logger
 
 	mu     sync.RWMutex
-	routes map[string]*loka.DomainRoute // subdomain → route
+	routes map[string]*loka.DomainRoute // subdomain -> route
+
+	// wakeMu protects wakeInFlight to coalesce concurrent wake requests.
+	wakeMu       sync.Mutex
+	wakeInFlight map[string]*wakeState // serviceID -> in-progress wake
+}
+
+// wakeState tracks an in-progress wake so concurrent requests for the same
+// idle service share a single Wake call.
+type wakeState struct {
+	done chan struct{} // closed when wake completes
+	err  error        // non-nil if wake failed
 }
 
 // NewDomainProxy creates a domain-based reverse proxy.
-func NewDomainProxy(baseDomain string, sm *session.Manager, registry *worker.Registry, logger *slog.Logger) *DomainProxy {
+func NewDomainProxy(baseDomain string, sm *session.Manager, registry *worker.Registry, logger *slog.Logger, opts ...DomainProxyOpts) *DomainProxy {
+	var o DomainProxyOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
 	return &DomainProxy{
-		baseDomain: baseDomain,
-		sm:         sm,
-		registry:   registry,
-		logger:     logger,
-		routes:     make(map[string]*loka.DomainRoute),
+		baseDomain:   baseDomain,
+		sm:           sm,
+		svcMgr:       o.ServiceManager,
+		registry:     registry,
+		logger:       logger,
+		routes:       make(map[string]*loka.DomainRoute),
+		wakeInFlight: make(map[string]*wakeState),
 	}
 }
 
-// AddRoute registers a subdomain → session:port mapping.
+// DomainProxyOpts holds optional configuration for the domain proxy.
+type DomainProxyOpts struct {
+	ServiceManager *service.Manager
+}
+
+// AddRoute registers a subdomain -> session/service:port mapping.
 func (p *DomainProxy) AddRoute(route *loka.DomainRoute) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.routes[route.Subdomain] = route
+
+	routeType := string(route.Type)
+	if routeType == "" {
+		routeType = "session"
+	}
+	targetID := route.SessionID
+	if route.Type == loka.DomainRouteService {
+		targetID = route.ServiceID
+	}
 	p.logger.Info("domain route added",
 		"subdomain", route.Subdomain,
-		"session", route.SessionID,
+		"type", routeType,
+		"target", targetID,
 		"port", route.RemotePort,
 		"url", fmt.Sprintf("https://%s.%s", route.Subdomain, p.baseDomain))
 }
@@ -107,29 +146,188 @@ func (p *DomainProxy) Handler() http.Handler {
 			return
 		}
 
-		// Verify session is still running.
-		sess, err := p.sm.Get(r.Context(), route.SessionID)
-		if err != nil || sess.Status != loka.SessionStatusRunning {
-			http.Error(w, "Session is not running", http.StatusServiceUnavailable)
+		// Dispatch based on route type.
+		if route.Type == loka.DomainRouteService {
+			p.handleServiceRoute(w, r, route)
 			return
 		}
 
-		// Find the worker.
-		wc, ok := p.registry.Get(sess.WorkerID)
-		if !ok {
-			http.Error(w, "Worker not available", http.StatusServiceUnavailable)
-			return
-		}
-
-		// Proxy the request to the worker VM's port.
-		// In production, this would connect to the worker's VM via the tunnel.
-		// For now, proxy to the worker's IP on the specified port.
-		targetAddr := fmt.Sprintf("%s:%d", wc.Worker.IPAddress, route.RemotePort)
-		p.proxyHTTP(w, r, targetAddr, route)
+		// Default: session route.
+		p.handleSessionRoute(w, r, route)
 	})
 }
 
-func (p *DomainProxy) proxyHTTP(w http.ResponseWriter, r *http.Request, targetAddr string, route *loka.DomainRoute) {
+// handleSessionRoute proxies a request to a session VM (original behavior).
+func (p *DomainProxy) handleSessionRoute(w http.ResponseWriter, r *http.Request, route *loka.DomainRoute) {
+	// Verify session is still running.
+	sess, err := p.sm.Get(r.Context(), route.SessionID)
+	if err != nil || sess.Status != loka.SessionStatusRunning {
+		http.Error(w, "Session is not running", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Find the worker.
+	wc, ok := p.registry.Get(sess.WorkerID)
+	if !ok {
+		http.Error(w, "Worker not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Proxy the request to the worker VM's port.
+	targetAddr := fmt.Sprintf("%s:%d", wc.Worker.IPAddress, route.RemotePort)
+	p.proxyHTTP(w, r, targetAddr, route, false)
+}
+
+// handleServiceRoute proxies a request to a deployed service, with cold-start
+// wake-on-request support. If the service is idle, it wakes it and waits for
+// readiness before proxying.
+func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request, route *loka.DomainRoute) {
+	if p.svcMgr == nil {
+		http.Error(w, "Service routing not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	ctx := r.Context()
+	svc, err := p.svcMgr.Get(ctx, route.ServiceID)
+	if err != nil {
+		http.Error(w, "Service not found", http.StatusNotFound)
+		return
+	}
+
+	coldStart := false
+
+	switch svc.Status {
+	case loka.ServiceStatusRunning:
+		// Ready to proxy.
+
+	case loka.ServiceStatusIdle:
+		// Cold-start: wake the service and wait.
+		if err := p.wakeAndWait(ctx, route.ServiceID); err != nil {
+			p.logger.Error("cold-start wake failed",
+				"service", route.ServiceID, "error", err)
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, fmt.Sprintf("Service wake failed: %v", err), http.StatusServiceUnavailable)
+			return
+		}
+		coldStart = true
+		// Re-fetch to get updated worker assignment.
+		svc, err = p.svcMgr.Get(ctx, route.ServiceID)
+		if err != nil {
+			http.Error(w, "Service not found after wake", http.StatusServiceUnavailable)
+			return
+		}
+
+	case loka.ServiceStatusWaking:
+		// Another request already triggered a wake; just wait for it.
+		if err := p.wakeAndWait(ctx, route.ServiceID); err != nil {
+			p.logger.Error("waiting for waking service failed",
+				"service", route.ServiceID, "error", err)
+			w.Header().Set("Retry-After", "5")
+			http.Error(w, fmt.Sprintf("Service wake failed: %v", err), http.StatusServiceUnavailable)
+			return
+		}
+		coldStart = true
+		svc, err = p.svcMgr.Get(ctx, route.ServiceID)
+		if err != nil {
+			http.Error(w, "Service not found after wake", http.StatusServiceUnavailable)
+			return
+		}
+
+	default:
+		// deploying, stopped, error -- not routable.
+		w.Header().Set("Retry-After", "10")
+		http.Error(w, fmt.Sprintf("Service is %s", svc.Status), http.StatusServiceUnavailable)
+		return
+	}
+
+	// Find the worker.
+	if svc.WorkerID == "" {
+		http.Error(w, "Service has no assigned worker", http.StatusServiceUnavailable)
+		return
+	}
+	wc, ok := p.registry.Get(svc.WorkerID)
+	if !ok {
+		http.Error(w, "Worker not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Touch the service idle timer asynchronously to avoid adding latency.
+	go func() {
+		touchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := p.svcMgr.Touch(touchCtx, route.ServiceID); err != nil {
+			p.logger.Warn("failed to touch service", "service", route.ServiceID, "error", err)
+		}
+	}()
+
+	// Proxy the request.
+	targetAddr := fmt.Sprintf("%s:%d", wc.Worker.IPAddress, route.RemotePort)
+	p.proxyHTTP(w, r, targetAddr, route, coldStart)
+}
+
+// wakeAndWait wakes a service (if idle) or joins an existing wake, then waits
+// for the service to become ready. It coalesces concurrent wake requests so
+// only one Wake RPC is issued per service.
+func (p *DomainProxy) wakeAndWait(ctx context.Context, serviceID string) error {
+	const wakeTimeout = 30 * time.Second
+
+	p.wakeMu.Lock()
+	ws, exists := p.wakeInFlight[serviceID]
+	if exists {
+		// Another goroutine is already waking this service. Wait for it.
+		p.wakeMu.Unlock()
+		select {
+		case <-ws.done:
+			return ws.err
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(wakeTimeout):
+			return fmt.Errorf("timed out waiting for service wake")
+		}
+	}
+
+	// We are the first: create wake state and trigger wake.
+	ws = &wakeState{done: make(chan struct{})}
+	p.wakeInFlight[serviceID] = ws
+	p.wakeMu.Unlock()
+
+	// Clean up the in-flight entry when we are done.
+	defer func() {
+		close(ws.done)
+		p.wakeMu.Lock()
+		delete(p.wakeInFlight, serviceID)
+		p.wakeMu.Unlock()
+	}()
+
+	// Issue the wake call. Wake is idempotent: if already waking, it returns
+	// the service in waking state; if already running, it returns immediately.
+	wakeCtx, cancel := context.WithTimeout(ctx, wakeTimeout)
+	defer cancel()
+
+	svc, err := p.svcMgr.Get(wakeCtx, serviceID)
+	if err != nil {
+		ws.err = err
+		return err
+	}
+
+	// Only call Wake if the service is actually idle.
+	if svc.Status == loka.ServiceStatusIdle {
+		if _, err := p.svcMgr.Wake(wakeCtx, serviceID); err != nil {
+			ws.err = err
+			return err
+		}
+	}
+
+	// Wait for the service to become ready.
+	_, err = p.svcMgr.WaitForReady(wakeCtx, serviceID)
+	if err != nil {
+		ws.err = fmt.Errorf("service did not become ready: %w", err)
+		return ws.err
+	}
+	return nil
+}
+
+func (p *DomainProxy) proxyHTTP(w http.ResponseWriter, r *http.Request, targetAddr string, route *loka.DomainRoute, coldStart bool) {
 	// Check for WebSocket upgrade.
 	if isWebSocket(r) {
 		p.proxyWebSocket(w, r, targetAddr)
@@ -152,7 +350,12 @@ func (p *DomainProxy) proxyHTTP(w http.ResponseWriter, r *http.Request, targetAd
 	}
 	proxyReq.Header.Set("X-Forwarded-For", r.RemoteAddr)
 	proxyReq.Header.Set("X-Forwarded-Host", r.Host)
-	proxyReq.Header.Set("X-Loka-Session", route.SessionID)
+	if route.SessionID != "" {
+		proxyReq.Header.Set("X-Loka-Session", route.SessionID)
+	}
+	if route.ServiceID != "" {
+		proxyReq.Header.Set("X-Loka-Service", route.ServiceID)
+	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(proxyReq)
@@ -168,6 +371,12 @@ func (p *DomainProxy) proxyHTTP(w http.ResponseWriter, r *http.Request, targetAd
 			w.Header().Add(k, v)
 		}
 	}
+
+	// Add cold-start header if the service was woken for this request.
+	if coldStart {
+		w.Header().Set("X-Loka-Cold-Start", "true")
+	}
+
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
@@ -247,6 +456,7 @@ func (s *Server) registerDomainRoutes(r chi.Router, proxy *DomainProxy) {
 			Subdomain:  req.Subdomain,
 			SessionID:  sessionID,
 			RemotePort: req.RemotePort,
+			Type:       loka.DomainRouteSession,
 		}
 		proxy.AddRoute(route)
 

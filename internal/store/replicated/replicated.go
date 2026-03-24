@@ -112,6 +112,8 @@ func (s *Store) applyLocal(cmd storeCmd) error {
 		return s.applyWorker(ctx, cmd)
 	case "token":
 		return s.applyToken(ctx, cmd)
+	case "service":
+		return s.applyService(ctx, cmd)
 	default:
 		return fmt.Errorf("unknown entity: %s", cmd.Entity)
 	}
@@ -286,11 +288,12 @@ func (s *Store) applyToken(ctx context.Context, cmd storeCmd) error {
 
 // ── store.Store interface ──────────────────────────────
 
-func (s *Store) Sessions() store.SessionRepository    { return &replicatedSessionRepo{s: s} }
-func (s *Store) Executions() store.ExecutionRepository { return &replicatedExecutionRepo{s: s} }
+func (s *Store) Sessions() store.SessionRepository      { return &replicatedSessionRepo{s: s} }
+func (s *Store) Executions() store.ExecutionRepository   { return &replicatedExecutionRepo{s: s} }
 func (s *Store) Checkpoints() store.CheckpointRepository { return &replicatedCheckpointRepo{s: s} }
-func (s *Store) Workers() store.WorkerRepository      { return &replicatedWorkerRepo{s: s} }
-func (s *Store) Tokens() store.TokenRepository        { return &replicatedTokenRepo{s: s} }
+func (s *Store) Workers() store.WorkerRepository         { return &replicatedWorkerRepo{s: s} }
+func (s *Store) Tokens() store.TokenRepository           { return &replicatedTokenRepo{s: s} }
+func (s *Store) Services() store.ServiceRepository       { return &replicatedServiceRepo{s: s} }
 func (s *Store) Migrate(ctx context.Context) error     { return s.local.Migrate(ctx) }
 func (s *Store) Close() error                          { return s.local.Close() }
 
@@ -425,6 +428,57 @@ func (r *replicatedTokenRepo) DeleteExpiredBefore(ctx context.Context, before ti
 		return 0, err
 	}
 	return 0, nil
+}
+
+// ── Service operations ─────────────────────────────────
+
+func (s *Store) applyService(ctx context.Context, cmd storeCmd) error {
+	repo := s.local.Services()
+	switch cmd.Action {
+	case "create":
+		var v loka.Service
+		if err := json.Unmarshal(cmd.Data, &v); err != nil {
+			return err
+		}
+		return repo.Create(ctx, &v)
+	case "update":
+		var v loka.Service
+		if err := json.Unmarshal(cmd.Data, &v); err != nil {
+			return err
+		}
+		return repo.Update(ctx, &v)
+	case "delete":
+		var id string
+		if err := json.Unmarshal(cmd.Data, &id); err != nil {
+			return err
+		}
+		return repo.Delete(ctx, id)
+	default:
+		return fmt.Errorf("unknown service action: %s", cmd.Action)
+	}
+}
+
+// ── Replicated ServiceRepository ───────────────────────
+
+type replicatedServiceRepo struct{ s *Store }
+
+func (r *replicatedServiceRepo) Create(ctx context.Context, svc *loka.Service) error {
+	return r.s.apply(ctx, "service", "create", svc)
+}
+func (r *replicatedServiceRepo) Get(ctx context.Context, id string) (*loka.Service, error) {
+	return r.s.local.Services().Get(ctx, id)
+}
+func (r *replicatedServiceRepo) Update(ctx context.Context, svc *loka.Service) error {
+	return r.s.apply(ctx, "service", "update", svc)
+}
+func (r *replicatedServiceRepo) Delete(ctx context.Context, id string) error {
+	return r.s.apply(ctx, "service", "delete", id)
+}
+func (r *replicatedServiceRepo) List(ctx context.Context, filter store.ServiceFilter) ([]*loka.Service, int, error) {
+	return r.s.local.Services().List(ctx, filter)
+}
+func (r *replicatedServiceRepo) ListByWorker(ctx context.Context, workerID string) ([]*loka.Service, error) {
+	return r.s.local.Services().ListByWorker(ctx, workerID)
 }
 
 var _ store.Store = (*Store)(nil)

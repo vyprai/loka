@@ -1,0 +1,19 @@
+name: static
+version: "1.0"
+description: Static website
+image: nginx:alpine
+port: 80
+build: []
+include:
+  - "*.html"
+  - "*.css"
+  - "*.js"
+  - images/
+  - assets/
+  - fonts/
+start: nginx -g 'daemon off;'
+health:
+  path: /
+  interval: 10
+  timeout: 5
+  retries: 3

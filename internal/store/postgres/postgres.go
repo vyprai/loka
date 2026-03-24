@@ -53,6 +53,7 @@ func (s *Store) Executions() store.ExecutionRepository   { return &executionRepo
 func (s *Store) Checkpoints() store.CheckpointRepository { return &checkpointRepo{db: s.db} }
 func (s *Store) Workers() store.WorkerRepository         { return &workerRepo{db: s.db} }
 func (s *Store) Tokens() store.TokenRepository           { return &tokenRepo{db: s.db} }
+func (s *Store) Services() store.ServiceRepository       { return &serviceRepo{db: s.db} }
 
 var _ store.Store = (*Store)(nil)
 

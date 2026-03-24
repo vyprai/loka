@@ -1,14 +1,26 @@
 package loka
 
-// DomainRoute maps a subdomain to a session port, enabling public HTTP access
-// to services running inside sessions via the control plane's reverse proxy.
+// DomainRouteType distinguishes session routes from service routes.
+type DomainRouteType string
+
+const (
+	// DomainRouteSession routes traffic to a session VM.
+	DomainRouteSession DomainRouteType = "session"
+	// DomainRouteService routes traffic to a deployed service (supports cold-start wake).
+	DomainRouteService DomainRouteType = "service"
+)
+
+// DomainRoute maps a subdomain to a session or service port, enabling public
+// HTTP access via the control plane's reverse proxy.
 // e.g. "my-app.loka.example.com" → session abc123, port 5000
 type DomainRoute struct {
-	ID         string `json:"id,omitempty"`
-	Subdomain  string `json:"subdomain"`            // e.g. "my-app" → my-app.{base_domain}
-	SessionID  string `json:"session_id"`
-	RemotePort int    `json:"remote_port"`           // Port inside the VM
-	CreatedAt  string `json:"created_at,omitempty"`
+	ID         string          `json:"id,omitempty"`
+	Subdomain  string          `json:"subdomain"`            // e.g. "my-app" → my-app.{base_domain}
+	SessionID  string          `json:"session_id,omitempty"`
+	ServiceID  string          `json:"service_id,omitempty"` // For service routes (cold-start wake).
+	RemotePort int             `json:"remote_port"`          // Port inside the VM
+	Type       DomainRouteType `json:"type,omitempty"`       // "session" or "service"
+	CreatedAt  string          `json:"created_at,omitempty"`
 }
 
 // PortMapping maps a local port to a port inside the session VM.

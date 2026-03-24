@@ -30,4 +30,11 @@ api/proto/gen/
 
 # Build
 dist/
-loka.db*
+build/
+loka.db
+loka.db-shm
+loka.db-wal
+
+# Binaries (top-level)
+/loka
+/lokad

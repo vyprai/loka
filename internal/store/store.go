@@ -15,6 +15,7 @@ type Store interface {
 	Checkpoints() CheckpointRepository
 	Workers() WorkerRepository
 	Tokens() TokenRepository
+	Services() ServiceRepository
 	Migrate(ctx context.Context) error
 	Close() error
 }
@@ -85,6 +86,25 @@ type WorkerRepository interface {
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, filter WorkerFilter) ([]*loka.Worker, error)
 	UpdateHeartbeat(ctx context.Context, id string, hb *loka.Heartbeat) error
+}
+
+// ServiceFilter controls service list queries.
+type ServiceFilter struct {
+	Status   *loka.ServiceStatus
+	WorkerID *string
+	Name     *string
+	Limit    int
+	Offset   int
+}
+
+// ServiceRepository manages service persistence.
+type ServiceRepository interface {
+	Create(ctx context.Context, svc *loka.Service) error
+	Get(ctx context.Context, id string) (*loka.Service, error)
+	Update(ctx context.Context, svc *loka.Service) error
+	Delete(ctx context.Context, id string) error
+	List(ctx context.Context, filter ServiceFilter) ([]*loka.Service, int, error)
+	ListByWorker(ctx context.Context, workerID string) ([]*loka.Service, error)
 }
 
 // TokenRepository manages worker registration tokens.

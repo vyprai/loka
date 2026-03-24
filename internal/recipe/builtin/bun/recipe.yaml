@@ -1,0 +1,21 @@
+name: bun
+version: "1.0"
+description: Bun application
+before: [nodejs]
+image: oven/bun:latest
+port: 3000
+build:
+  - bun install
+  - bun run build
+include:
+  - package.json
+  - bun.lockb
+  - node_modules/
+  - dist/
+  - .next/
+start: bun start
+health:
+  path: /
+  interval: 10
+  timeout: 5
+  retries: 3

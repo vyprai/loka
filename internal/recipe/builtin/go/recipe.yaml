@@ -1,0 +1,15 @@
+name: go
+version: "1.0"
+description: Go application
+image: golang:1.23-alpine
+port: 8080
+build:
+  - go build -o app .
+include:
+  - app
+start: ./app
+health:
+  path: /
+  interval: 10
+  timeout: 5
+  retries: 3
