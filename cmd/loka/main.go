@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/vyprai/loka/pkg/lokaapi"
@@ -37,24 +35,8 @@ func resolveServer() (endpoint, tok, caCert string, insecureTLS bool) {
 			}
 		}
 	}
-	// Auto-detect CA cert for local deployments.
-	if caCert == "" && !insecureTLS {
-		home, _ := os.UserHomeDir()
-		for _, p := range []string{
-			"/var/loka/tls/ca.crt",
-			"/tmp/loka-data/artifacts/tls/ca.crt",
-			filepath.Join(home, ".loka", "tls", "ca.crt"),
-		} {
-			if _, err := os.Stat(p); err == nil {
-				caCert = p
-				// If we found auto-TLS CA, upgrade endpoint to https.
-				if strings.HasPrefix(endpoint, "http://localhost") {
-					endpoint = strings.Replace(endpoint, "http://", "https://", 1)
-				}
-				break
-			}
-		}
-	}
+	// TLS is determined by the deployment store metadata (ca_cert, insecure).
+	// No auto-detection — use loka connect or loka deploy to configure TLS.
 	return
 }
 
