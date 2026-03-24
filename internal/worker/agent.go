@@ -475,8 +475,10 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 	return nil
 }
 
-// extractBundle downloads a bundle from the object store, writes it to the
-// overlay workspace directory on the host, and extracts it inside the VM.
+// extractBundle downloads a bundle from the object store and streams it into
+// the VM in chunks to avoid loading the entire bundle into memory at once.
+// Each chunk is base64-encoded and appended to a temp file inside the VM,
+// then extracted. Peak memory usage is ~512KB per chunk instead of the full bundle.
 func (a *Agent) extractBundle(ctx context.Context, vsock *vm.VsockClient, bundleKey, workdir string) error {
 	// BundleKey format: "services/<id>/bundle.tar.gz"
 	// Object store bucket is the first path segment, key is the rest.
@@ -492,26 +494,91 @@ func (a *Agent) extractBundle(ctx context.Context, vsock *vm.VsockClient, bundle
 	}
 	defer reader.Close()
 
-	data, err := io.ReadAll(reader)
+	// Stream to a temp file on the host to avoid holding the entire bundle in memory.
+	tmpFile, err := os.CreateTemp("", "loka-bundle-*.tar.gz")
 	if err != nil {
-		return fmt.Errorf("read bundle: %w", err)
+		return fmt.Errorf("create temp file: %w", err)
 	}
+	defer os.Remove(tmpFile.Name())
+
+	if _, err := io.Copy(tmpFile, reader); err != nil {
+		tmpFile.Close()
+		return fmt.Errorf("save bundle to temp: %w", err)
+	}
+	tmpFile.Close()
 
 	if workdir == "" {
 		workdir = "/workspace"
 	}
 
-	// Write the bundle to a temp path inside the VM via exec, then extract.
-	// First, ensure the workdir exists, then use base64 to safely transfer
-	// the binary data through the exec command and pipe it to tar.
-	encoded := base64Encode(data)
-
+	// Create the workspace directory inside the VM.
 	resp, execErr := vsock.Execute(vm.ExecRequest{
 		Commands: []loka.Command{
 			{
 				ID:      uuid.New().String(),
 				Command: "sh",
-				Args:    []string{"-c", fmt.Sprintf("mkdir -p %s && echo '%s' | base64 -d | tar xzf - -C %s", workdir, encoded, workdir)},
+				Args:    []string{"-c", fmt.Sprintf("mkdir -p %s", workdir)},
+			},
+		},
+	})
+	if execErr != nil {
+		return fmt.Errorf("mkdir in VM: %w", execErr)
+	}
+	if resp.Status != "completed" {
+		return fmt.Errorf("mkdir failed: %s", resp.Error)
+	}
+
+	// Re-open the temp file and stream chunks into the VM.
+	f, err := os.Open(tmpFile.Name())
+	if err != nil {
+		return fmt.Errorf("reopen temp file: %w", err)
+	}
+	defer f.Close()
+
+	// 384KB raw data produces ~512KB base64-encoded output per chunk.
+	buf := make([]byte, 384*1024)
+	first := true
+	for {
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			encoded := base64.StdEncoding.EncodeToString(buf[:n])
+			op := ">>"
+			if first {
+				op = ">"
+				first = false
+			}
+			cmd := fmt.Sprintf("echo '%s' | base64 -d %s /tmp/bundle.tar.gz", encoded, op)
+			chunkResp, chunkErr := vsock.Execute(vm.ExecRequest{
+				Commands: []loka.Command{
+					{
+						ID:      uuid.New().String(),
+						Command: "sh",
+						Args:    []string{"-c", cmd},
+					},
+				},
+			})
+			if chunkErr != nil {
+				return fmt.Errorf("stream chunk to VM: %w", chunkErr)
+			}
+			if chunkResp.Status != "completed" {
+				return fmt.Errorf("chunk transfer failed: %s", chunkResp.Error)
+			}
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("read temp file: %w", readErr)
+		}
+	}
+
+	// Extract the bundle and clean up the temp file inside the VM.
+	resp, execErr = vsock.Execute(vm.ExecRequest{
+		Commands: []loka.Command{
+			{
+				ID:      uuid.New().String(),
+				Command: "sh",
+				Args:    []string{"-c", fmt.Sprintf("tar xzf /tmp/bundle.tar.gz -C %s && rm -f /tmp/bundle.tar.gz", workdir)},
 			},
 		},
 	})
@@ -525,10 +592,6 @@ func (a *Agent) extractBundle(ctx context.Context, vsock *vm.VsockClient, bundle
 	return nil
 }
 
-// base64Encode encodes data to base64 string.
-func base64Encode(data []byte) string {
-	return base64.StdEncoding.EncodeToString(data)
-}
 
 // StartService starts a long-running service process inside the session's VM.
 func (a *Agent) StartService(ctx context.Context, sessionID string, command string, args []string, env map[string]string, workdir, restartPolicy string) error {

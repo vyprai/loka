@@ -157,6 +157,13 @@ CREATE TABLE IF NOT EXISTS services (
 );
 CREATE INDEX IF NOT EXISTS idx_services_worker ON services(worker_id);
 CREATE INDEX IF NOT EXISTS idx_services_status ON services(status);
+CREATE INDEX IF NOT EXISTS idx_services_status_updated ON services(status, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
+CREATE INDEX IF NOT EXISTS idx_sessions_worker ON sessions(worker_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_status_updated ON sessions(status, updated_at);
+
+CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 
 CREATE TABLE IF NOT EXISTS worker_tokens (
 	id         TEXT PRIMARY KEY,

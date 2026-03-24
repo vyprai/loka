@@ -53,6 +53,8 @@ type Manager struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
+	deploySem chan struct{} // semaphore limiting concurrent deploys
+
 	logsFn func(serviceID string, lines int) ([]string, []string, error) // set by localworker
 }
 
@@ -68,6 +70,7 @@ func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler,
 		logger:    logger,
 		ctx:       ctx,
 		cancel:    cancel,
+		deploySem: make(chan struct{}, 10), // max 10 concurrent deploys
 	}
 	m.wg.Add(1)
 	go m.idleMonitor()
@@ -173,6 +176,14 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 
 // asyncDeploy handles image pulling, sending launch command, and health checking.
 func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts DeployOpts) {
+	// Acquire deploy semaphore to limit concurrent deploys.
+	select {
+	case m.deploySem <- struct{}{}:
+		defer func() { <-m.deploySem }()
+	case <-ctx.Done():
+		return
+	}
+
 	svc, err := m.store.Services().Get(ctx, serviceID)
 	if err != nil {
 		m.logger.Error("async deploy: failed to get service", "service", serviceID, "error", err)

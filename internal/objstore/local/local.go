@@ -75,6 +75,8 @@ func (s *Store) GetPresignedURL(_ context.Context, bucket, key string, _ time.Du
 }
 
 func (s *Store) List(_ context.Context, bucket, prefix string) ([]objstore.ObjectInfo, error) {
+	const maxResults = 10000
+
 	dir := filepath.Join(s.root, bucket, prefix)
 	var objects []objstore.ObjectInfo
 
@@ -84,6 +86,9 @@ func (s *Store) List(_ context.Context, bucket, prefix string) ([]objstore.Objec
 		}
 		if info.IsDir() {
 			return nil
+		}
+		if len(objects) >= maxResults {
+			return filepath.SkipAll
 		}
 		rel, _ := filepath.Rel(filepath.Join(s.root, bucket), path)
 		objects = append(objects, objstore.ObjectInfo{
@@ -95,6 +100,9 @@ func (s *Store) List(_ context.Context, bucket, prefix string) ([]objstore.Objec
 	})
 	if err != nil && !os.IsNotExist(err) {
 		return nil, fmt.Errorf("list objects: %w", err)
+	}
+	if len(objects) >= maxResults {
+		fmt.Fprintf(os.Stderr, "warning: objstore local List(%s/%s) truncated at %d results\n", bucket, prefix, maxResults)
 	}
 	return objects, nil
 }

@@ -392,10 +392,11 @@ func (r *replicatedWorkerRepo) List(ctx context.Context, filter store.WorkerFilt
 	return r.s.local.Workers().List(ctx, filter)
 }
 func (r *replicatedWorkerRepo) UpdateHeartbeat(ctx context.Context, id string, hb *loka.Heartbeat) error {
-	return r.s.apply(ctx, "worker", "update_heartbeat", struct {
-		ID string          `json:"id"`
-		HB *loka.Heartbeat `json:"hb"`
-	}{id, hb})
+	// Heartbeats are ephemeral — bypass Raft and write directly to local store.
+	// This avoids ~10 Raft ops/sec at 100 workers with 10s heartbeat intervals.
+	// If a node dies, heartbeats are lost anyway; leader election doesn't depend
+	// on heartbeat state; the worker record itself IS replicated via Create/Update.
+	return r.s.local.Workers().UpdateHeartbeat(ctx, id, hb)
 }
 
 // ── Replicated TokenRepository ─────────────────────────
