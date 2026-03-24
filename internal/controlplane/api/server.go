@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -29,12 +30,14 @@ type Server struct {
 	apiKey           string
 	gc               GCRunner
 	retention        config.RetentionConfig
+	caCertPath       string // Path to CA certificate (served at /ca.crt).
 }
 
 // ServerOpts holds optional configuration for the API server.
 type ServerOpts struct {
-	APIKey    string              // If set, require this key for API access.
-	GC        GCRunner            // Garbage collector (optional).
+	APIKey     string              // If set, require this key for API access.
+	GC         GCRunner            // Garbage collector (optional).
+	CACertPath string              // Path to CA certificate for /ca.crt endpoint.
 	Retention config.RetentionConfig // Retention configuration.
 }
 
@@ -56,6 +59,7 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		apiKey:           o.APIKey,
 		gc:               o.GC,
 		retention:        o.Retention,
+		caCertPath:       o.CACertPath,
 	}
 	srv.routes()
 	srv.registerInternalRoutes()
@@ -65,6 +69,25 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 // Handler returns the http.Handler for this server.
 func (s *Server) Handler() http.Handler {
 	return s.router
+}
+
+// serveCACert serves the auto-generated CA certificate.
+// Clients use this to bootstrap TLS trust:
+//   curl -k https://server:6840/ca.crt -o ca.crt
+//   loka connect https://server:6840 --ca-cert ca.crt
+func (s *Server) serveCACert(w http.ResponseWriter, r *http.Request) {
+	if s.caCertPath == "" {
+		writeError(w, http.StatusNotFound, "no CA certificate configured")
+		return
+	}
+	data, err := os.ReadFile(s.caCertPath)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read CA certificate")
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	w.Header().Set("Content-Disposition", "attachment; filename=ca.crt")
+	w.Write(data)
 }
 
 func (s *Server) routes() {
@@ -79,6 +102,10 @@ func (s *Server) routes() {
 
 	// Prometheus metrics endpoint (no auth).
 	r.Handle("/metrics", promhttp.Handler())
+
+	// CA cert endpoint (no auth) — allows clients to bootstrap TLS trust.
+	// GET /ca.crt returns the auto-generated CA certificate in PEM format.
+	r.Get("/ca.crt", s.serveCACert)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		// Sessions

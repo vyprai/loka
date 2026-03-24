@@ -2,14 +2,22 @@
 # ──────────────────────────────────────────────────────────
 #  LOKA End-to-End Test Suite
 #
-#  Starts a real lokad instance, creates sessions with real
-#  Firecracker VMs, executes commands, and verifies results.
+#  Runs on both macOS (via Lima) and Linux (direct).
+#  On macOS: uses 'loka deploy local' / 'loka deploy down'
+#  On Linux: starts lokad directly with Firecracker + KVM
 #
-#  Requirements: Linux with KVM + Docker, or macOS with Lima
 #  Usage: make e2e-test  (or bash scripts/e2e-test.sh)
 # ──────────────────────────────────────────────────────────
 set -uo pipefail
-# Note: no -e — we handle failures with pass/fail, not exit-on-error
+
+# ── Platform detection ───────────────────────────────────
+
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
+IS_MACOS=false
+IS_LINUX=false
+[ "$OS" = "darwin" ] && IS_MACOS=true
+[ "$OS" = "linux" ] && IS_LINUX=true
 
 # ── Config ───────────────────────────────────────────────
 
@@ -47,12 +55,12 @@ run_in_vm() {
   if [ $# -gt 0 ]; then
     args_json=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@")
   fi
-  local ex=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$sid/exec" \
+  local ex=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$sid/exec" \
     -H 'Content-Type: application/json' \
     -d "{\"command\":\"$cmd\",\"args\":$args_json}")
   local eid=$(echo "$ex" | jf ID)
   for i in $(seq 1 20); do
-    local r=$(curl -s "$ENDPOINT/api/v1/sessions/$sid/exec/$eid")
+    local r=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$sid/exec/$eid")
     local st=$(echo "$r" | jf Status)
     if [ "$st" = "success" ] || [ "$st" = "failed" ]; then
       echo "$r" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null
@@ -63,14 +71,24 @@ run_in_vm() {
   echo ""; return 1
 }
 
+stop_lokad() {
+  if [ "$IS_MACOS" = true ]; then
+    "$LOKA_BIN" deploy down 2>/dev/null || true
+    sleep 2
+  else
+    if [ -n "$LOKAD_PID" ] && kill -0 "$LOKAD_PID" 2>/dev/null; then
+      kill "$LOKAD_PID" 2>/dev/null; wait "$LOKAD_PID" 2>/dev/null || true
+      echo "  lokad stopped (pid $LOKAD_PID)"
+    fi
+  fi
+  LOKAD_PID=""
+}
+
 cleanup() {
   echo ""
   echo -e "${CYAN}==> Cleaning up${NC}"
-  if [ -n "$LOKAD_PID" ] && kill -0 "$LOKAD_PID" 2>/dev/null; then
-    kill "$LOKAD_PID" 2>/dev/null; wait "$LOKAD_PID" 2>/dev/null || true
-    echo "  lokad stopped (pid $LOKAD_PID)"
-  fi
-  rm -rf "$DATA_DIR" "$DB_PATH"
+  stop_lokad
+  [ "$IS_LINUX" = true ] && rm -rf "$DATA_DIR" "$DB_PATH"
   echo ""
   echo -e "${BOLD}Results: ${GREEN}$PASSED passed${NC}, ${RED}$FAILED failed${NC}, $TOTAL total"
   [ "$FAILED" -gt 0 ] && exit 1 || exit 0
@@ -82,18 +100,26 @@ trap cleanup EXIT
 echo ""
 echo -e "${BOLD}  LOKA E2E Test Suite${NC}"
 echo ""
-echo -e "${CYAN}==> Checking binaries${NC}"
+echo -e "${CYAN}==> Building binaries${NC}"
 mkdir -p ./bin
-if [ -f "$LOKA_BIN" ] && [ -f "$LOKAD_BIN" ] && [ -f ./bin/loka-supervisor ]; then
+if command -v go &>/dev/null; then
+  # Build native CLI
+  go build -o "$LOKA_BIN" ./cmd/loka 2>/dev/null
+
+  if [ "$IS_MACOS" = true ]; then
+    # Cross-compile Linux binaries for Lima VM
+    GOOS=linux GOARCH=arm64 go build -o "$LOKAD_BIN" ./cmd/lokad 2>/dev/null
+    GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o ./bin/loka-supervisor ./cmd/loka-supervisor 2>/dev/null
+    echo "  Built: loka (macOS), lokad + supervisor (Linux/arm64)"
+  else
+    go build -o "$LOKAD_BIN" ./cmd/lokad 2>/dev/null
+    CGO_ENABLED=0 go build -ldflags="-s -w" -o ./bin/loka-supervisor ./cmd/loka-supervisor 2>/dev/null
+    echo "  Built: loka, lokad, loka-supervisor"
+  fi
+elif [ -f "$LOKA_BIN" ] && [ -f "$LOKAD_BIN" ] && [ -f ./bin/loka-supervisor ]; then
   echo "  Using pre-built binaries"
-elif command -v go &>/dev/null; then
-  echo "  Building..."
-  go build -o "$LOKA_BIN" ./cmd/loka
-  go build -o "$LOKAD_BIN" ./cmd/lokad
-  CGO_ENABLED=0 go build -ldflags="-s -w" -o ./bin/loka-supervisor ./cmd/loka-supervisor
-  echo "  Built: loka, lokad, loka-supervisor"
 else
-  echo -e "  ${RED}No pre-built binaries and no Go compiler. Build first: make build${NC}"
+  echo -e "  ${RED}No Go compiler and no pre-built binaries. Run: make build${NC}"
   exit 1
 fi
 
@@ -101,43 +127,63 @@ fi
 
 echo ""
 echo -e "${CYAN}==> Checking prerequisites${NC}"
+echo "  Platform: $OS ($ARCH)"
 
 FC_AVAILABLE=false
 DOCKER_AVAILABLE=false
 
-if [ -e /dev/kvm ]; then
-  echo "  KVM: yes"
-  FC_AVAILABLE=true
+if [ "$IS_MACOS" = true ]; then
+  # macOS: check Lima
+  if command -v limactl &>/dev/null; then
+    echo "  Lima: yes"
+    if limactl list -q 2>/dev/null | grep -q "^loka$"; then
+      echo "  Lima VM 'loka': exists"
+      FC_AVAILABLE=true
+      DOCKER_AVAILABLE=true  # Docker is inside Lima
+    else
+      echo -e "  ${YELLOW}Lima VM 'loka' not found. Run: curl -fsSL https://vyprai.github.io/loka/install.sh | bash${NC}"
+    fi
+  else
+    echo -e "  ${YELLOW}Lima not found — install it first${NC}"
+  fi
 else
-  echo -e "  ${YELLOW}KVM: no — Firecracker tests will be skipped${NC}"
+  # Linux: check KVM, Docker, Firecracker directly
+  if [ -e /dev/kvm ]; then
+    echo "  KVM: yes"
+    FC_AVAILABLE=true
+  else
+    echo -e "  ${YELLOW}KVM: no — Firecracker tests will be skipped${NC}"
+  fi
+
+  if command -v docker &>/dev/null && docker info >/dev/null 2>&1; then
+    echo "  Docker: yes"
+    DOCKER_AVAILABLE=true
+  else
+    echo -e "  ${YELLOW}Docker: no — image pull tests will be skipped${NC}"
+  fi
+
+  if [ -f /usr/local/bin/firecracker ]; then
+    echo "  Firecracker: yes"
+  else
+    echo -e "  ${YELLOW}Firecracker: no${NC}"
+    FC_AVAILABLE=false
+  fi
 fi
 
-if command -v docker &>/dev/null && docker info >/dev/null 2>&1; then
-  echo "  Docker: yes"
-  DOCKER_AVAILABLE=true
-else
-  echo -e "  ${YELLOW}Docker: no — image pull tests will be skipped${NC}"
+# ── Prepare rootfs (Linux only) ──────────────────────────
+
+if [ "$IS_LINUX" = true ]; then
+  mkdir -p "$DATA_DIR"/{kernel,rootfs,images}
+
+  # Link kernel
+  for p in /var/loka/kernel/vmlinux /tmp/loka-data/artifacts/kernel/vmlinux; do
+    [ -f "$p" ] && ln -sf "$p" "$DATA_DIR/kernel/vmlinux" && break
+  done
 fi
 
-if [ -f /usr/local/bin/firecracker ]; then
-  echo "  Firecracker: yes"
-else
-  echo -e "  ${YELLOW}Firecracker: no${NC}"
-  FC_AVAILABLE=false
-fi
-
-# ── Prepare rootfs ───────────────────────────────────────
-
-mkdir -p "$DATA_DIR"/{kernel,rootfs,images}
-
-# Link kernel
-for p in /var/loka/kernel/vmlinux /tmp/loka-data/artifacts/kernel/vmlinux; do
-  [ -f "$p" ] && ln -sf "$p" "$DATA_DIR/kernel/vmlinux" && break
-done
-
-# Create or reuse cached rootfs
-CACHED_ROOTFS="/tmp/loka-e2e-rootfs.ext4"
-if [ "$FC_AVAILABLE" = true ]; then
+# Create or reuse cached rootfs (Linux only — macOS uses Lima's rootfs)
+if [ "$IS_LINUX" = true ] && [ "$FC_AVAILABLE" = true ]; then
+  CACHED_ROOTFS="/tmp/loka-e2e-rootfs.ext4"
   if [ -f "$CACHED_ROOTFS" ]; then
     echo ""
     echo -e "${CYAN}==> Using cached rootfs${NC}"
@@ -147,8 +193,6 @@ if [ "$FC_AVAILABLE" = true ]; then
     echo ""
     echo -e "${CYAN}==> Creating rootfs (Alpine minirootfs ~4MB, cached for next run)${NC}"
 
-    # Download Alpine minirootfs directly — no Docker needed
-    ARCH=$(uname -m)
     case "$ARCH" in
       aarch64|arm64) ALPINE_ARCH="aarch64" ;;
       x86_64|amd64) ALPINE_ARCH="x86_64" ;;
@@ -170,7 +214,6 @@ if [ "$FC_AVAILABLE" = true ]; then
     rmdir /tmp/e2e-mnt-$$
     rm -f /tmp/e2e-alpine-$$.tar.gz
 
-    # Cache for next run
     cp "$DATA_DIR/rootfs/rootfs.ext4" "$CACHED_ROOTFS"
     echo "  Rootfs ready + cached at $CACHED_ROOTFS"
   fi
@@ -181,11 +224,49 @@ fi
 echo ""
 echo -e "${CYAN}==> Starting lokad${NC}"
 
-export LOKA_FIRECRACKER_BIN="${LOKA_FIRECRACKER_BIN:-/usr/local/bin/firecracker}"
-export LOKA_KERNEL_PATH="$DATA_DIR/kernel/vmlinux"
-export LOKA_ROOTFS_PATH="$DATA_DIR/rootfs/rootfs.ext4"
+CURL_OPTS="-s"
 
-cat > "$DATA_DIR/config.yaml" << YAML
+if [ "$IS_MACOS" = true ]; then
+  # macOS: use loka deploy local (handles Lima, rootfs, kernel, lokad)
+  stop_lokad
+
+  # Ensure Lima VM is running before copying binaries
+  if ! limactl list 2>/dev/null | grep loka | grep -q Running; then
+    echo "  Starting Lima VM..."
+    limactl start loka 2>&1 | tail -1
+  fi
+
+  # Copy fresh binaries to Lima
+  cp "$LOKAD_BIN" ~/lokad-e2e 2>/dev/null
+  cp ./bin/loka-supervisor ~/supervisor-e2e 2>/dev/null
+  limactl shell loka sudo cp ~/lokad-e2e /usr/local/bin/lokad 2>/dev/null
+  limactl shell loka sudo cp ~/supervisor-e2e /usr/local/bin/loka-supervisor 2>/dev/null
+  rm -f ~/lokad-e2e ~/supervisor-e2e
+  echo "  Binaries updated in Lima"
+
+  "$LOKA_BIN" deploy local
+  if [ $? -ne 0 ]; then
+    fail "loka deploy local" "failed to start"
+    exit 1
+  fi
+
+  # deploy local fetches CA cert from server → ~/.loka/tls/ca.crt
+  ENDPOINT="https://localhost:6840"
+  CA_CERT="$HOME/.loka/tls/ca.crt"
+  if [ -f "$CA_CERT" ]; then
+    CURL_OPTS="-s --cacert $CA_CERT"
+    echo "  CA cert: $CA_CERT"
+  else
+    echo "  Warning: no CA cert, using -sk"
+    CURL_OPTS="-sk"
+  fi
+else
+  # Linux: start lokad directly
+  export LOKA_FIRECRACKER_BIN="${LOKA_FIRECRACKER_BIN:-/usr/local/bin/firecracker}"
+  export LOKA_KERNEL_PATH="$DATA_DIR/kernel/vmlinux"
+  export LOKA_ROOTFS_PATH="$DATA_DIR/rootfs/rootfs.ext4"
+
+  cat > "$DATA_DIR/config.yaml" << YAML
 role: all
 mode: single
 listen_addr: ":6840"
@@ -201,20 +282,23 @@ tls:
   allow_insecure: true
 YAML
 
-"$LOKAD_BIN" --config "$DATA_DIR/config.yaml" > "$DATA_DIR/lokad.log" 2>&1 &
-LOKAD_PID=$!
-echo "  lokad started (pid $LOKAD_PID)"
+  "$LOKAD_BIN" --config "$DATA_DIR/config.yaml" > "$DATA_DIR/lokad.log" 2>&1 &
+  LOKAD_PID=$!
+  echo "  lokad started (pid $LOKAD_PID)"
+fi
 
 # Wait for health
 echo -n "  Waiting..."
 READY=false
-for i in $(seq 1 30); do
-  if curl -s "$ENDPOINT/api/v1/health" 2>/dev/null | grep -q "ok"; then
+WAIT_MAX=30
+[ "$IS_MACOS" = true ] && WAIT_MAX=90  # Lima VM cold boot can take ~60s
+for i in $(seq 1 $WAIT_MAX); do
+  if curl $CURL_OPTS "$ENDPOINT/api/v1/health" 2>/dev/null | grep -q "ok"; then
     READY=true; echo " ready!"; break
   fi
   echo -n "."; sleep 1
 done
-[ "$READY" = false ] && { echo " TIMEOUT"; fail "lokad startup" "health check timeout"; cat "$DATA_DIR/lokad.log" | tail -20; exit 1; }
+[ "$READY" = false ] && { echo " TIMEOUT"; fail "lokad startup" "timeout"; [ -f "$DATA_DIR/lokad.log" ] && tail -20 "$DATA_DIR/lokad.log"; exit 1; }
 
 # ═══════════════════════════════════════════════════════════
 #  TESTS
@@ -225,7 +309,7 @@ done
 echo ""
 echo -e "${CYAN}==> 1. Health${NC}"
 
-HEALTH=$(curl -s "$ENDPOINT/api/v1/health")
+HEALTH=$(curl $CURL_OPTS "$ENDPOINT/api/v1/health")
 echo "$HEALTH" | grep -q '"ok"' && pass "Health endpoint returns ok" || fail "Health" "$HEALTH"
 
 # ── 2. Workers ───────────────────────────────────────────
@@ -239,7 +323,7 @@ if [ "$FC_AVAILABLE" = true ]; then
 
   # Heartbeat: wait 15s, check still ready
   sleep 15
-  WR=$(curl -s "$ENDPOINT/api/v1/health" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workers_ready',0))")
+  WR=$(curl $CURL_OPTS "$ENDPOINT/api/v1/health" | python3 -c "import sys,json; print(json.load(sys.stdin).get('workers_ready',0))")
   [ "$WR" -ge 1 ] && pass "Worker alive after 15s (heartbeat)" || fail "Worker heartbeat" "ready=$WR"
 else
   skip "Worker tests (no KVM)"
@@ -250,15 +334,15 @@ fi
 echo ""
 echo -e "${CYAN}==> 3. Session CRUD${NC}"
 
-CR=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+CR=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
   -d '{"name":"crud-test","mode":"execute"}')
 SID=$(echo "$CR" | jf ID)
 [ -n "$SID" ] && pass "Create session ($SID)" || fail "Create session" "no ID"
 
-GN=$(curl -s "$ENDPOINT/api/v1/sessions/$SID" | jf Name)
+GN=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$SID" | jf Name)
 [ "$GN" = "crud-test" ] && pass "Get session (name=$GN)" || fail "Get session" "name=$GN"
 
-LC=$(curl -s "$ENDPOINT/api/v1/sessions" | jlen sessions)
+LC=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions" | jlen sessions)
 [ "$LC" -ge 1 ] && pass "List sessions ($LC)" || fail "List sessions" "$LC"
 
 # ── 4. Mode transitions ─────────────────────────────────
@@ -267,7 +351,7 @@ echo ""
 echo -e "${CYAN}==> 4. Mode transitions${NC}"
 
 for M in explore ask execute; do
-  GM=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/mode" -H 'Content-Type: application/json' \
+  GM=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$SID/mode" -H 'Content-Type: application/json' \
     -d "{\"mode\":\"$M\"}" | jf Mode)
   [ "$GM" = "$M" ] && pass "Mode → $M" || fail "Mode → $M" "got $GM"
 done
@@ -277,10 +361,10 @@ done
 echo ""
 echo -e "${CYAN}==> 5. Pause / Resume${NC}"
 
-PS=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/pause" | jf Status)
+PS=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$SID/pause" | jf Status)
 [ "$PS" = "paused" ] && pass "Pause" || fail "Pause" "$PS"
 
-RS=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/resume" | jf Status)
+RS=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$SID/resume" | jf Status)
 [ "$RS" = "running" ] && pass "Resume" || fail "Resume" "$RS"
 
 # ── 6. Idle / Auto-wake ─────────────────────────────────
@@ -288,14 +372,14 @@ RS=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/resume" | jf Status)
 echo ""
 echo -e "${CYAN}==> 6. Idle / Auto-wake${NC}"
 
-IS=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/idle" | jf Status)
+IS=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$SID/idle" | jf Status)
 [ "$IS" = "idle" ] && pass "Idle" || fail "Idle" "$IS"
 
 # Exec on idle triggers auto-wake
-curl -s -X POST "$ENDPOINT/api/v1/sessions/$SID/exec" -H 'Content-Type: application/json' \
+curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$SID/exec" -H 'Content-Type: application/json' \
   -d '{"command":"true"}' >/dev/null
 sleep 1
-WS=$(curl -s "$ENDPOINT/api/v1/sessions/$SID" | jf Status)
+WS=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$SID" | jf Status)
 [ "$WS" = "running" ] && pass "Auto-wake on exec" || fail "Auto-wake" "$WS"
 
 # ── 7. Tokens ────────────────────────────────────────────
@@ -303,13 +387,13 @@ WS=$(curl -s "$ENDPOINT/api/v1/sessions/$SID" | jf Status)
 echo ""
 echo -e "${CYAN}==> 7. Worker tokens${NC}"
 
-TK=$(curl -s -X POST "$ENDPOINT/api/v1/worker-tokens" -H 'Content-Type: application/json' \
+TK=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/worker-tokens" -H 'Content-Type: application/json' \
   -d '{"name":"e2e-tok","expires_seconds":3600}')
 TID=$(echo "$TK" | jf ID)
 TV=$(echo "$TK" | jf Token)
 [ -n "$TID" ] && echo "$TV" | grep -q "^loka_" && pass "Create token ($TID)" || fail "Create token" "$TID"
 
-TL=$(curl -s "$ENDPOINT/api/v1/worker-tokens" | jlen tokens)
+TL=$(curl $CURL_OPTS "$ENDPOINT/api/v1/worker-tokens" | jlen tokens)
 [ "$TL" -ge 1 ] && pass "List tokens ($TL)" || fail "List tokens" "$TL"
 
 # ── 8. Admin / Retention ────────────────────────────────
@@ -317,7 +401,7 @@ TL=$(curl -s "$ENDPOINT/api/v1/worker-tokens" | jlen tokens)
 echo ""
 echo -e "${CYAN}==> 8. Admin${NC}"
 
-RT=$(curl -s "$ENDPOINT/api/v1/admin/retention" | python3 -c "import sys,json; print(json.load(sys.stdin).get('SessionTTL',''))" 2>/dev/null)
+RT=$(curl $CURL_OPTS "$ENDPOINT/api/v1/admin/retention" | python3 -c "import sys,json; print(json.load(sys.stdin).get('SessionTTL',''))" 2>/dev/null)
 [ "$RT" = "168h" ] && pass "Retention config (session_ttl=$RT)" || fail "Retention" "$RT"
 
 # ── 9. Destroy / Purge ──────────────────────────────────
@@ -325,16 +409,16 @@ RT=$(curl -s "$ENDPOINT/api/v1/admin/retention" | python3 -c "import sys,json; p
 echo ""
 echo -e "${CYAN}==> 9. Destroy / Purge${NC}"
 
-DC=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$SID")
+DC=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$SID")
 [ "$DC" = "204" ] && pass "Destroy session (HTTP $DC)" || fail "Destroy" "HTTP $DC"
 
-DS=$(curl -s "$ENDPOINT/api/v1/sessions/$SID" | jf Status)
+DS=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$SID" | jf Status)
 [ "$DS" = "terminated" ] && pass "Status=terminated" || fail "Post-destroy status" "$DS"
 
 # Purge test
-PC=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' -d '{"name":"purge-me"}')
+PC=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' -d '{"name":"purge-me"}')
 PSID=$(echo "$PC" | jf ID)
-PRC=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$PSID?purge=true")
+PRC=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$PSID?purge=true")
 [ "$PRC" = "204" ] && pass "Purge session (HTTP $PRC)" || fail "Purge" "HTTP $PRC"
 
 # ── 10. Firecracker exec (real VM) ──────────────────────
@@ -344,7 +428,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   echo -e "${CYAN}==> 10. Firecracker VM exec${NC}"
 
   # Create session without image — uses the pre-built rootfs directly
-  FC=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  FC=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d '{"name":"fc-exec","mode":"execute"}')
   FSID=$(echo "$FC" | jf ID)
   [ -n "$FSID" ] && pass "Create session" || { fail "FC create" "no ID"; }
@@ -352,8 +436,8 @@ if [ "$FC_AVAILABLE" = true ]; then
   if [ -n "$FSID" ]; then
     # Session should be running immediately (no image pull)
     sleep 2
-    FS=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID" | jf Status)
-    FW=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID" | jf WorkerID)
+    FS=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID" | jf Status)
+    FW=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID" | jf WorkerID)
     [ "$FS" = "running" ] && [ -n "$FW" ] && pass "Session running with worker ($FW)" || fail "Session" "status=$FS worker=$FW"
 
       # Wait for VM to fully boot (cold boot takes ~2s)
@@ -361,11 +445,11 @@ if [ "$FC_AVAILABLE" = true ]; then
 
     if [ "$FS" = "running" ] && [ -n "$FW" ]; then
       # echo
-      EX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
+      EX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
         -d '{"command":"echo","args":["e2e-vm-test"]}')
       EID=$(echo "$EX" | jf ID)
       sleep 5
-      ER=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID/exec/$EID")
+      ER=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID/exec/$EID")
       EST=$(echo "$ER" | jf Status)
       EOUT=$(echo "$ER" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
 
@@ -376,33 +460,33 @@ if [ "$FC_AVAILABLE" = true ]; then
       fi
 
       # ls /
-      LX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
+      LX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
         -d '{"command":"ls","args":["/"]}')
       LID=$(echo "$LX" | jf ID)
       sleep 5
-      LR=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID/exec/$LID")
+      LR=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID/exec/$LID")
       LST=$(echo "$LR" | jf Status)
       LOUT=$(echo "$LR" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
 
       [ "$LST" = "success" ] && echo "$LOUT" | grep -q "bin" && pass "ls / in VM" || fail "ls / in VM" "status=$LST"
 
       # uname
-      UX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
+      UX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
         -d '{"command":"uname","args":["-a"]}')
       UID2=$(echo "$UX" | jf ID)
       sleep 5
-      UR=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID/exec/$UID2")
+      UR=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID/exec/$UID2")
       UOUT=$(echo "$UR" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
 
       echo "$UOUT" | grep -q "Linux" && pass "uname in VM → Linux" || fail "uname" "$UOUT"
 
       # write + read file
-      WFX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
+      WFX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
         -d '{"command":"sh","args":["-c","echo hello > /tmp/test.txt && cat /tmp/test.txt"]}')
       WFID=$(echo "$WFX" | jf ID)
       sleep 5
       if [ -n "$WFID" ]; then
-        WFR=$(curl -s "$ENDPOINT/api/v1/sessions/$FSID/exec/$WFID")
+        WFR=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID/exec/$WFID")
         WFOUT=$(echo "$WFR" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
         [ "$WFOUT" = "hello" ] && pass "Write + read file in VM" || fail "Write file" "output='$WFOUT'"
       else
@@ -410,7 +494,7 @@ if [ "$FC_AVAILABLE" = true ]; then
       fi
 
       # Destroy
-      curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$FSID" >/dev/null
+      curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$FSID" >/dev/null
       pass "Destroy Firecracker session"
     fi
   fi
@@ -420,7 +504,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   echo ""
   echo -e "${CYAN}==> 10b. Checkpoints${NC}"
 
-  CP_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  CP_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d '{"name":"cp-test","mode":"execute"}')
   CP_SID=$(echo "$CP_S" | jf ID)
   sleep 5  # Wait for VM boot
@@ -430,13 +514,13 @@ if [ "$FC_AVAILABLE" = true ]; then
     run_in_vm "$CP_SID" "sh" "-c" "echo before > /tmp/cptest.txt"
 
     # Create checkpoint
-    CP_CR=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$CP_SID/checkpoints" \
+    CP_CR=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$CP_SID/checkpoints" \
       -H 'Content-Type: application/json' -d '{"type":"light","label":"before-change"}')
     CPID=$(echo "$CP_CR" | jf ID)
     [ -n "$CPID" ] && pass "Create checkpoint ($CPID)" || fail "Create checkpoint" "no ID"
 
     # List checkpoints
-    CP_LIST=$(curl -s "$ENDPOINT/api/v1/sessions/$CP_SID/checkpoints")
+    CP_LIST=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$CP_SID/checkpoints")
     CP_COUNT=$(echo "$CP_LIST" | jlen checkpoints)
     [ "$CP_COUNT" -ge 1 ] && pass "List checkpoints ($CP_COUNT)" || fail "List checkpoints" "count=$CP_COUNT"
 
@@ -448,7 +532,7 @@ if [ "$FC_AVAILABLE" = true ]; then
     echo "$AFTER" | grep -q "after" && pass "File modified after checkpoint" || fail "File modified" "$AFTER"
 
     # Destroy checkpoint session
-    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$CP_SID" >/dev/null
+    curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$CP_SID" >/dev/null
     pass "Checkpoint session cleaned up"
   fi
 
@@ -458,7 +542,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   echo -e "${CYAN}==> 10c. Access control${NC}"
 
   # Session with blocked commands
-  AC_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  AC_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d '{"name":"ac-test","mode":"execute","blocked_commands":["rm","dd"]}')
   AC_SID=$(echo "$AC_S" | jf ID)
   sleep 5
@@ -469,7 +553,7 @@ if [ "$FC_AVAILABLE" = true ]; then
     echo "$AC_OK" | grep -q "allowed" && pass "Allowed command works" || fail "Allowed cmd" "$AC_OK"
 
     # Blocked command should fail
-    AC_BLK=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$AC_SID/exec" \
+    AC_BLK=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$AC_SID/exec" \
       -H 'Content-Type: application/json' -d '{"command":"rm","args":["-rf","/"]}')
     AC_BLK_ST=$(echo "$AC_BLK" | jf Status)
     if echo "$AC_BLK" | grep -qi "block\|denied\|policy"; then
@@ -483,16 +567,16 @@ if [ "$FC_AVAILABLE" = true ]; then
     fi
 
     # Whitelist management
-    WL_GET=$(curl -s "$ENDPOINT/api/v1/sessions/$AC_SID/whitelist")
+    WL_GET=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$AC_SID/whitelist")
     echo "$WL_GET" | grep -q "blocked_commands" && pass "Get whitelist" || fail "Get whitelist" "$WL_GET"
 
     # Update whitelist — add wget to blocked
-    WL_UP=$(curl -s -X PUT "$ENDPOINT/api/v1/sessions/$AC_SID/whitelist" \
+    WL_UP=$(curl $CURL_OPTS -X PUT "$ENDPOINT/api/v1/sessions/$AC_SID/whitelist" \
       -H 'Content-Type: application/json' \
       -d '{"add":["curl"],"block":["wget"]}')
     echo "$WL_UP" | grep -q "curl\|wget" && pass "Update whitelist" || pass "Update whitelist (accepted)"
 
-    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$AC_SID" >/dev/null
+    curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$AC_SID" >/dev/null
     pass "Access control session cleaned up"
   fi
 
@@ -502,7 +586,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   echo -e "${CYAN}==> 10d. Mode enforcement${NC}"
 
   # Explore mode — commands run, filesystem read-only
-  ME_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  ME_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d '{"name":"mode-test","mode":"explore"}')
   ME_SID=$(echo "$ME_S" | jf ID)
   sleep 5
@@ -513,7 +597,7 @@ if [ "$FC_AVAILABLE" = true ]; then
     echo "$ME_LS" | grep -q "bin" && pass "Explore: read commands work" || fail "Explore read" "$ME_LS"
 
     # Switch to execute mode
-    curl -s -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/mode" \
+    curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/mode" \
       -H 'Content-Type: application/json' -d '{"mode":"execute"}' >/dev/null
 
     # Write should work in execute mode
@@ -521,11 +605,11 @@ if [ "$FC_AVAILABLE" = true ]; then
     echo "$ME_WR" | grep -q "test" && pass "Execute: write works" || fail "Execute write" "$ME_WR"
 
     # Switch to ask mode
-    curl -s -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/mode" \
+    curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/mode" \
       -H 'Content-Type: application/json' -d '{"mode":"ask"}' >/dev/null
 
     # Exec in ask mode should go to pending_approval
-    ASK_EX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/exec" \
+    ASK_EX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/exec" \
       -H 'Content-Type: application/json' -d '{"command":"echo","args":["ask-test"]}')
     ASK_ST=$(echo "$ASK_EX" | jf Status)
     ASK_EID=$(echo "$ASK_EX" | jf ID)
@@ -533,13 +617,13 @@ if [ "$FC_AVAILABLE" = true ]; then
 
     # Approve the command
     if [ "$ASK_ST" = "pending_approval" ] && [ -n "$ASK_EID" ]; then
-      APR=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/exec/$ASK_EID/approve" \
+      APR=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/exec/$ASK_EID/approve" \
         -H 'Content-Type: application/json' -d '{"scope":"once"}')
       APR_ST=$(echo "$APR" | jf Status)
       [ "$APR_ST" = "running" ] || [ "$APR_ST" = "success" ] && pass "Approve execution" || pass "Approve (status=$APR_ST)"
     fi
 
-    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$ME_SID" >/dev/null
+    curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$ME_SID" >/dev/null
     pass "Mode enforcement session cleaned up"
   fi
 
@@ -548,7 +632,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   echo ""
   echo -e "${CYAN}==> 10e. Exec management${NC}"
 
-  EX_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  EX_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d '{"name":"exec-mgmt","mode":"execute"}')
   EX_SID=$(echo "$EX_S" | jf ID)
   sleep 5
@@ -558,34 +642,34 @@ if [ "$FC_AVAILABLE" = true ]; then
     run_in_vm "$EX_SID" "echo" "exec-mgmt" >/dev/null
 
     # List executions
-    EX_LIST=$(curl -s "$ENDPOINT/api/v1/sessions/$EX_SID/exec")
+    EX_LIST=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$EX_SID/exec")
     EX_COUNT=$(echo "$EX_LIST" | jlen executions)
     [ "$EX_COUNT" -ge 1 ] && pass "List executions ($EX_COUNT)" || fail "List executions" "$EX_COUNT"
 
     # Get single execution
     EX_FIRST=$(echo "$EX_LIST" | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('executions',[])[0].get('ID',''))" 2>/dev/null)
     if [ -n "$EX_FIRST" ]; then
-      EX_GET=$(curl -s "$ENDPOINT/api/v1/sessions/$EX_SID/exec/$EX_FIRST" | jf Status)
+      EX_GET=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$EX_SID/exec/$EX_FIRST" | jf Status)
       [ "$EX_GET" = "success" ] && pass "Get execution ($EX_GET)" || pass "Get execution (status=$EX_GET)"
     fi
 
     # Cancel execution (start a long-running one)
-    CX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$EX_SID/exec" -H 'Content-Type: application/json' \
+    CX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$EX_SID/exec" -H 'Content-Type: application/json' \
       -d '{"command":"sleep","args":["60"]}')
     CX_ID=$(echo "$CX" | jf ID)
     sleep 1
-    CX_DEL=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$EX_SID/exec/$CX_ID")
+    CX_DEL=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$EX_SID/exec/$CX_ID")
     [ "$CX_DEL" = "200" ] || [ "$CX_DEL" = "204" ] && pass "Cancel execution (HTTP $CX_DEL)" || pass "Cancel exec (HTTP $CX_DEL)"
 
     # Reject (need ask mode)
-    curl -s -X POST "$ENDPOINT/api/v1/sessions/$EX_SID/mode" -H 'Content-Type: application/json' \
+    curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$EX_SID/mode" -H 'Content-Type: application/json' \
       -d '{"mode":"ask"}' >/dev/null
-    RJ_EX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$EX_SID/exec" -H 'Content-Type: application/json' \
+    RJ_EX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$EX_SID/exec" -H 'Content-Type: application/json' \
       -d '{"command":"echo","args":["reject-me"]}')
     RJ_ID=$(echo "$RJ_EX" | jf ID)
     RJ_ST=$(echo "$RJ_EX" | jf Status)
     if [ "$RJ_ST" = "pending_approval" ] && [ -n "$RJ_ID" ]; then
-      RJ_R=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$EX_SID/exec/$RJ_ID/reject" \
+      RJ_R=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$EX_SID/exec/$RJ_ID/reject" \
         -H 'Content-Type: application/json' -d '{"reason":"e2e test"}')
       RJ_RS=$(echo "$RJ_R" | jf Status)
       [ "$RJ_RS" = "rejected" ] && pass "Reject execution" || pass "Reject (status=$RJ_RS)"
@@ -593,7 +677,7 @@ if [ "$FC_AVAILABLE" = true ]; then
       pass "Reject (skip: not pending_approval)"
     fi
 
-    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$EX_SID" >/dev/null
+    curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$EX_SID" >/dev/null
   fi
 
   # ── 10f. Checkpoints advanced ────────────────────────────
@@ -601,7 +685,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   echo ""
   echo -e "${CYAN}==> 10f. Checkpoints advanced${NC}"
 
-  CA_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  CA_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d '{"name":"cp-adv","mode":"execute"}')
   CA_SID=$(echo "$CA_S" | jf ID)
   sleep 5
@@ -609,31 +693,31 @@ if [ "$FC_AVAILABLE" = true ]; then
   if [ -n "$CA_SID" ]; then
     # Create 2 checkpoints
     run_in_vm "$CA_SID" "sh" "-c" "echo state-a > /tmp/cpfile.txt" >/dev/null
-    CA_CP1=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints" \
+    CA_CP1=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints" \
       -H 'Content-Type: application/json' -d '{"type":"light","label":"state-a"}')
     CA_CP1_ID=$(echo "$CA_CP1" | jf ID)
     pass "Checkpoint A ($CA_CP1_ID)"
 
     run_in_vm "$CA_SID" "sh" "-c" "echo state-b > /tmp/cpfile.txt" >/dev/null
-    CA_CP2=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints" \
+    CA_CP2=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints" \
       -H 'Content-Type: application/json' -d '{"type":"light","label":"state-b"}')
     CA_CP2_ID=$(echo "$CA_CP2" | jf ID)
     pass "Checkpoint B ($CA_CP2_ID)"
 
     # Diff checkpoints
     if [ -n "$CA_CP1_ID" ] && [ -n "$CA_CP2_ID" ]; then
-      CA_DIFF=$(curl -s "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints/diff?a=$CA_CP1_ID&b=$CA_CP2_ID")
-      CA_DIFF_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints/diff?a=$CA_CP1_ID&b=$CA_CP2_ID")
+      CA_DIFF=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints/diff?a=$CA_CP1_ID&b=$CA_CP2_ID")
+      CA_DIFF_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints/diff?a=$CA_CP1_ID&b=$CA_CP2_ID")
       [ "$CA_DIFF_CODE" = "200" ] && pass "Diff checkpoints (HTTP 200)" || fail "Diff checkpoints" "HTTP $CA_DIFF_CODE"
     fi
 
     # Delete checkpoint
     if [ -n "$CA_CP2_ID" ]; then
-      CA_DEL=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints/$CA_CP2_ID")
+      CA_DEL=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$CA_SID/checkpoints/$CA_CP2_ID")
       [ "$CA_DEL" = "204" ] && pass "Delete checkpoint (HTTP $CA_DEL)" || pass "Delete checkpoint (HTTP $CA_DEL)"
     fi
 
-    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$CA_SID" >/dev/null
+    curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$CA_SID" >/dev/null
   fi
 
   # ── 10g. Artifacts ───────────────────────────────────────
@@ -641,7 +725,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   echo ""
   echo -e "${CYAN}==> 10g. Artifacts${NC}"
 
-  AR_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  AR_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d '{"name":"artifact-test","mode":"execute"}')
   AR_SID=$(echo "$AR_S" | jf ID)
   sleep 5
@@ -651,15 +735,15 @@ if [ "$FC_AVAILABLE" = true ]; then
     run_in_vm "$AR_SID" "sh" "-c" "echo artifact-data > /tmp/output.csv" >/dev/null
 
     # List artifacts
-    AR_LIST=$(curl -s "$ENDPOINT/api/v1/sessions/$AR_SID/artifacts")
-    AR_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/sessions/$AR_SID/artifacts")
+    AR_LIST=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$AR_SID/artifacts")
+    AR_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/sessions/$AR_SID/artifacts")
     [ "$AR_CODE" = "200" ] && pass "List artifacts (HTTP 200)" || fail "List artifacts" "HTTP $AR_CODE"
 
     # Download artifact
-    AR_DL=$(curl -s -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/sessions/$AR_SID/artifacts/download?path=/tmp/output.csv")
+    AR_DL=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/sessions/$AR_SID/artifacts/download?path=/tmp/output.csv")
     [ "$AR_DL" = "200" ] && pass "Download artifact (HTTP 200)" || pass "Download artifact (HTTP $AR_DL)"
 
-    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$AR_SID" >/dev/null
+    curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$AR_SID" >/dev/null
   fi
 
   # ── 10h. Images ──────────────────────────────────────────
@@ -669,23 +753,23 @@ if [ "$FC_AVAILABLE" = true ]; then
 
   if [ "$DOCKER_AVAILABLE" = true ]; then
     # Pull image via API
-    IMG_PULL=$(curl -s -X POST "$ENDPOINT/api/v1/images/pull" -H 'Content-Type: application/json' \
+    IMG_PULL=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/images/pull" -H 'Content-Type: application/json' \
       -d '{"reference":"alpine:latest"}')
     IMG_ID=$(echo "$IMG_PULL" | jf ID)
     [ -n "$IMG_ID" ] && pass "Pull image ($IMG_ID)" || pass "Pull image (async)"
 
     # List images
-    IMG_LIST=$(curl -s "$ENDPOINT/api/v1/images")
-    IMG_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/images")
+    IMG_LIST=$(curl $CURL_OPTS "$ENDPOINT/api/v1/images")
+    IMG_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/images")
     [ "$IMG_CODE" = "200" ] && pass "List images (HTTP 200)" || fail "List images" "HTTP $IMG_CODE"
 
     # Get image
     if [ -n "$IMG_ID" ]; then
-      IMG_GET=$(curl -s -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/images/$IMG_ID")
+      IMG_GET=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/images/$IMG_ID")
       [ "$IMG_GET" = "200" ] && pass "Get image (HTTP 200)" || pass "Get image (HTTP $IMG_GET)"
 
       # Delete image
-      IMG_DEL=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/images/$IMG_ID")
+      IMG_DEL=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/images/$IMG_ID")
       [ "$IMG_DEL" = "200" ] || [ "$IMG_DEL" = "204" ] && pass "Delete image (HTTP $IMG_DEL)" || pass "Delete image (HTTP $IMG_DEL)"
     fi
   else
@@ -697,28 +781,28 @@ if [ "$FC_AVAILABLE" = true ]; then
   echo ""
   echo -e "${CYAN}==> 10i. Domain expose${NC}"
 
-  DE_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  DE_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d '{"name":"domain-test","mode":"execute"}')
   DE_SID=$(echo "$DE_S" | jf ID)
 
   if [ -n "$DE_SID" ]; then
     # Expose
-    DE_EX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$DE_SID/expose" \
+    DE_EX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$DE_SID/expose" \
       -H 'Content-Type: application/json' -d '{"subdomain":"e2e-app","remote_port":5000}')
-    DE_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/sessions/$DE_SID/expose" \
+    DE_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/sessions/$DE_SID/expose" \
       -H 'Content-Type: application/json' -d '{"subdomain":"e2e-app2","remote_port":8080}')
     [ "$DE_CODE" = "201" ] && pass "Expose session (HTTP 201)" || pass "Expose session (HTTP $DE_CODE)"
 
     # List domains
-    DE_LIST=$(curl -s "$ENDPOINT/api/v1/domains")
-    DE_LC=$(curl -s -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/domains")
+    DE_LIST=$(curl $CURL_OPTS "$ENDPOINT/api/v1/domains")
+    DE_LC=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/domains")
     [ "$DE_LC" = "200" ] || [ "$DE_LC" = "404" ] && pass "List domains (HTTP $DE_LC)" || fail "List domains" "HTTP $DE_LC"
 
     # Unexpose
-    DE_UN=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$DE_SID/expose/e2e-app2")
+    DE_UN=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$DE_SID/expose/e2e-app2")
     [ "$DE_UN" = "200" ] && pass "Unexpose domain (HTTP 200)" || pass "Unexpose (HTTP $DE_UN)"
 
-    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$DE_SID" >/dev/null
+    curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$DE_SID" >/dev/null
   fi
 
   # ── 10j. Sync mount ─────────────────────────────────────
@@ -726,19 +810,19 @@ if [ "$FC_AVAILABLE" = true ]; then
   echo ""
   echo -e "${CYAN}==> 10j. Sync mount${NC}"
 
-  SY_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+  SY_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d '{"name":"sync-test","mode":"execute","mounts":[{"provider":"local","bucket":"test","mount_path":"/data"}]}')
   SY_SID=$(echo "$SY_S" | jf ID)
 
   if [ -n "$SY_SID" ]; then
-    SY_R=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$SY_SID/sync" \
+    SY_R=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$SY_SID/sync" \
       -H 'Content-Type: application/json' -d '{"mount_path":"/data","direction":"push"}')
-    SY_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/sessions/$SY_SID/sync" \
+    SY_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/sessions/$SY_SID/sync" \
       -H 'Content-Type: application/json' -d '{"mount_path":"/data","direction":"pull"}')
     # May fail because mount doesn't actually exist, but the endpoint should respond
     [ "$SY_CODE" != "000" ] && pass "Sync mount (HTTP $SY_CODE)" || fail "Sync mount" "no response"
 
-    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$SY_SID" >/dev/null
+    curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$SY_SID" >/dev/null
   fi
 
 else
@@ -746,8 +830,9 @@ else
   skip "Firecracker VM exec (no KVM)"
 fi
 
-# ── 11. HA Mode (Raft) ───────────────────────────────────
+# ── 11. HA Mode (Raft) — Linux only ──────────────────────
 
+if [ "$IS_LINUX" = true ]; then
 echo ""
 echo -e "${CYAN}==> 11. HA Mode (Raft)${NC}"
 
@@ -891,22 +976,36 @@ fi
 kill "$HA_PID2" 2>/dev/null; wait "$HA_PID2" 2>/dev/null || true
 rm -rf "$HA_DIR"
 
+else
+  echo ""
+  skip "HA Mode (macOS — requires Linux lokad)"
+fi
+
 # ── 12. CLI Deploy commands ──────────────────────────────
 
 echo ""
 echo -e "${CYAN}==> 12. CLI Deploy commands${NC}"
 
-# Restart single-mode lokad for CLI tests
-"$LOKAD_BIN" --config "$DATA_DIR/config.yaml" > "$DATA_DIR/lokad.log" 2>&1 &
-LOKAD_PID=$!
-sleep 3
+# Restart lokad for CLI tests (HA test may have killed it)
+if [ "$IS_LINUX" = true ]; then
+  if ! curl $CURL_OPTS "$ENDPOINT/api/v1/health" 2>/dev/null | grep -q "ok"; then
+    "$LOKAD_BIN" --config "$DATA_DIR/config.yaml" > "$DATA_DIR/lokad.log" 2>&1 &
+    LOKAD_PID=$!
+    sleep 3
+  fi
+fi
+# macOS: lokad should still be running from deploy local
 
 # All CLI commands explicitly use http (no TLS in test mode)
-CLI_S="--server http://localhost:6840"
+CLI_S="--server $ENDPOINT"
 
-# Connect
-"$LOKA_BIN" connect "http://localhost:6840" --name e2e-server 2>&1 | grep -q "Connected" && \
-  pass "loka connect" || fail "loka connect" "no Connected output"
+# Connect — auto-fetches CA cert from server if HTTPS
+"$LOKA_BIN" connect "$ENDPOINT" --name e2e-server 2>&1 | grep -q "Connected" && \
+  pass "loka connect" || fail "loka connect" "failed"
+
+# After connect, CLI reads from deployment store (has endpoint + ca_cert)
+CLI_S=""
+[ "$IS_LINUX" = true ] && CLI_S="--server $ENDPOINT"
 
 # Current
 CUR=$("$LOKA_BIN" current 2>&1)
@@ -973,7 +1072,7 @@ fi
 
 # ── 14. Multi-worker with Docker SSH containers ─────────
 
-if [ "$DOCKER_AVAILABLE" = true ]; then
+if [ "$DOCKER_AVAILABLE" = true ] && [ "$IS_LINUX" = true ]; then
   echo ""
   echo -e "${CYAN}==> 14. Multi-worker (Docker SSH containers)${NC}"
 
@@ -1137,13 +1236,16 @@ echo ""
 echo -e "${CYAN}==> 15. CLI remaining commands${NC}"
 
 # Restart single-mode if not running
-if ! curl -s "$ENDPOINT/api/v1/health" 2>/dev/null | grep -q "ok"; then
+if ! curl $CURL_OPTS "$ENDPOINT/api/v1/health" 2>/dev/null | grep -q "ok"; then
   "$LOKAD_BIN" --config "$DATA_DIR/config.yaml" > "$DATA_DIR/lokad.log" 2>&1 &
   LOKAD_PID=$!
   sleep 3
 fi
 
-CLI_S="--server http://localhost:6840"
+# On macOS: no --server, read from deployment store (has CA cert).
+# On Linux: explicit --server since no TLS.
+CLI_S=""
+[ "$IS_LINUX" = true ] && CLI_S="--server $ENDPOINT"
 
 # Token revoke
 TK_CR=$("$LOKA_BIN" $CLI_S token create --name revoke-me 2>&1)

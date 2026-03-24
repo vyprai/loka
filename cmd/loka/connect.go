@@ -1,12 +1,52 @@
 package main
 
 import (
+	"crypto/tls"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/vyprai/loka/pkg/lokaapi"
 	"github.com/spf13/cobra"
 )
+
+// fetchCACert downloads the CA certificate from the server's /ca.crt endpoint.
+// Uses InsecureSkipVerify for this one request only (bootstrap trust).
+// Saves to ~/.loka/tls/<host>-ca.crt and returns the path.
+func fetchCACert(endpoint string) (string, error) {
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+	resp, err := client.Get(endpoint + "/ca.crt")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil || len(data) == 0 {
+		return "", fmt.Errorf("empty response")
+	}
+
+	// Save to ~/.loka/tls/
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".loka", "tls")
+	os.MkdirAll(dir, 0o700)
+	path := filepath.Join(dir, "ca.crt")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
 
 func newConnectCmd() *cobra.Command {
 	var (
@@ -33,8 +73,21 @@ Examples:
 				name = endpoint
 			}
 
-			// Build client with TLS options if needed.
 			fmt.Printf("Connecting to %s...\n", endpoint)
+
+			// If HTTPS and no CA cert provided, try to fetch it from the server.
+			if strings.HasPrefix(endpoint, "https://") && caCert == "" && !insecure {
+				fmt.Print("  Fetching CA certificate...")
+				fetchedCert, err := fetchCACert(endpoint)
+				if err == nil && fetchedCert != "" {
+					caCert = fetchedCert
+					fmt.Printf(" saved to %s\n", caCert)
+				} else {
+					fmt.Println(" not available (use --ca-cert or --insecure)")
+				}
+			}
+
+			// Build client with TLS options if needed.
 			var client *lokaapi.Client
 			if caCert != "" || insecure {
 				c, err := lokaapi.NewClientWithTLS(endpoint, token, lokaapi.TLSOptions{

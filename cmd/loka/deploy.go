@@ -166,19 +166,40 @@ func deployLocalMacOS(name string, foreground bool) error {
 		}
 	}
 
-	// Start lokad inside Lima.
 	fmt.Printf("Starting LOKA in Lima VM...\n")
 
-	// Kill any existing lokad first.
+	// Kill any existing lokad.
 	exec.Command(limactl, "shell", "loka", "sudo", "pkill", "-f", "lokad").Run()
+	time.Sleep(2 * time.Second)
+
+	// Ensure rootfs + kernel exist inside the VM.
+	fmt.Print("  Checking rootfs...")
+	exec.Command(limactl, "shell", "loka", "sudo", "bash", "-c", `
+		mkdir -p /tmp/loka-data/artifacts/{rootfs,kernel}
+		[ ! -f /tmp/loka-data/artifacts/kernel/vmlinux ] && [ -f /var/loka/kernel/vmlinux ] && \
+			ln -sf /var/loka/kernel/vmlinux /tmp/loka-data/artifacts/kernel/vmlinux
+		if [ ! -f /tmp/loka-data/artifacts/rootfs/rootfs.ext4 ]; then
+			ARCH=$(uname -m)
+			curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/${ARCH}/alpine-minirootfs-3.20.6-${ARCH}.tar.gz" -o /tmp/alpine.tar.gz 2>/dev/null
+			dd if=/dev/zero of=/tmp/loka-data/artifacts/rootfs/rootfs.ext4 bs=1M count=128 2>/dev/null
+			mkfs.ext4 -F /tmp/loka-data/artifacts/rootfs/rootfs.ext4 >/dev/null 2>&1
+			mkdir -p /tmp/e2e-mnt
+			mount -o loop /tmp/loka-data/artifacts/rootfs/rootfs.ext4 /tmp/e2e-mnt
+			tar xzf /tmp/alpine.tar.gz -C /tmp/e2e-mnt 2>/dev/null
+			mkdir -p /tmp/e2e-mnt/usr/local/bin
+			cp /usr/local/bin/loka-supervisor /tmp/e2e-mnt/usr/local/bin/loka-supervisor 2>/dev/null
+			chmod +x /tmp/e2e-mnt/usr/local/bin/loka-supervisor 2>/dev/null
+			umount /tmp/e2e-mnt; rmdir /tmp/e2e-mnt; rm -f /tmp/alpine.tar.gz
+		fi
+	`).Run()
+	fmt.Println(" ok")
 
 	if foreground {
-		// Save deployment before blocking.
 		store, _ := loadDeployments()
 		store.Add(Deployment{
 			Name: name, Provider: "local", Endpoint: "https://localhost:6840",
 			Workers: 1, Status: "running", CreatedAt: time.Now(),
-			Meta: map[string]string{"runtime": "lima", "insecure": "true"},
+			Meta: map[string]string{"runtime": "lima"},
 		})
 		store.Active = name
 		saveDeployments(store)
@@ -188,44 +209,65 @@ func deployLocalMacOS(name string, foreground bool) error {
 		return p.Run()
 	}
 
-	p := exec.Command(limactl, "shell", "loka", "sudo", "bash", "-c",
-		"nohup lokad > /tmp/lokad.log 2>&1 &")
-	if err := p.Run(); err != nil {
-		return fmt.Errorf("failed to start lokad in Lima: %w", err)
-	}
+	// Clean stale DB and start lokad.
+	exec.Command(limactl, "shell", "loka", "sudo", "bash", "-c",
+		"rm -f /Users/*/loka.db; nohup lokad > /tmp/lokad.log 2>&1 &").Run()
 
-	// Wait for the server to be ready.
+	// Wait for health — check from host (port forwarded by Lima).
 	fmt.Print("  Waiting for server...")
 	ready := false
-	for i := 0; i < 10; i++ {
-		out, _ := exec.Command(limactl, "shell", "loka", "curl", "-sk",
+	for i := 0; i < 60; i++ {
+		// Try both https (auto-TLS) and http
+		out, err := exec.Command("curl", "-sk", "--max-time", "2",
 			"https://localhost:6840/api/v1/health").Output()
-		if len(out) > 0 && strings.Contains(string(out), "ok") {
+		if err == nil && strings.Contains(string(out), "ok") {
+			ready = true
+			break
+		}
+		out, err = exec.Command("curl", "-s", "--max-time", "2",
+			"http://localhost:6840/api/v1/health").Output()
+		if err == nil && strings.Contains(string(out), "ok") {
 			ready = true
 			break
 		}
 		fmt.Print(".")
-		exec.Command("sleep", "1").Run()
+		time.Sleep(1 * time.Second)
 	}
-	if ready {
-		fmt.Println(" ready!")
+	if !ready {
+		fmt.Println(" FAILED")
+		// Show last few lines of log for debugging
+		logOut, _ := exec.Command(limactl, "shell", "loka", "sudo", "tail", "-5", "/tmp/lokad.log").Output()
+		return fmt.Errorf("lokad did not become healthy:\n%s", string(logOut))
+	}
+	fmt.Println(" ready!")
+
+	// Fetch CA cert from the server's /ca.crt endpoint.
+	fmt.Print("  Fetching CA certificate...")
+	caCertLocalPath := ""
+	fetched, err := fetchCACert("https://localhost:6840")
+	if err == nil && fetched != "" {
+		caCertLocalPath = fetched
+		fmt.Printf(" %s\n", caCertLocalPath)
 	} else {
-		fmt.Println(" (may still be starting)")
+		fmt.Println(" not available")
 	}
 
-	// Save deployment — use https since auto-TLS is on, with insecure flag
-	// since the CA cert is inside the VM and not on the host.
+	// Save deployment with CA cert path.
 	store, _ := loadDeployments()
+	meta := map[string]string{"runtime": "lima"}
+	if caCertLocalPath != "" {
+		meta["ca_cert"] = caCertLocalPath
+	}
 	store.Add(Deployment{
 		Name: name, Provider: "local", Endpoint: "https://localhost:6840",
 		Workers: 1, Status: "running", CreatedAt: time.Now(),
-		Meta: map[string]string{"runtime": "lima", "insecure": "true"},
+		Meta: meta,
 	})
 	store.Active = name
 	saveDeployments(store)
 
 	fmt.Printf("LOKA %q started (Lima VM, ports forwarded to localhost)\n", name)
-	fmt.Printf("  Endpoint: http://localhost:6840\n")
+	fmt.Printf("  Endpoint: https://localhost:6840\n")
 	fmt.Printf("  Stop:     loka deploy down\n")
 	return nil
 }
@@ -278,12 +320,11 @@ func newDeployDownCmd() *cobra.Command {
 			if d == nil { return fmt.Errorf("server %q not found", name) }
 			if d.Provider == "local" {
 				if d.Meta != nil && d.Meta["runtime"] == "lima" {
-					// Stop lokad inside Lima, then stop the VM.
+					// Stop lokad inside Lima — keep the VM running for fast restart.
 					limactl, _ := exec.LookPath("limactl")
 					if limactl != "" {
 						exec.Command(limactl, "shell", "loka", "sudo", "pkill", "-f", "lokad").Run()
-						exec.Command(limactl, "stop", "loka").Run()
-						fmt.Printf("LOKA %q stopped (Lima VM stopped)\n", name)
+						fmt.Printf("LOKA %q stopped\n", name)
 					}
 				} else {
 					out, _ := exec.Command("pgrep", "-f", "lokad").Output()
