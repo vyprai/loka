@@ -42,8 +42,19 @@ setup_sudo() {
     return
   fi
 
-  # If install dir is already writable, no sudo needed.
-  if [ -w "$INSTALL_DIR" ] || mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+  # Check if we need sudo: install dir writable AND no existing binaries in protected paths.
+  local needs_sudo=false
+  if ! { [ -w "$INSTALL_DIR" ] || mkdir -p "$INSTALL_DIR" 2>/dev/null; }; then
+    needs_sudo=true
+  fi
+  # Also need sudo if existing binaries are in a non-writable location.
+  for bin in loka lokad loka-worker loka-supervisor; do
+    if [ -f "${INSTALL_DIR}/$bin" ] && [ ! -w "${INSTALL_DIR}/$bin" ]; then
+      needs_sudo=true
+      break
+    fi
+  done
+  if [ "$needs_sudo" = false ]; then
     SUDO=""
     return
   fi
