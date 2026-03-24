@@ -341,33 +341,25 @@ YAML
   fi
 
   echo ""
-  echo -e "${GREEN}${BOLD}  Installation complete!${NC}"
+  echo -e "${GREEN}${BOLD}  LOKA installed successfully!${NC}"
   echo ""
-  echo "  TLS is enabled by default (auto-generated certificates)."
-  echo ""
-  echo "  Quick start:"
-  echo ""
-  echo -e "    ${CYAN}loka deploy local${NC}                           # Start the server"
-  echo -e "    ${CYAN}loka image pull python:3.12-slim${NC}        # Pull an image"
-  echo -e "    ${CYAN}loka session create --image python:3.12-slim${NC}"
-  echo -e "    ${CYAN}loka exec <id> -- python3 -c \"print(42)\"${NC}"
-  echo -e "    ${CYAN}loka deploy down${NC}                            # Stop"
+  echo -e "  Get started:"
+  echo -e "    ${CYAN}loka deploy local${NC}          Start the server"
+  echo -e "    ${CYAN}loka session create${NC}        Create a session"
+  echo -e "    ${CYAN}loka exec <id> -- echo hi${NC}  Run a command"
+  echo -e "    ${CYAN}loka deploy down${NC}           Stop"
   echo ""
 }
 
 # ── macOS install (Lima) ─────────────────────────────────
 
 install_macos() {
-  info "macOS detected — setting up LOKA with Lima"
-  echo ""
-  info "Firecracker requires Linux with KVM."
-  info "Lima creates a lightweight Linux VM on your Mac for this."
-  echo ""
+  info "Installing LOKA for macOS (Lima + Firecracker)"
 
   # Step 1: Install the loka CLI locally (macOS binary).
-  info "Installing loka CLI to ${INSTALL_DIR}"
-  download_binaries
   echo ""
+  info "Installing CLI to ${INSTALL_DIR}"
+  download_binaries
 
   # Shell completion.
   if command -v loka &>/dev/null; then
@@ -382,30 +374,30 @@ install_macos() {
   fi
 
   # Step 2: Install Lima if needed.
+  echo ""
+  info "Setting up Lima VM"
   if ! command -v limactl &>/dev/null; then
-    info "Installing Lima via Homebrew..."
     if command -v brew &>/dev/null; then
-      brew install lima
-      ok "Lima installed"
+      echo -n "  Installing Lima..."
+      brew install lima > /dev/null 2>&1
+      echo " done"
     else
       fail "Homebrew not found. Install Lima manually: https://lima-vm.io"
     fi
   else
-    ok "Lima already installed"
+    ok "Lima installed"
   fi
 
   # Step 3: Create Lima VM.
-  if limactl list -q 2>/dev/null | grep -q "^${LIMA_INSTANCE}$"; then
-    info "Lima instance '${LIMA_INSTANCE}' already exists"
-    if ! limactl list 2>/dev/null | grep "$LIMA_INSTANCE" | grep -q "Running"; then
-      info "Starting Lima instance..."
-      limactl start "$LIMA_INSTANCE"
-    fi
-    ok "Lima instance running"
-  else
-    info "Creating Lima VM '${LIMA_INSTANCE}' (this takes a few minutes)..."
-    echo ""
+  local lima_log="/tmp/lima-install-$$.log"
 
+  if limactl list -q 2>/dev/null | grep -q "^${LIMA_INSTANCE}$"; then
+    if ! limactl list 2>/dev/null | grep "$LIMA_INSTANCE" | grep -q "Running"; then
+      echo -n "  Starting VM..."
+      limactl start "$LIMA_INSTANCE" > "$lima_log" 2>&1 && echo " done" || { echo " failed"; tail -5 "$lima_log"; }
+    fi
+    ok "Lima VM running"
+  else
     # Use custom LOKA image from GitHub releases if available,
     # otherwise fall back to stock Alpine cloud image + provision script.
     local img_base="https://github.com/vyprai/loka/releases/latest/download"
@@ -413,9 +405,6 @@ install_macos() {
 
     if curl -fsSL -o /dev/null -w '%{http_code}' "${img_base}/loka-lima-arm64.iso" 2>/dev/null | grep -q "^200\|^302"; then
       use_custom=true
-      info "Using pre-built LOKA image (~108MB, binaries included)"
-    else
-      info "Using Alpine cloud image (will provision on first boot)"
     fi
 
     local lima_config
@@ -511,27 +500,31 @@ provision:
 LIMAEOF
     fi
 
-    limactl create --name="$LIMA_INSTANCE" --tty=false "$lima_config" 2>&1 | grep -v "Failed to open TUI"
+    echo -n "  Creating VM..."
+    limactl create --name="$LIMA_INSTANCE" --tty=false "$lima_config" > "$lima_log" 2>&1
     rm "$lima_config"
+    echo " done"
 
-    info "Starting Lima VM..."
-    limactl start "$LIMA_INSTANCE"
-    ok "Lima VM ready"
+    echo -n "  Starting VM (this may take a minute)..."
+    if limactl start "$LIMA_INSTANCE" >> "$lima_log" 2>&1; then
+      echo " ready!"
+      ok "Lima VM running"
+    else
+      echo " failed"
+      warn "Check log: $lima_log"
+      tail -10 "$lima_log"
+      fail "Lima VM failed to start"
+    fi
   fi
 
   echo ""
-  echo -e "${GREEN}${BOLD}  Installation complete!${NC}"
+  echo -e "${GREEN}${BOLD}  LOKA installed successfully!${NC}"
   echo ""
-  echo "  LOKA runs inside a Lima VM with KVM support."
-  echo "  Ports 6840 and 6841 are forwarded to localhost."
-  echo ""
-  echo "  Quick start:"
-  echo ""
-  echo -e "    ${CYAN}loka deploy local${NC}                           # Start LOKA (uses Lima automatically)"
-  echo -e "    ${CYAN}loka image pull python:3.12-slim${NC}"
-  echo -e "    ${CYAN}loka session create --image python:3.12-slim${NC}"
-  echo -e "    ${CYAN}loka exec <id> -- python3 -c \"print(42)\"${NC}"
-  echo -e "    ${CYAN}loka deploy down${NC}                            # Stop"
+  echo -e "  Get started:"
+  echo -e "    ${CYAN}loka deploy local${NC}          Start the server"
+  echo -e "    ${CYAN}loka session create${NC}        Create a session"
+  echo -e "    ${CYAN}loka exec <id> -- echo hi${NC}  Run a command"
+  echo -e "    ${CYAN}loka deploy down${NC}           Stop"
   echo ""
 }
 
@@ -553,104 +546,56 @@ uninstall_previous() {
   fi
 
   echo ""
-  info "Existing LOKA installation detected"
+  info "Removing previous installation"
 
-  # Stop running lokad (Linux: direct process, macOS: via CLI or Lima).
+  # Stop running lokad.
   if pgrep -x lokad &>/dev/null; then
-    info "Stopping running lokad..."
-    if command -v loka &>/dev/null; then
-      loka deploy down 2>/dev/null || true
-      sleep 1
-    fi
-    # If still running, kill directly.
-    if pgrep -x lokad &>/dev/null; then
-      $SUDO pkill -x lokad 2>/dev/null || true
-      sleep 1
-    fi
-    ok "lokad stopped"
+    echo -n "  Stopping lokad..."
+    loka deploy down 2>/dev/null || $SUDO pkill -x lokad 2>/dev/null || true
+    sleep 1
+    echo " done"
   fi
 
-  # On macOS: stop Lima VM if running.
+  # On macOS: remove Lima VM.
   if [ "$OS" = "darwin" ] && command -v limactl &>/dev/null; then
-    if limactl list 2>/dev/null | grep "$LIMA_INSTANCE" | grep -q Running; then
-      info "Stopping Lima VM '${LIMA_INSTANCE}'..."
-      limactl stop "$LIMA_INSTANCE" 2>/dev/null || true
-      ok "Lima VM stopped"
-    fi
     if limactl list -q 2>/dev/null | grep -q "^${LIMA_INSTANCE}$"; then
-      info "Removing Lima VM '${LIMA_INSTANCE}'..."
+      echo -n "  Removing Lima VM..."
+      limactl stop "$LIMA_INSTANCE" 2>/dev/null || true
       limactl delete "$LIMA_INSTANCE" --force 2>/dev/null || true
-      ok "Lima VM removed"
+      echo " done"
     fi
   fi
 
   # Remove binaries.
-  info "Removing old binaries..."
   for bin in loka lokad loka-worker loka-supervisor; do
-    if [ -f "${INSTALL_DIR}/$bin" ]; then
-      $SUDO rm -f "${INSTALL_DIR}/$bin"
-      ok "Removed ${INSTALL_DIR}/$bin"
-    fi
+    [ -f "${INSTALL_DIR}/$bin" ] && $SUDO rm -f "${INSTALL_DIR}/$bin"
   done
+  ok "Old binaries removed"
 
-  # Remove Firecracker binary (Linux only).
-  if [ "$OS" = "linux" ] && [ -f "${INSTALL_DIR}/firecracker" ]; then
-    $SUDO rm -f "${INSTALL_DIR}/firecracker"
-    ok "Removed ${INSTALL_DIR}/firecracker"
-  fi
+  # Remove everything else quietly.
+  [ "$OS" = "linux" ] && $SUDO rm -f "${INSTALL_DIR}/firecracker" 2>/dev/null || true
+  [ -d "$DATA_DIR" ] && $SUDO rm -rf "$DATA_DIR" 2>/dev/null || true
+  $SUDO rm -rf /tmp/loka-data 2>/dev/null || true
+  [ "$OS" = "linux" ] && $SUDO rm -rf /etc/loka 2>/dev/null || true
+  rm -rf "$HOME/.loka" 2>/dev/null || true
+  $SUDO rm -f /etc/bash_completion.d/loka /usr/local/share/zsh/site-functions/_loka 2>/dev/null || true
 
-  # Remove data directory.
-  if [ -d "$DATA_DIR" ]; then
-    info "Removing data directory ${DATA_DIR}..."
-    $SUDO rm -rf "$DATA_DIR"
-    ok "Removed ${DATA_DIR}"
-  fi
-
-  # Remove temp data.
-  if [ -d "/tmp/loka-data" ]; then
-    $SUDO rm -rf /tmp/loka-data
-    ok "Removed /tmp/loka-data"
-  fi
-
-  # Remove config (Linux only).
-  if [ "$OS" = "linux" ] && [ -d "/etc/loka" ]; then
-    $SUDO rm -rf /etc/loka
-    ok "Removed /etc/loka"
-  fi
-
-  # Remove client config.
-  if [ -d "$HOME/.loka" ]; then
-    rm -rf "$HOME/.loka"
-    ok "Removed ~/.loka"
-  fi
-
-  # Remove shell completions.
-  $SUDO rm -f /etc/bash_completion.d/loka 2>/dev/null || true
-  $SUDO rm -f /usr/local/share/zsh/site-functions/_loka 2>/dev/null || true
-
-  echo ""
-  ok "Previous installation cleaned up"
+  ok "Clean"
 }
 
 # ── Main ─────────────────────────────────────────────────
 
 main() {
   echo ""
-  echo -e "${BOLD}  LOKA Installer${NC}"
-  echo -e "  Controlled execution environment for AI agents"
-  echo ""
-
-  detect_platform
-  info "Platform: ${PLATFORM}"
+  echo -e "${BOLD}  LOKA Installer${NC} — ${PLATFORM}"
   echo ""
 
   need_cmd curl
   need_cmd tar
 
+  detect_platform
   setup_sudo
-
   uninstall_previous
-  echo ""
 
   case "$OS" in
     linux)  install_linux ;;
