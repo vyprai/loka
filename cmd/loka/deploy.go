@@ -172,24 +172,74 @@ func deployLocalMacOS(name string, foreground bool) error {
 	exec.Command(limactl, "shell", "loka", "sudo", "pkill", "-f", "lokad").Run()
 	time.Sleep(2 * time.Second)
 
+	// Ensure LOKA binaries exist inside the Lima VM.
+	// The ISO overlay has them at first boot, but they don't persist on disk.
+	// Cross-compile from source if Go is available, otherwise download from GitHub.
+	fmt.Print("  Syncing binaries...")
+	exec.Command(limactl, "shell", "loka", "sudo", "sh", "-c", `
+		# Check if lokad already works.
+		if lokad --help >/dev/null 2>&1; then exit 0; fi
+
+		# Try to copy from ISO overlay location.
+		for bin in lokad loka-worker loka-supervisor firecracker; do
+			[ -f /usr/share/loka/$bin ] && cp /usr/share/loka/$bin /usr/local/bin/$bin && chmod +x /usr/local/bin/$bin
+		done
+		if lokad --help >/dev/null 2>&1; then exit 0; fi
+
+		# Download from GitHub releases as last resort.
+		ARCH=$(uname -m)
+		case "$ARCH" in aarch64) GOARCH=arm64;; x86_64) GOARCH=amd64;; esac
+		cd /tmp
+		curl -fsSL "https://github.com/vyprai/loka/releases/latest/download/loka-linux-${GOARCH}.tar.gz" -o loka.tar.gz 2>/dev/null
+		tar xzf loka.tar.gz 2>/dev/null
+		for bin in lokad loka-worker loka-supervisor; do
+			[ -f "$bin" ] && mv "$bin" /usr/local/bin/$bin && chmod +x /usr/local/bin/$bin
+		done
+		rm -f loka.tar.gz loka
+
+		# Firecracker.
+		if ! command -v firecracker >/dev/null 2>&1; then
+			curl -fsSL "https://github.com/firecracker-microvm/firecracker/releases/download/v1.10.1/firecracker-v1.10.1-${ARCH}.tgz" 2>/dev/null | tar -xzf - -C /tmp
+			cp "/tmp/release-v1.10.1-${ARCH}/firecracker-v1.10.1-${ARCH}" /usr/local/bin/firecracker
+			chmod +x /usr/local/bin/firecracker
+			rm -rf /tmp/release-v1.10.1-*
+		fi
+	`).Run()
+	fmt.Println(" ok")
+
 	// Ensure rootfs + kernel exist inside the VM.
 	fmt.Print("  Checking rootfs...")
-	exec.Command(limactl, "shell", "loka", "sudo", "bash", "-c", `
-		mkdir -p /tmp/loka-data/artifacts/{rootfs,kernel}
-		[ ! -f /tmp/loka-data/artifacts/kernel/vmlinux ] && [ -f /var/loka/kernel/vmlinux ] && \
-			ln -sf /var/loka/kernel/vmlinux /tmp/loka-data/artifacts/kernel/vmlinux
-		if [ ! -f /tmp/loka-data/artifacts/rootfs/rootfs.ext4 ]; then
-			ARCH=$(uname -m)
-			curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/${ARCH}/alpine-minirootfs-3.20.6-${ARCH}.tar.gz" -o /tmp/alpine.tar.gz 2>/dev/null
-			dd if=/dev/zero of=/tmp/loka-data/artifacts/rootfs/rootfs.ext4 bs=1M count=128 2>/dev/null
-			mkfs.ext4 -F /tmp/loka-data/artifacts/rootfs/rootfs.ext4 >/dev/null 2>&1
-			mkdir -p /tmp/e2e-mnt
-			mount -o loop /tmp/loka-data/artifacts/rootfs/rootfs.ext4 /tmp/e2e-mnt
-			tar xzf /tmp/alpine.tar.gz -C /tmp/e2e-mnt 2>/dev/null
-			mkdir -p /tmp/e2e-mnt/usr/local/bin
-			cp /usr/local/bin/loka-supervisor /tmp/e2e-mnt/usr/local/bin/loka-supervisor 2>/dev/null
-			chmod +x /tmp/e2e-mnt/usr/local/bin/loka-supervisor 2>/dev/null
-			umount /tmp/e2e-mnt; rmdir /tmp/e2e-mnt; rm -f /tmp/alpine.tar.gz
+	exec.Command(limactl, "shell", "loka", "sudo", "sh", "-c", `
+		mkdir -p /tmp/loka-data/kernel /tmp/loka-data/rootfs /tmp/loka-data/objstore /var/loka/kernel
+
+		# Kernel: check pre-installed (ISO) or existing, else download.
+		if [ ! -f /tmp/loka-data/kernel/vmlinux ]; then
+			if [ -f /usr/share/loka/vmlinux ]; then
+				cp /usr/share/loka/vmlinux /var/loka/kernel/vmlinux
+			elif [ ! -f /var/loka/kernel/vmlinux ]; then
+				ARCH=$(uname -m)
+				curl -fsSL "https://s3.amazonaws.com/spec.ccfc.min/ci-artifacts/kernels/${ARCH}/vmlinux-5.10.bin" -o /var/loka/kernel/vmlinux 2>/dev/null
+			fi
+			ln -sf /var/loka/kernel/vmlinux /tmp/loka-data/kernel/vmlinux
+		fi
+
+		# Rootfs: check pre-installed (ISO) or existing, else build from minirootfs.
+		if [ ! -f /tmp/loka-data/rootfs/rootfs.ext4 ]; then
+			if [ -f /usr/share/loka/rootfs.ext4 ]; then
+				cp /usr/share/loka/rootfs.ext4 /tmp/loka-data/rootfs/rootfs.ext4
+			else
+				ARCH=$(uname -m)
+				curl -fsSL "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/${ARCH}/alpine-minirootfs-3.21.3-${ARCH}.tar.gz" -o /tmp/alpine.tar.gz 2>/dev/null
+				dd if=/dev/zero of=/tmp/loka-data/rootfs/rootfs.ext4 bs=1M count=128 2>/dev/null
+				mkfs.ext4 -F /tmp/loka-data/rootfs/rootfs.ext4 >/dev/null 2>&1
+				mkdir -p /tmp/mnt-rootfs
+				mount -o loop /tmp/loka-data/rootfs/rootfs.ext4 /tmp/mnt-rootfs
+				tar xzf /tmp/alpine.tar.gz -C /tmp/mnt-rootfs 2>/dev/null
+				mkdir -p /tmp/mnt-rootfs/usr/local/bin
+				cp /usr/local/bin/loka-supervisor /tmp/mnt-rootfs/usr/local/bin/loka-supervisor 2>/dev/null
+				chmod +x /tmp/mnt-rootfs/usr/local/bin/loka-supervisor 2>/dev/null
+				umount /tmp/mnt-rootfs; rmdir /tmp/mnt-rootfs; rm -f /tmp/alpine.tar.gz
+			fi
 		fi
 	`).Run()
 	fmt.Println(" ok")

@@ -586,6 +586,8 @@ uninstall_previous() {
 # ── Main ─────────────────────────────────────────────────
 
 main() {
+  detect_platform
+
   echo ""
   echo -e "${BOLD}  LOKA Installer${NC} — ${PLATFORM}"
   echo ""
@@ -593,7 +595,6 @@ main() {
   need_cmd curl
   need_cmd tar
 
-  detect_platform
   setup_sudo
   uninstall_previous
 
