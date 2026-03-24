@@ -36,6 +36,12 @@ func New(dsn string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("enable foreign keys: %w", err)
 	}
+	// Enable incremental auto-vacuum so that SQLite reclaims free pages
+	// automatically without the cost/lock of a full VACUUM.
+	if _, err := db.Exec("PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("set auto_vacuum: %w", err)
+	}
 	return &Store{db: db}, nil
 }
 
@@ -45,6 +51,12 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	return nil
+}
+
+// DB returns the underlying sql.DB for operations that need direct access
+// (e.g., running PRAGMA optimize after GC sweeps).
+func (s *Store) DB() *sql.DB {
+	return s.db
 }
 
 func (s *Store) Close() error {

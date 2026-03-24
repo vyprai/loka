@@ -184,3 +184,18 @@ func (g *ApprovalGate) PendingCount() int {
 	defer g.mu.Unlock()
 	return len(g.pending)
 }
+
+// Cleanup removes stale entries that have been pending longer than the
+// maximum approval timeout. This prevents goroutine leaks if the Suspend
+// goroutine exits abnormally without cleaning up.
+func (g *ApprovalGate) Cleanup() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for id, pa := range g.pending {
+		if time.Since(pa.Created) > maxApprovalTimeout {
+			delete(g.pending, id)
+			// Close the result channel to unblock any lingering waiters.
+			close(pa.resultCh)
+		}
+	}
+}

@@ -14,10 +14,14 @@ type GCRunner interface {
 	LastResult() any
 }
 
+// RaftStatusFn is a function that returns Raft cluster status for debugging.
+type RaftStatusFn func() map[string]interface{}
+
 func (s *Server) registerAdminRoutes(r chi.Router) {
 	r.Post("/admin/gc", s.triggerGC)
 	r.Get("/admin/gc/status", s.gcStatus)
 	r.Get("/admin/retention", s.retentionConfig)
+	r.Get("/debug/raft", s.getRaftStatus)
 }
 
 func (s *Server) triggerGC(w http.ResponseWriter, r *http.Request) {
@@ -54,4 +58,17 @@ func (s *Server) SetGC(gc GCRunner) {
 // SetRetention sets the retention config on the server.
 func (s *Server) SetRetention(rc config.RetentionConfig) {
 	s.retention = rc
+}
+
+// SetRaftStatusFn sets the function that returns Raft cluster status.
+func (s *Server) SetRaftStatusFn(fn RaftStatusFn) {
+	s.raftStatusFn = fn
+}
+
+func (s *Server) getRaftStatus(w http.ResponseWriter, r *http.Request) {
+	if s.raftStatusFn == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "not using raft coordinator"})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.raftStatusFn())
 }

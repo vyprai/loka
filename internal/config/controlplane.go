@@ -1,5 +1,10 @@
 package config
 
+import (
+	"fmt"
+	"log"
+)
+
 // ControlPlaneConfig is the configuration for the lokad control plane.
 type ControlPlaneConfig struct {
 	Role        string            `yaml:"role"`        // "all" (CP + embedded worker) or "controlplane" (CP only)
@@ -85,6 +90,22 @@ type TLSConfig struct {
 	AutoTLS       *bool    `yaml:"auto"`
 	AllowInsecure bool     `yaml:"allow_insecure"`
 	SANs          []string `yaml:"sans"`
+}
+
+// Validate checks the configuration for invalid or inconsistent settings.
+func (c *ControlPlaneConfig) Validate() error {
+	if c.Mode == "ha" {
+		if c.Coordinator.Type != "raft" {
+			return fmt.Errorf("HA mode requires coordinator type 'raft', got %q", c.Coordinator.Type)
+		}
+		if c.Coordinator.NodeID == "" {
+			return fmt.Errorf("HA mode requires explicit node_id")
+		}
+		if c.Coordinator.Bootstrap && len(c.Coordinator.Peers) > 0 {
+			log.Println("WARNING: bootstrap=true with peers set — ensure only one node bootstraps")
+		}
+	}
+	return nil
 }
 
 // Defaults fills in default values for unset fields.

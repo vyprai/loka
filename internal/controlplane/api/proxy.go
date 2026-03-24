@@ -215,14 +215,15 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 
 	case loka.ServiceStatusIdle:
 		// Cold-start: wake the service and wait.
-		if err := p.wakeAndWait(ctx, route.ServiceID); err != nil {
+		triggered, wakeErr := p.wakeAndWait(ctx, route.ServiceID)
+		if wakeErr != nil {
 			p.logger.Error("cold-start wake failed",
-				"service", route.ServiceID, "error", err)
+				"service", route.ServiceID, "error", wakeErr)
 			w.Header().Set("Retry-After", "5")
-			http.Error(w, fmt.Sprintf("Service wake failed: %v", err), http.StatusServiceUnavailable)
+			http.Error(w, fmt.Sprintf("Service wake failed: %v", wakeErr), http.StatusServiceUnavailable)
 			return
 		}
-		coldStart = true
+		coldStart = triggered
 		// Re-fetch to get updated worker assignment.
 		svc, err = p.svcMgr.Get(ctx, route.ServiceID)
 		if err != nil {
@@ -232,14 +233,15 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 
 	case loka.ServiceStatusWaking:
 		// Another request already triggered a wake; just wait for it.
-		if err := p.wakeAndWait(ctx, route.ServiceID); err != nil {
+		triggered, wakeErr := p.wakeAndWait(ctx, route.ServiceID)
+		if wakeErr != nil {
 			p.logger.Error("waiting for waking service failed",
-				"service", route.ServiceID, "error", err)
+				"service", route.ServiceID, "error", wakeErr)
 			w.Header().Set("Retry-After", "5")
-			http.Error(w, fmt.Sprintf("Service wake failed: %v", err), http.StatusServiceUnavailable)
+			http.Error(w, fmt.Sprintf("Service wake failed: %v", wakeErr), http.StatusServiceUnavailable)
 			return
 		}
-		coldStart = true
+		coldStart = triggered
 		svc, err = p.svcMgr.Get(ctx, route.ServiceID)
 		if err != nil {
 			http.Error(w, "Service not found after wake", http.StatusServiceUnavailable)
@@ -264,14 +266,11 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Touch the service idle timer asynchronously to avoid adding latency.
-	go func() {
-		touchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := p.svcMgr.Touch(touchCtx, route.ServiceID); err != nil {
-			p.logger.Warn("failed to touch service", "service", route.ServiceID, "error", err)
-		}
-	}()
+	// Touch the service idle timer BEFORE proxying so that in-flight requests
+	// keep the service active and the idle monitor sees recent activity.
+	if err := p.svcMgr.Touch(ctx, route.ServiceID); err != nil {
+		p.logger.Warn("failed to touch service", "service", route.ServiceID, "error", err)
+	}
 
 	// Proxy the request.
 	targetAddr := fmt.Sprintf("%s:%d", wc.Worker.IPAddress, route.RemotePort)
@@ -280,8 +279,9 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 
 // wakeAndWait wakes a service (if idle) or joins an existing wake, then waits
 // for the service to become ready. It coalesces concurrent wake requests so
-// only one Wake RPC is issued per service.
-func (p *DomainProxy) wakeAndWait(ctx context.Context, serviceID string) error {
+// only one Wake RPC is issued per service. Returns triggered=true only for
+// the goroutine that actually initiated the wake call.
+func (p *DomainProxy) wakeAndWait(ctx context.Context, serviceID string) (triggered bool, err error) {
 	const wakeTimeout = 30 * time.Second
 
 	p.wakeMu.Lock()
@@ -291,11 +291,11 @@ func (p *DomainProxy) wakeAndWait(ctx context.Context, serviceID string) error {
 		p.wakeMu.Unlock()
 		select {
 		case <-ws.done:
-			return ws.err
+			return false, ws.err
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		case <-time.After(wakeTimeout):
-			return fmt.Errorf("timed out waiting for service wake")
+			return false, fmt.Errorf("timed out waiting for service wake")
 		}
 	}
 
@@ -320,14 +320,14 @@ func (p *DomainProxy) wakeAndWait(ctx context.Context, serviceID string) error {
 	svc, err := p.svcMgr.Get(wakeCtx, serviceID)
 	if err != nil {
 		ws.err = err
-		return err
+		return true, err
 	}
 
 	// Only call Wake if the service is actually idle.
 	if svc.Status == loka.ServiceStatusIdle {
 		if _, err := p.svcMgr.Wake(wakeCtx, serviceID); err != nil {
 			ws.err = err
-			return err
+			return true, err
 		}
 	}
 
@@ -335,9 +335,9 @@ func (p *DomainProxy) wakeAndWait(ctx context.Context, serviceID string) error {
 	_, err = p.svcMgr.WaitForReady(wakeCtx, serviceID)
 	if err != nil {
 		ws.err = fmt.Errorf("service did not become ready: %w", err)
-		return ws.err
+		return true, ws.err
 	}
-	return nil
+	return true, nil
 }
 
 func (p *DomainProxy) proxyHTTP(w http.ResponseWriter, r *http.Request, targetAddr string, route *loka.DomainRoute, coldStart bool) {
@@ -394,15 +394,7 @@ func (p *DomainProxy) proxyHTTP(w http.ResponseWriter, r *http.Request, targetAd
 }
 
 func (p *DomainProxy) proxyWebSocket(w http.ResponseWriter, r *http.Request, targetAddr string) {
-	// Dial the backend.
-	backendConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
-	if err != nil {
-		http.Error(w, "Backend unreachable", http.StatusBadGateway)
-		return
-	}
-	defer backendConn.Close()
-
-	// Hijack the client connection.
+	// Hijack the client connection first, then dial backend.
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "WebSocket not supported", http.StatusInternalServerError)
@@ -414,6 +406,15 @@ func (p *DomainProxy) proxyWebSocket(w http.ResponseWriter, r *http.Request, tar
 		return
 	}
 	defer clientConn.Close()
+
+	// Dial the backend. If it fails, write an HTTP error to the raw connection.
+	backendConn, err := net.DialTimeout("tcp", targetAddr, 10*time.Second)
+	if err != nil {
+		clientConn.Write([]byte("HTTP/1.1 502 Bad Gateway\r\n\r\n"))
+		clientConn.Close()
+		return
+	}
+	defer backendConn.Close()
 
 	// Set read deadlines on both connections to prevent indefinite blocking.
 	const wsIdleTimeout = 30 * time.Minute

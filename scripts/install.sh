@@ -66,7 +66,8 @@ setup_sudo() {
     fi
     SUDO="sudo"
     # Keep sudo alive for the duration of the script.
-    (while true; do sudo -n true 2>/dev/null; sleep 50; done) &
+    # Re-prompt if sudo credential cache expires.
+    (while true; do sudo -n true 2>/dev/null || sudo -v; sleep 50; done) &
     SUDO_KEEPALIVE_PID=$!
     trap 'kill $SUDO_KEEPALIVE_PID 2>/dev/null; wait $SUDO_KEEPALIVE_PID 2>/dev/null' EXIT
   else

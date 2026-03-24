@@ -311,6 +311,36 @@ func (c *RaftCoordinator) RegisterHandler(op string, fn func(data []byte) interf
 	c.fsm.handlersMu.Unlock()
 }
 
+// Status returns a snapshot of the Raft cluster state for debugging.
+func (c *RaftCoordinator) Status() map[string]interface{} {
+	leaderAddr, leaderID := c.raft.LeaderWithID()
+	stats := c.raft.Stats()
+
+	peers := make([]map[string]string, 0)
+	cfgFuture := c.raft.GetConfiguration()
+	if cfgFuture.Error() == nil {
+		for _, srv := range cfgFuture.Configuration().Servers {
+			peers = append(peers, map[string]string{
+				"id":      string(srv.ID),
+				"address": string(srv.Address),
+				"suffrage": srv.Suffrage.String(),
+			})
+		}
+	}
+
+	return map[string]interface{}{
+		"state":           c.raft.State().String(),
+		"leader_id":       string(leaderID),
+		"leader_addr":     string(leaderAddr),
+		"term":            stats["term"],
+		"last_log_index":  stats["last_log_index"],
+		"commit_index":    stats["commit_index"],
+		"applied_index":   stats["applied_index"],
+		"num_peers":       stats["num_peers"],
+		"peers":           peers,
+	}
+}
+
 // Close shuts down the Raft node.
 func (c *RaftCoordinator) Close() error {
 	f := c.raft.Shutdown()

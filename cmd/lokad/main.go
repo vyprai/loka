@@ -95,6 +95,12 @@ func main() {
 	}
 	cfg.Defaults()
 
+	// Validate configuration.
+	if err := cfg.Validate(); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid config: %v\n", err)
+		os.Exit(1)
+	}
+
 	// Configure logging.
 	logLevel := slog.LevelInfo
 	switch cfg.Logging.Level {
@@ -141,24 +147,8 @@ func main() {
 	// wrapped after coordinator init to enable Raft-based replication.
 	// See "HA replication" section below.
 
-	// Initialize coordinator via factory.
-	coordinator, err := ha.Open(ha.Config{
-		Type:      cfg.Coordinator.Type,
-		Address:   cfg.Coordinator.Address,
-		NodeID:    cfg.Coordinator.NodeID,
-		DataDir:   cfg.Coordinator.DataDir,
-		Bootstrap: cfg.Coordinator.Bootstrap,
-		Peers:     cfg.Coordinator.Peers,
-	})
-	if err != nil {
-		logger.Error("failed to create coordinator", "type", cfg.Coordinator.Type, "error", err)
-		os.Exit(1)
-	}
-	defer coordinator.Close()
-
-	logger.Info("coordinator ready", "type", cfg.Coordinator.Type)
-
-	// Initialize object store.
+	// Initialize object store (before TLS and coordinator, since TLS may load
+	// certs from objstore, and coordinator may need TLS config at creation).
 	var objStore objstore.ObjectStore
 	switch cfg.ObjectStore.Type {
 	case "local":
@@ -201,115 +191,9 @@ func main() {
 	}
 	logger.Info("object store ready", "type", cfg.ObjectStore.Type)
 
-	// ── HA replication ──────────────────────────────────────
-	// In HA mode, wrap the store and object store for cross-node sync.
-	if cfg.Mode == "ha" {
-		// Replicate SQLite writes through Raft consensus.
-		if cfg.Database.Driver == "sqlite" {
-			db = replicatedstore.New(db, coordinator, logger)
-			logger.Info("HA SQLite replication enabled")
-		}
-
-		// Forward objstore writes to the leader.
-		scheme := "https"
-		if cfg.TLS.AutoTLS != nil && !*cfg.TLS.AutoTLS && cfg.TLS.CertFile == "" {
-			scheme = "http"
-		}
-		apiPort := cfg.ListenAddr
-		if len(apiPort) > 0 && apiPort[0] == ':' {
-			apiPort = apiPort[1:]
-		}
-		objStore = leaderobjstore.New(leaderobjstore.Config{
-			Local:   objStore,
-			Leader:  coordinator,
-			Name:    "control-plane",
-			Scheme:  scheme,
-			APIPort: apiPort,
-			Token:   cfg.Auth.APIKey,
-		})
-		logger.Info("HA object store proxy enabled")
-	}
-
-	// Initialize provider registry.
-	providerRegistry := provider.NewRegistry()
-	providerRegistry.Register(provlocal.New())
-	providerRegistry.Register(provsm.New(db))
-	providerRegistry.Register(provaws.New(provaws.Config{}, logger))
-	providerRegistry.Register(provgcp.New(provgcp.Config{}, logger))
-	providerRegistry.Register(provazure.New(provazure.Config{}, logger))
-	providerRegistry.Register(provovh.New(provovh.Config{}, logger))
-	providerRegistry.Register(provdo.New(provdo.Config{}, logger))
-	logger.Info("providers registered", "count", len(providerRegistry.List()))
-
-	// Initialize image manager (Docker images → Firecracker rootfs).
-	imgMgr := image.NewManager(objStore, cfg.DataDir, logger)
-
-	// Initialize worker registry.
-	registry := worker.NewRegistry(db, logger)
-
-	// Initialize scheduler.
-	sched := scheduler.New(registry, scheduler.Strategy(cfg.Scheduler.Strategy))
-
-	// Initialize session manager.
-	sm := session.NewManager(db, registry, sched, imgMgr, objStore, logger)
-
-	// Initialize service manager.
-	svcMgr := service.NewManager(db, registry, sched, imgMgr, objStore, logger)
-
-	// Initialize drainer with migration callback.
-	drainer := worker.NewDrainer(registry, db, sm.MigrateSession, logger)
-
-	// Initialize garbage collector.
-	collector := gc.New(db, objStore, registry, imgMgr, cfg.Retention, logger)
-
-	// Start worker health monitor and GC (only on leader in HA mode).
-	monitor := worker.NewMonitor(registry, db, sm.MigrateSession, worker.DefaultMonitorConfig(), logger)
-
-	if cfg.Mode == "ha" {
-		// In HA mode, only the leader runs the monitor and GC.
-		go coordinator.ElectLeader(ctx, "control-plane", func(leaderCtx context.Context) {
-			logger.Info("this instance is the leader")
-			monitor.Start(leaderCtx)
-			go collector.Run(leaderCtx)
-		})
-	} else {
-		// Single mode — always run the monitor and GC.
-		go monitor.Start(ctx)
-		go collector.Run(ctx)
-	}
-
-	// Start embedded local worker unless running as control plane only.
-	if cfg.Role != "controlplane" {
-		fcConfig := vm.FirecrackerConfig{
-			BinaryPath: envOrDefault("LOKA_FIRECRACKER_BIN", "/usr/local/bin/firecracker"),
-			KernelPath: envOrDefault("LOKA_KERNEL_PATH", cfg.DataDir+"/kernel/vmlinux"),
-			RootfsPath: envOrDefault("LOKA_ROOTFS_PATH", cfg.DataDir+"/rootfs/rootfs.ext4"),
-			DataDir:    cfg.DataDir + "/worker-data",
-		}
-		dataDir := cfg.DataDir + "/worker-data"
-		localWorker, err := controlplane.NewLocalWorker(registry, sm, objStore, dataDir, fcConfig, logger)
-		if err != nil {
-			logger.Error("failed to create local worker", "error", err)
-			os.Exit(1)
-		}
-		localWorker.Start(ctx)
-
-		// Wire up service log retrieval through the embedded agent.
-		agent := localWorker.Agent()
-		svcMgr.SetLogsFn(func(serviceID string, lines int) ([]string, []string, error) {
-			result, err := agent.ServiceLogs(serviceID, lines)
-			if err != nil {
-				return nil, nil, err
-			}
-			return result.Stdout, result.Stderr, nil
-		})
-
-		logger.Info("embedded worker started")
-	} else {
-		logger.Info("running as control plane only (no embedded worker)")
-	}
-
 	// ── TLS initialization ──────────────────────────────────
+	// TLS is initialized before the coordinator so that Raft can be created
+	// with TLS from the start, avoiding a close-and-reopen cycle.
 	autoTLS := cfg.TLS.AutoTLS == nil || *cfg.TLS.AutoTLS // default: true
 	var serverTLSCfg *crypto_tls.Config
 	var caCertPath string
@@ -443,24 +327,134 @@ func main() {
 		}
 	}
 
-	// Pass TLS config to Raft coordinator if using raft.
+	// ── Initialize coordinator ──────────────────────────────
+	// Created after TLS so Raft transport uses TLS from the start.
+	haConfig := ha.Config{
+		Type:      cfg.Coordinator.Type,
+		Address:   cfg.Coordinator.Address,
+		NodeID:    cfg.Coordinator.NodeID,
+		DataDir:   cfg.Coordinator.DataDir,
+		Bootstrap: cfg.Coordinator.Bootstrap,
+		Peers:     cfg.Coordinator.Peers,
+	}
 	if serverTLSCfg != nil && cfg.Coordinator.Type == "raft" {
-		// Re-open coordinator with TLS. The initial open was without TLS.
-		coordinator.Close()
-		coordinator, err = ha.Open(ha.Config{
-			Type:      cfg.Coordinator.Type,
-			Address:   cfg.Coordinator.Address,
-			NodeID:    cfg.Coordinator.NodeID,
-			DataDir:   cfg.Coordinator.DataDir,
-			Bootstrap: cfg.Coordinator.Bootstrap,
-			Peers:     cfg.Coordinator.Peers,
-			TLSConfig: serverTLSCfg,
+		haConfig.TLSConfig = serverTLSCfg
+	}
+	coordinator, err := ha.Open(haConfig)
+	if err != nil {
+		logger.Error("failed to create coordinator", "type", cfg.Coordinator.Type, "error", err)
+		os.Exit(1)
+	}
+	defer coordinator.Close()
+
+	logger.Info("coordinator ready", "type", cfg.Coordinator.Type, "tls", haConfig.TLSConfig != nil)
+
+	// ── HA replication ──────────────────────────────────────
+	// In HA mode, wrap the store and object store for cross-node sync.
+	if cfg.Mode == "ha" {
+		// Replicate SQLite writes through Raft consensus.
+		if cfg.Database.Driver == "sqlite" {
+			db = replicatedstore.New(db, coordinator, logger)
+			logger.Info("HA SQLite replication enabled")
+		}
+
+		// Forward objstore writes to the leader.
+		scheme := "https"
+		if cfg.TLS.AutoTLS != nil && !*cfg.TLS.AutoTLS && cfg.TLS.CertFile == "" {
+			scheme = "http"
+		}
+		apiPort := cfg.ListenAddr
+		if len(apiPort) > 0 && apiPort[0] == ':' {
+			apiPort = apiPort[1:]
+		}
+		objStore = leaderobjstore.New(leaderobjstore.Config{
+			Local:   objStore,
+			Leader:  coordinator,
+			Name:    "control-plane",
+			Scheme:  scheme,
+			APIPort: apiPort,
+			Token:   cfg.Auth.APIKey,
 		})
+		logger.Info("HA object store proxy enabled")
+	}
+
+	// Initialize provider registry.
+	providerRegistry := provider.NewRegistry()
+	providerRegistry.Register(provlocal.New())
+	providerRegistry.Register(provsm.New(db))
+	providerRegistry.Register(provaws.New(provaws.Config{}, logger))
+	providerRegistry.Register(provgcp.New(provgcp.Config{}, logger))
+	providerRegistry.Register(provazure.New(provazure.Config{}, logger))
+	providerRegistry.Register(provovh.New(provovh.Config{}, logger))
+	providerRegistry.Register(provdo.New(provdo.Config{}, logger))
+	logger.Info("providers registered", "count", len(providerRegistry.List()))
+
+	// Initialize image manager (Docker images → Firecracker rootfs).
+	imgMgr := image.NewManager(objStore, cfg.DataDir, logger)
+
+	// Initialize worker registry.
+	registry := worker.NewRegistry(db, logger)
+
+	// Initialize scheduler.
+	sched := scheduler.New(registry, scheduler.Strategy(cfg.Scheduler.Strategy))
+
+	// Initialize session manager.
+	sm := session.NewManager(db, registry, sched, imgMgr, objStore, logger)
+
+	// Initialize service manager.
+	svcMgr := service.NewManager(db, registry, sched, imgMgr, objStore, logger)
+
+	// Initialize drainer with migration callback.
+	drainer := worker.NewDrainer(registry, db, sm.MigrateSession, logger)
+
+	// Initialize garbage collector.
+	collector := gc.New(db, objStore, registry, imgMgr, cfg.Retention, logger)
+
+	// Start worker health monitor and GC (only on leader in HA mode).
+	monitor := worker.NewMonitor(registry, db, sm.MigrateSession, worker.DefaultMonitorConfig(), logger)
+
+	if cfg.Mode == "ha" {
+		// In HA mode, only the leader runs the monitor and GC.
+		go coordinator.ElectLeader(ctx, "control-plane", func(leaderCtx context.Context) {
+			logger.Info("this instance is the leader")
+			monitor.Start(leaderCtx)
+			go collector.Run(leaderCtx)
+		})
+	} else {
+		// Single mode — always run the monitor and GC.
+		go monitor.Start(ctx)
+		go collector.Run(ctx)
+	}
+
+	// Start embedded local worker unless running as control plane only.
+	if cfg.Role != "controlplane" {
+		fcConfig := vm.FirecrackerConfig{
+			BinaryPath: envOrDefault("LOKA_FIRECRACKER_BIN", "/usr/local/bin/firecracker"),
+			KernelPath: envOrDefault("LOKA_KERNEL_PATH", cfg.DataDir+"/kernel/vmlinux"),
+			RootfsPath: envOrDefault("LOKA_ROOTFS_PATH", cfg.DataDir+"/rootfs/rootfs.ext4"),
+			DataDir:    cfg.DataDir + "/worker-data",
+		}
+		dataDir := cfg.DataDir + "/worker-data"
+		localWorker, err := controlplane.NewLocalWorker(registry, sm, objStore, dataDir, fcConfig, logger)
 		if err != nil {
-			logger.Error("failed to create coordinator with TLS", "error", err)
+			logger.Error("failed to create local worker", "error", err)
 			os.Exit(1)
 		}
-		logger.Info("raft coordinator restarted with TLS")
+		localWorker.Start(ctx)
+
+		// Wire up service log retrieval through the embedded agent.
+		agent := localWorker.Agent()
+		svcMgr.SetLogsFn(func(serviceID string, lines int) ([]string, []string, error) {
+			result, err := agent.ServiceLogs(serviceID, lines)
+			if err != nil {
+				return nil, nil, err
+			}
+			return result.Stdout, result.Stderr, nil
+		})
+
+		logger.Info("embedded worker started")
+	} else {
+		logger.Info("running as control plane only (no embedded worker)")
 	}
 
 	// ── Initialize API server ───────────────────────────────
@@ -527,7 +521,6 @@ func main() {
 		}
 	}
 
-	_ = caCertPath // Will be used for CA cert distribution endpoint
 }
 
 func envOrDefault(key, defaultVal string) string {

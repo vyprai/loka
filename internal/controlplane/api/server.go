@@ -35,6 +35,7 @@ type Server struct {
 	gc               GCRunner
 	retention        config.RetentionConfig
 	caCertPath       string // Path to CA certificate (served at /ca.crt).
+	raftStatusFn     RaftStatusFn // Optional: returns Raft cluster status for debug endpoint.
 }
 
 // ServerOpts holds optional configuration for the API server.
@@ -111,8 +112,11 @@ func (s *Server) routes() {
 	// Prometheus metrics endpoint (no auth).
 	r.Handle("/metrics", promhttp.Handler())
 
-	// CA cert endpoint (no auth) — allows clients to bootstrap TLS trust.
-	// GET /ca.crt returns the auto-generated CA certificate in PEM format.
+	// CA cert endpoint (no auth) — intentionally unauthenticated.
+	// The CA certificate is public information (not a secret) and must be
+	// accessible without auth so that new clients can bootstrap TLS trust:
+	//   curl -k https://server:6840/ca.crt -o ca.crt
+	// This is analogous to how ACME/Let's Encrypt serves CA certs publicly.
 	r.Get("/ca.crt", s.serveCACert)
 
 	r.Route("/api/v1", func(r chi.Router) {

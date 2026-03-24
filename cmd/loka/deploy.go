@@ -167,8 +167,21 @@ Examples:
 				finalEnv[k] = v
 			}
 
-			// Resolve ${secret.*} references in env values.
+			// Validate all secret references exist before attempting deploy.
 			secretStore := secret.NewStore()
+			var missingSecrets []string
+			for k, v := range finalEnv {
+				if strings.Contains(v, "${secret.") {
+					if _, err := secretStore.Resolve(v); err != nil {
+						missingSecrets = append(missingSecrets, fmt.Sprintf("  %s: %v", k, err))
+					}
+				}
+			}
+			if len(missingSecrets) > 0 {
+				return fmt.Errorf("missing secrets:\n%s\n\nAdd them with: loka secret set <name> <value>", strings.Join(missingSecrets, "\n"))
+			}
+
+			// Resolve ${secret.*} references in env values.
 			for k, v := range finalEnv {
 				resolved, err := secretStore.Resolve(v)
 				if err != nil {

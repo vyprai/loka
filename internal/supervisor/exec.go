@@ -344,10 +344,18 @@ func (e *Executor) startProcess(ctx context.Context, cmd loka.Command) (*Running
 		delete(e.processes, cmd.ID)
 		e.mu.Unlock()
 
+		// Include context about the binary, workdir, and PATH for easier debugging.
+		var restrictedPATH string
+		for _, envVar := range osCmd.Env {
+			if len(envVar) > 5 && envVar[:5] == "PATH=" {
+				restrictedPATH = envVar[5:]
+				break
+			}
+		}
 		proc.Result = &loka.CommandResult{
 			CommandID: cmd.ID,
 			ExitCode:  -1,
-			Stderr:    fmt.Sprintf("failed to start: %v", err),
+			Stderr:    fmt.Sprintf("exec %q in %q (PATH=%s): %v", cmdPath, osCmd.Dir, restrictedPATH, err),
 			StartedAt: proc.StartedAt,
 			EndedAt:   time.Now(),
 		}
@@ -466,6 +474,21 @@ func (rb *RingBuffer) Lines(n int) []string {
 		result[i] = rb.lines[(start+i)%rb.cap]
 	}
 	return result
+}
+
+// Flush writes the partial buffer (incomplete line) as a complete line.
+// Call this before shutdown to avoid losing trailing data without a newline.
+func (rb *RingBuffer) Flush() {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	if len(rb.partial) > 0 {
+		rb.lines[rb.pos] = rb.partial
+		rb.pos = (rb.pos + 1) % rb.cap
+		if rb.pos == 0 {
+			rb.full = true
+		}
+		rb.partial = ""
+	}
 }
 
 // ── Service Process ─────────────────────────────────────
@@ -700,12 +723,17 @@ func (sp *ServiceProcess) Stop(signal syscall.Signal, timeout time.Duration) err
 	cmd := sp.cmd
 	running := sp.running
 	stopped := sp.stopped
+	stdout := sp.stdout
+	stderr := sp.stderr
 	sp.mu.Unlock()
 
 	if !running || cmd == nil || cmd.Process == nil {
 		if cancel != nil {
 			cancel()
 		}
+		// Flush partial log lines before returning.
+		stdout.Flush()
+		stderr.Flush()
 		return nil
 	}
 
@@ -715,12 +743,16 @@ func (sp *ServiceProcess) Stop(signal syscall.Signal, timeout time.Duration) err
 		if cancel != nil {
 			cancel()
 		}
+		stdout.Flush()
+		stderr.Flush()
 		return nil
 	}
 
 	// Wait for graceful shutdown or timeout.
 	select {
 	case <-stopped:
+		stdout.Flush()
+		stderr.Flush()
 		return nil
 	case <-time.After(timeout):
 		// Force kill.
@@ -729,6 +761,8 @@ func (sp *ServiceProcess) Stop(signal syscall.Signal, timeout time.Duration) err
 			cancel()
 		}
 		<-stopped
+		stdout.Flush()
+		stderr.Flush()
 		return nil
 	}
 }

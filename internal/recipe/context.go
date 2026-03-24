@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/dop251/goja"
 )
@@ -29,8 +30,20 @@ func NewRecipeContext(projectDir string, r *Recipe) *RecipeContext {
 	}
 }
 
+// validatePath ensures the resolved path stays within the project directory.
+func (c *RecipeContext) validatePath(path string) error {
+	abs := filepath.Join(c.projectDir, filepath.Clean(path))
+	if !strings.HasPrefix(abs, c.projectDir) {
+		return fmt.Errorf("path %q escapes project directory", path)
+	}
+	return nil
+}
+
 // FileExists checks whether a file or directory exists relative to the project dir.
 func (c *RecipeContext) FileExists(path string) bool {
+	if err := c.validatePath(path); err != nil {
+		return false
+	}
 	full := filepath.Join(c.projectDir, path)
 	_, err := os.Stat(full)
 	return err == nil
@@ -39,6 +52,10 @@ func (c *RecipeContext) FileExists(path string) bool {
 // ReadFile reads a file relative to the project dir and returns its contents.
 // Returns an empty string if the file cannot be read.
 func (c *RecipeContext) ReadFile(path string) string {
+	if err := c.validatePath(path); err != nil {
+		slog.Debug("recipe context ReadFile path rejected", "path", path, "error", err)
+		return ""
+	}
 	full := filepath.Join(c.projectDir, path)
 	data, err := os.ReadFile(full)
 	if err != nil {
@@ -51,6 +68,10 @@ func (c *RecipeContext) ReadFile(path string) string {
 // ReadJSON reads a JSON file and returns it as a map.
 // Returns nil if the file cannot be read or parsed.
 func (c *RecipeContext) ReadJSON(path string) map[string]interface{} {
+	if err := c.validatePath(path); err != nil {
+		slog.Debug("recipe context ReadJSON path rejected", "path", path, "error", err)
+		return nil
+	}
 	full := filepath.Join(c.projectDir, path)
 	data, err := os.ReadFile(full)
 	if err != nil {
@@ -67,6 +88,10 @@ func (c *RecipeContext) ReadJSON(path string) map[string]interface{} {
 
 // ListFiles returns files matching a glob pattern relative to the project dir.
 func (c *RecipeContext) ListFiles(pattern string) []string {
+	if err := c.validatePath(pattern); err != nil {
+		slog.Debug("recipe context ListFiles path rejected", "pattern", pattern, "error", err)
+		return []string{}
+	}
 	full := filepath.Join(c.projectDir, pattern)
 	matches, err := filepath.Glob(full)
 	if err != nil {

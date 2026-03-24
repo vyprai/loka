@@ -61,6 +61,7 @@ type ExecutionRepository interface {
 type CheckpointRepository interface {
 	Create(ctx context.Context, cp *loka.Checkpoint) error
 	Get(ctx context.Context, id string) (*loka.Checkpoint, error)
+	Update(ctx context.Context, cp *loka.Checkpoint) error
 	GetDAG(ctx context.Context, sessionID string) (*loka.CheckpointDAG, error)
 	ListBySession(ctx context.Context, sessionID string) ([]*loka.Checkpoint, error)
 	Delete(ctx context.Context, id string) error

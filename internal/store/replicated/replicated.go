@@ -194,6 +194,12 @@ func (s *Store) applyCheckpoint(ctx context.Context, cmd storeCmd) error {
 			return err
 		}
 		return repo.Create(ctx, &v)
+	case "update":
+		var v loka.Checkpoint
+		if err := json.Unmarshal(cmd.Data, &v); err != nil {
+			return err
+		}
+		return repo.Update(ctx, &v)
 	case "delete":
 		var id string
 		if err := json.Unmarshal(cmd.Data, &id); err != nil {
@@ -358,6 +364,9 @@ func (r *replicatedCheckpointRepo) Create(ctx context.Context, cp *loka.Checkpoi
 }
 func (r *replicatedCheckpointRepo) Get(ctx context.Context, id string) (*loka.Checkpoint, error) {
 	return r.s.local.Checkpoints().Get(ctx, id)
+}
+func (r *replicatedCheckpointRepo) Update(ctx context.Context, cp *loka.Checkpoint) error {
+	return r.s.apply(ctx, "checkpoint", "update", cp)
 }
 func (r *replicatedCheckpointRepo) GetDAG(ctx context.Context, sessionID string) (*loka.CheckpointDAG, error) {
 	return r.s.local.Checkpoints().GetDAG(ctx, sessionID)

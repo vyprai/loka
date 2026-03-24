@@ -483,8 +483,8 @@ func (a *Agent) extractBundle(ctx context.Context, vsock *vm.VsockClient, bundle
 	// BundleKey format: "services/<id>/bundle.tar.gz"
 	// Object store bucket is the first path segment, key is the rest.
 	parts := strings.SplitN(bundleKey, "/", 2)
-	if len(parts) != 2 {
-		return fmt.Errorf("invalid bundle key: %s", bundleKey)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return fmt.Errorf("invalid bundle key %q: expected 'bucket/key'", bundleKey)
 	}
 	bucket, key := parts[0], parts[1]
 

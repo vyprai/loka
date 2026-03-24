@@ -263,6 +263,15 @@ func deployLocalMacOS(name string, foreground bool) error {
 	exec.Command(limactl, "shell", "loka", "sudo", "bash", "-c",
 		"rm -f /Users/*/loka.db; nohup lokad > /tmp/lokad.log 2>&1 &").Run()
 
+	// Verify lokad didn't crash immediately after starting.
+	time.Sleep(2 * time.Second)
+	pgrepOut, pgrepErr := exec.Command(limactl, "shell", "loka", "pgrep", "-f", "lokad").Output()
+	if pgrepErr != nil || len(strings.TrimSpace(string(pgrepOut))) == 0 {
+		// lokad crashed on startup — show log for debugging.
+		logOut, _ := exec.Command(limactl, "shell", "loka", "tail", "-20", "/tmp/lokad.log").Output()
+		return fmt.Errorf("lokad crashed on startup:\n%s", string(logOut))
+	}
+
 	// Wait for health — check from host (port forwarded by Lima).
 	fmt.Print("  Waiting for server...")
 	ready := false

@@ -45,9 +45,9 @@ func (s *Server) createCheckpoint(w http.ResponseWriter, r *http.Request) {
 	// Set the label (the session manager doesn't handle labels).
 	if req.Label != "" {
 		cp.Label = req.Label
-		// Update by delete + recreate.
-		s.store.Checkpoints().Delete(r.Context(), cp.ID)
-		s.store.Checkpoints().Create(r.Context(), cp)
+		if err := s.store.Checkpoints().Update(r.Context(), cp); err != nil {
+			s.logger.Warn("failed to update checkpoint label", "id", cp.ID, "error", err)
+		}
 	}
 
 	// Wait briefly for the checkpoint to complete (worker is async).

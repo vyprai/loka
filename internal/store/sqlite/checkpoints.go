@@ -67,6 +67,20 @@ func (r *checkpointRepo) ListBySession(ctx context.Context, sessionID string) ([
 	return cps, rows.Err()
 }
 
+func (r *checkpointRepo) Update(ctx context.Context, cp *loka.Checkpoint) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE checkpoints SET session_id = ?, parent_id = ?, type = ?, status = ?, label = ?, overlay_path = ?, vmstate_path = ?, metadata_path = ?
+		 WHERE id = ?`,
+		cp.SessionID, cp.ParentID, string(cp.Type), string(cp.Status),
+		cp.Label, cp.OverlayPath, cp.VMStatePath, cp.MetadataPath,
+		cp.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("update checkpoint: %w", err)
+	}
+	return nil
+}
+
 func (r *checkpointRepo) Delete(ctx context.Context, id string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM checkpoints WHERE id = ?`, id)
 	return err
