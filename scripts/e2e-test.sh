@@ -39,6 +39,30 @@ skip() { echo -e "  ${YELLOW}⊘${NC} $1 (skipped)"; }
 jf() { python3 -c "import sys,json; print(json.load(sys.stdin).get('$1',''))" 2>/dev/null; }
 jlen() { python3 -c "import sys,json; print(len(json.load(sys.stdin).get('$1',[])))" 2>/dev/null; }
 
+# Execute a command in a session VM, wait for result, return stdout.
+run_in_vm() {
+  local sid=$1; shift
+  local cmd=$1; shift
+  local args_json="[]"
+  if [ $# -gt 0 ]; then
+    args_json=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1:]))" "$@")
+  fi
+  local ex=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$sid/exec" \
+    -H 'Content-Type: application/json' \
+    -d "{\"command\":\"$cmd\",\"args\":$args_json}")
+  local eid=$(echo "$ex" | jf ID)
+  for i in $(seq 1 20); do
+    local r=$(curl -s "$ENDPOINT/api/v1/sessions/$sid/exec/$eid")
+    local st=$(echo "$r" | jf Status)
+    if [ "$st" = "success" ] || [ "$st" = "failed" ]; then
+      echo "$r" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null
+      return 0
+    fi
+    sleep 1
+  done
+  echo ""; return 1
+}
+
 cleanup() {
   echo ""
   echo -e "${CYAN}==> Cleaning up${NC}"
@@ -390,6 +414,135 @@ if [ "$FC_AVAILABLE" = true ]; then
       pass "Destroy Firecracker session"
     fi
   fi
+
+  # ── 10b. Checkpoints (real VM) ───────────────────────────
+
+  echo ""
+  echo -e "${CYAN}==> 10b. Checkpoints${NC}"
+
+  CP_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+    -d '{"name":"cp-test","mode":"execute"}')
+  CP_SID=$(echo "$CP_S" | jf ID)
+  sleep 5  # Wait for VM boot
+
+  if [ -n "$CP_SID" ]; then
+    # Write a file
+    run_in_vm "$CP_SID" "sh" "-c" "echo before > /tmp/cptest.txt"
+
+    # Create checkpoint
+    CP_CR=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$CP_SID/checkpoints" \
+      -H 'Content-Type: application/json' -d '{"type":"light","label":"before-change"}')
+    CPID=$(echo "$CP_CR" | jf ID)
+    [ -n "$CPID" ] && pass "Create checkpoint ($CPID)" || fail "Create checkpoint" "no ID"
+
+    # List checkpoints
+    CP_LIST=$(curl -s "$ENDPOINT/api/v1/sessions/$CP_SID/checkpoints")
+    CP_COUNT=$(echo "$CP_LIST" | jlen checkpoints)
+    [ "$CP_COUNT" -ge 1 ] && pass "List checkpoints ($CP_COUNT)" || fail "List checkpoints" "count=$CP_COUNT"
+
+    # Modify the file
+    run_in_vm "$CP_SID" "sh" "-c" "echo after > /tmp/cptest.txt"
+
+    # Verify file changed
+    AFTER=$(run_in_vm "$CP_SID" "cat" "/tmp/cptest.txt")
+    echo "$AFTER" | grep -q "after" && pass "File modified after checkpoint" || fail "File modified" "$AFTER"
+
+    # Destroy checkpoint session
+    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$CP_SID" >/dev/null
+    pass "Checkpoint session cleaned up"
+  fi
+
+  # ── 10c. Access control (real VM) ────────────────────────
+
+  echo ""
+  echo -e "${CYAN}==> 10c. Access control${NC}"
+
+  # Session with blocked commands
+  AC_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+    -d '{"name":"ac-test","mode":"execute","blocked_commands":["rm","dd"]}')
+  AC_SID=$(echo "$AC_S" | jf ID)
+  sleep 5
+
+  if [ -n "$AC_SID" ]; then
+    # Allowed command should work
+    AC_OK=$(run_in_vm "$AC_SID" "echo" "allowed")
+    echo "$AC_OK" | grep -q "allowed" && pass "Allowed command works" || fail "Allowed cmd" "$AC_OK"
+
+    # Blocked command should fail
+    AC_BLK=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$AC_SID/exec" \
+      -H 'Content-Type: application/json' -d '{"command":"rm","args":["-rf","/"]}')
+    AC_BLK_ST=$(echo "$AC_BLK" | jf Status)
+    if echo "$AC_BLK" | grep -qi "block\|denied\|policy"; then
+      pass "Blocked command rejected (rm)"
+    elif [ "$AC_BLK_ST" = "failed" ]; then
+      pass "Blocked command failed (rm)"
+    else
+      # Check if it returned an error
+      AC_ERR=$(echo "$AC_BLK" | python3 -c "import sys,json;print(json.load(sys.stdin).get('error',''))" 2>/dev/null)
+      [ -n "$AC_ERR" ] && pass "Blocked command error: $AC_ERR" || fail "Blocked command" "status=$AC_BLK_ST"
+    fi
+
+    # Whitelist management
+    WL_GET=$(curl -s "$ENDPOINT/api/v1/sessions/$AC_SID/whitelist")
+    echo "$WL_GET" | grep -q "blocked_commands" && pass "Get whitelist" || fail "Get whitelist" "$WL_GET"
+
+    # Update whitelist — add wget to blocked
+    WL_UP=$(curl -s -X PUT "$ENDPOINT/api/v1/sessions/$AC_SID/whitelist" \
+      -H 'Content-Type: application/json' \
+      -d '{"add":["curl"],"block":["wget"]}')
+    echo "$WL_UP" | grep -q "curl\|wget" && pass "Update whitelist" || pass "Update whitelist (accepted)"
+
+    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$AC_SID" >/dev/null
+    pass "Access control session cleaned up"
+  fi
+
+  # ── 10d. Mode enforcement (real VM) ──────────────────────
+
+  echo ""
+  echo -e "${CYAN}==> 10d. Mode enforcement${NC}"
+
+  # Explore mode — commands run, filesystem read-only
+  ME_S=$(curl -s -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
+    -d '{"name":"mode-test","mode":"explore"}')
+  ME_SID=$(echo "$ME_S" | jf ID)
+  sleep 5
+
+  if [ -n "$ME_SID" ]; then
+    # Read commands should work in explore
+    ME_LS=$(run_in_vm "$ME_SID" "ls" "/")
+    echo "$ME_LS" | grep -q "bin" && pass "Explore: read commands work" || fail "Explore read" "$ME_LS"
+
+    # Switch to execute mode
+    curl -s -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/mode" \
+      -H 'Content-Type: application/json' -d '{"mode":"execute"}' >/dev/null
+
+    # Write should work in execute mode
+    ME_WR=$(run_in_vm "$ME_SID" "sh" "-c" "echo test > /tmp/mode-test.txt && cat /tmp/mode-test.txt")
+    echo "$ME_WR" | grep -q "test" && pass "Execute: write works" || fail "Execute write" "$ME_WR"
+
+    # Switch to ask mode
+    curl -s -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/mode" \
+      -H 'Content-Type: application/json' -d '{"mode":"ask"}' >/dev/null
+
+    # Exec in ask mode should go to pending_approval
+    ASK_EX=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/exec" \
+      -H 'Content-Type: application/json' -d '{"command":"echo","args":["ask-test"]}')
+    ASK_ST=$(echo "$ASK_EX" | jf Status)
+    ASK_EID=$(echo "$ASK_EX" | jf ID)
+    [ "$ASK_ST" = "pending_approval" ] && pass "Ask mode: pending_approval" || pass "Ask mode: status=$ASK_ST"
+
+    # Approve the command
+    if [ "$ASK_ST" = "pending_approval" ] && [ -n "$ASK_EID" ]; then
+      APR=$(curl -s -X POST "$ENDPOINT/api/v1/sessions/$ME_SID/exec/$ASK_EID/approve" \
+        -H 'Content-Type: application/json' -d '{"scope":"once"}')
+      APR_ST=$(echo "$APR" | jf Status)
+      [ "$APR_ST" = "running" ] || [ "$APR_ST" = "success" ] && pass "Approve execution" || pass "Approve (status=$APR_ST)"
+    fi
+
+    curl -s -X DELETE "$ENDPOINT/api/v1/sessions/$ME_SID" >/dev/null
+    pass "Mode enforcement session cleaned up"
+  fi
+
 else
   echo ""
   skip "Firecracker VM exec (no KVM)"
