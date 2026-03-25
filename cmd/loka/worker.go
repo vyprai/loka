@@ -25,6 +25,7 @@ func newWorkerCmd() *cobra.Command {
 		newWorkerDeregisterCmd(),
 		newWorkerLabelCmd(),
 		newWorkerTopCmd(),
+		newWorkerCacheCmd(),
 	)
 	return cmd
 }

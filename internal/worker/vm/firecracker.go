@@ -44,11 +44,10 @@ type VMConfig struct {
 	MemoryMB   int
 	KernelPath string
 	RootfsPath string
-	OverlayDir string // Session overlay directory.
-	VsockCID   uint32 // Vsock guest CID (unique per VM).
+	VsockCID uint32 // Vsock guest CID (unique per VM).
 
 	// Layered image support: read-only layer-pack ext4 with overlayfs.
-	LayerPackPath string // Path to read-only layer-pack ext4 (empty = legacy flat rootfs).
+	LayerPackPath string // Path to read-only layer-pack ext4.
 
 	// Warm snapshot restore (set both for ~28ms startup instead of cold boot).
 	SnapshotMemPath     string // Path to memory snapshot file.
@@ -441,7 +440,7 @@ func buildFirecrackerConfig(cfg VMConfig, socketPath, vsockPath string) fcConfig
 		// Tell the supervisor to set up overlayfs from the layer-pack.
 		bootArgs += " loka.layers=true"
 	} else {
-		// Legacy flat rootfs mode.
+		// Single rootfs mode (no layer-pack).
 		drives = []fcDrive{
 			{
 				DriveID:      "rootfs",

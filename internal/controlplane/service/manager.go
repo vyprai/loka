@@ -272,7 +272,7 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 	if svc.ImageID != "" && m.images != nil {
 		lp, lpErr := m.images.ResolveLayerPackPath(ctx, svc.ImageID)
 		if lpErr != nil {
-			m.logger.Debug("no layer-pack for image, using flat rootfs",
+			m.logger.Debug("no layer-pack for image, using base rootfs",
 				"service", serviceID, "error", lpErr)
 		} else {
 			layerPackPath = lp
