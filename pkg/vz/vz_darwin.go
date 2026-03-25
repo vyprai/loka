@@ -27,6 +27,7 @@ type Config struct {
 	MemoryMB  int
 	Kernel    string
 	Cmdline   string
+	Initrd    string // Optional initramfs path
 	Rootfs    string
 	SharedDir string
 	VsockPort uint32
@@ -40,6 +41,8 @@ func NewVM(cfg Config) (*VM, error) {
 	defer C.free(unsafe.Pointer(cCmdline))
 	cRootfs := C.CString(cfg.Rootfs)
 	defer C.free(unsafe.Pointer(cRootfs))
+	cInitrd := C.CString(cfg.Initrd)
+	defer C.free(unsafe.Pointer(cInitrd))
 	cShared := C.CString(cfg.SharedDir)
 	defer C.free(unsafe.Pointer(cShared))
 
@@ -47,7 +50,7 @@ func NewVM(cfg Config) (*VM, error) {
 	handle := C.vz_create_vm(
 		C.int(cfg.CPUs),
 		C.ulonglong(cfg.MemoryMB*1024*1024),
-		cKernel, cCmdline, cRootfs, cShared,
+		cKernel, cCmdline, cInitrd, cRootfs, cShared,
 		&errMsg,
 	)
 	if handle == nil {

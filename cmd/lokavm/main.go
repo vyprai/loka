@@ -36,15 +36,15 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 1. Ensure kernel + rootfs assets exist in dataDir.
-	kernel, rootfs, err := ensureAssets(*dataDir)
+	// 1. Ensure kernel + initrd + rootfs assets exist in dataDir.
+	kernel, initrd, rootfs, err := ensureAssets(*dataDir)
 	if err != nil {
 		logger.Error("failed to ensure assets", "error", err)
 		os.Exit(1)
 	}
 
 	// 2. Boot VZ VM.
-	vm, err := bootVM(ctx, kernel, rootfs, *cpus, *memory, *dataDir, logger)
+	vm, err := bootVM(ctx, kernel, initrd, rootfs, *cpus, *memory, *dataDir, logger)
 	if err != nil {
 		logger.Error("failed to boot VM", "error", err)
 		os.Exit(1)

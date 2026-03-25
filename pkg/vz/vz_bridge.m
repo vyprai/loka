@@ -16,6 +16,7 @@ void* vz_create_vm(
     unsigned long long memory_bytes,
     const char* kernel_path,
     const char* cmdline,
+    const char* initrd_path,
     const char* rootfs_path,
     const char* shared_dir,
     char** error_msg
@@ -27,6 +28,12 @@ void* vz_create_vm(
         NSURL* kernelURL = [NSURL fileURLWithPath:@(kernel_path)];
         VZLinuxBootLoader* bootLoader = [[VZLinuxBootLoader alloc] initWithKernelURL:kernelURL];
         bootLoader.commandLine = @(cmdline);
+
+        // Optional initramfs
+        if (initrd_path && strlen(initrd_path) > 0) {
+            NSURL* initrdURL = [NSURL fileURLWithPath:@(initrd_path)];
+            bootLoader.initialRamdiskURL = initrdURL;
+        }
 
         // VM configuration
         VZVirtualMachineConfiguration* config = [[VZVirtualMachineConfiguration alloc] init];

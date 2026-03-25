@@ -9,6 +9,7 @@ void* vz_create_vm(
     unsigned long long memory_bytes,
     const char* kernel_path,
     const char* cmdline,
+    const char* initrd_path,
     const char* rootfs_path,
     const char* shared_dir,
     char** error_msg

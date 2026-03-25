@@ -45,6 +45,10 @@ $(LOKA_CLI):
 
 $(LOKA_VM):
 	CGO_ENABLED=1 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $@ ./cmd/lokavm
+	@echo "  Signing with VZ entitlement..."
+	@printf '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>' > /tmp/lokavm.entitlements
+	@codesign --entitlements /tmp/lokavm.entitlements --force -s - $@ 2>/dev/null || true
+	@rm -f /tmp/lokavm.entitlements
 
 # Standalone lokavm target (macOS only, requires CGO for VZ framework)
 lokavm: $(LOKA_VM)

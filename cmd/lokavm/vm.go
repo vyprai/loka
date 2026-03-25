@@ -18,12 +18,13 @@ type VM struct {
 	config vz.Config
 }
 
-func bootVM(ctx context.Context, kernelPath, rootfsPath string, cpus, memoryMB int, dataDir string, logger *slog.Logger) (*VM, error) {
+func bootVM(ctx context.Context, kernelPath, initrdPath, rootfsPath string, cpus, memoryMB int, dataDir string, logger *slog.Logger) (*VM, error) {
 	cfg := vz.Config{
 		CPUs:      cpus,
 		MemoryMB:  memoryMB,
 		Kernel:    kernelPath,
-		Cmdline:   "console=hvc0 root=/dev/vda rw init=/sbin/init",
+		Cmdline:   "console=hvc0 root=/dev/vda rw modules=virtio_net,virtio_blk init=/sbin/init ip=dhcp",
+		Initrd:    initrdPath,
 		Rootfs:    rootfsPath,
 		SharedDir: dataDir,
 		VsockPort: 6840,

@@ -14,31 +14,39 @@ import (
 )
 
 const (
-	kernelURL  = "https://s3.amazonaws.com/spec.ccfc.min/ci-artifacts/kernels/%s/vmlinux-5.10.bin"
 	releaseURL = "https://github.com/vyprai/loka/releases/latest/download"
 )
 
-// ensureAssets checks that kernel and rootfs exist in dataDir.
-// Downloads them from GitHub releases if missing.
-// Returns paths to kernel and rootfs.
-func ensureAssets(dataDir string) (kernelPath, rootfsPath string, err error) {
+// ensureAssets checks that VZ kernel, initrd, and rootfs exist in dataDir.
+// The VZ kernel is Alpine's virt kernel (has virtio-pci drivers for VZ).
+// The Firecracker kernel (vmlinux-5.10) is inside the rootfs for microVMs.
+func ensureAssets(dataDir string) (kernelPath, initrdPath, rootfsPath string, err error) {
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		return "", "", fmt.Errorf("create data dir: %w", err)
+		return "", "", "", fmt.Errorf("create data dir: %w", err)
 	}
 
-	kernelPath = filepath.Join(dataDir, "vmlinux")
+	kernelPath = filepath.Join(dataDir, "vmlinuz-vz")
+	initrdPath = filepath.Join(dataDir, "initramfs-vz")
 	rootfsPath = filepath.Join(dataDir, "rootfs.ext4")
 
-	// Download kernel if missing.
+	// VZ kernel (Alpine virt): has virtio-pci, virtio-net, virtio-blk for Apple VZ.
 	if _, statErr := os.Stat(kernelPath); os.IsNotExist(statErr) {
-		fmt.Print("  Downloading kernel...")
+		fmt.Print("  Downloading VZ kernel...")
 		arch := runtime.GOARCH
-		if arch == "arm64" {
-			arch = "aarch64"
+		if arch == "arm64" { arch = "aarch64" }
+		if dlErr := downloadFile(fmt.Sprintf("%s/vmlinuz-vz-%s", releaseURL, arch), kernelPath); dlErr != nil {
+			return "", "", "", fmt.Errorf("VZ kernel not found at %s\nRun: make build-vm-assets\nOr copy Alpine virt kernel manually", kernelPath)
 		}
-		url := fmt.Sprintf(kernelURL, arch)
-		if dlErr := downloadFile(url, kernelPath); dlErr != nil {
-			return "", "", fmt.Errorf("download kernel: %w", dlErr)
+		fmt.Println(" ok")
+	}
+
+	// Initramfs
+	if _, statErr := os.Stat(initrdPath); os.IsNotExist(statErr) {
+		fmt.Print("  Downloading initramfs...")
+		arch := runtime.GOARCH
+		if arch == "arm64" { arch = "aarch64" }
+		if dlErr := downloadFile(fmt.Sprintf("%s/initramfs-vz-%s", releaseURL, arch), initrdPath); dlErr != nil {
+			return "", "", "", fmt.Errorf("initramfs not found at %s\nRun: make build-vm-assets", initrdPath)
 		}
 		fmt.Println(" ok")
 	}
@@ -56,19 +64,19 @@ func ensureAssets(dataDir string) (kernelPath, rootfsPath string, err error) {
 			// Fallback: create minimal rootfs locally.
 			fmt.Print(" (creating locally)...")
 			if createErr := createMinimalRootfs(rootfsPath); createErr != nil {
-				return "", "", fmt.Errorf("create rootfs: %w", createErr)
+				return "", "", "", fmt.Errorf("create rootfs: %w", createErr)
 			}
 		} else {
 			// Decompress.
 			if gzErr := gunzipFile(gzPath, rootfsPath); gzErr != nil {
-				return "", "", fmt.Errorf("decompress rootfs: %w", gzErr)
+				return "", "", "", fmt.Errorf("decompress rootfs: %w", gzErr)
 			}
 			os.Remove(gzPath)
 		}
 		fmt.Println(" ok")
 	}
 
-	return kernelPath, rootfsPath, nil
+	return kernelPath, initrdPath, rootfsPath, nil
 }
 
 func downloadFile(url, destPath string) error {
