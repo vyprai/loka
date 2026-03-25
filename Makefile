@@ -14,13 +14,14 @@ BIN_DIR := bin
 LOKAD := $(BIN_DIR)/lokad
 LOKA_WORKER := $(BIN_DIR)/loka-worker
 LOKA_SUPERVISOR := $(BIN_DIR)/loka-supervisor
+LOKA_VMAGENT := $(BIN_DIR)/loka-vmagent
 LOKA_CLI := $(BIN_DIR)/loka
 
 # Default target
 all: build
 
 # Build all binaries for current platform
-build: $(LOKAD) $(LOKA_WORKER) $(LOKA_SUPERVISOR) $(LOKA_CLI)
+build: $(LOKAD) $(LOKA_WORKER) $(LOKA_SUPERVISOR) $(LOKA_VMAGENT) $(LOKA_CLI)
 
 $(LOKAD):
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $@ ./cmd/lokad
@@ -31,6 +32,9 @@ $(LOKA_WORKER):
 $(LOKA_SUPERVISOR):
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $@ ./cmd/loka-supervisor
 
+$(LOKA_VMAGENT):
+	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $@ ./cmd/loka-vmagent
+
 $(LOKA_CLI):
 	$(GO) build $(GOFLAGS) $(LDFLAGS) -o $@ ./cmd/loka
 
@@ -39,7 +43,13 @@ build-linux:
 	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/lokad ./cmd/lokad
 	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/loka-worker ./cmd/loka-worker
 	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/loka-supervisor ./cmd/loka-supervisor
+	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/loka-vmagent ./cmd/loka-vmagent
 	GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-amd64/loka ./cmd/loka
+	GOOS=linux GOARCH=arm64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-arm64/lokad ./cmd/lokad
+	GOOS=linux GOARCH=arm64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-arm64/loka-worker ./cmd/loka-worker
+	GOOS=linux GOARCH=arm64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-arm64/loka-supervisor ./cmd/loka-supervisor
+	GOOS=linux GOARCH=arm64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-arm64/loka-vmagent ./cmd/loka-vmagent
+	GOOS=linux GOARCH=arm64 $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/linux-arm64/loka ./cmd/loka
 
 # Build all platforms
 build-all: build build-linux
