@@ -2,7 +2,7 @@
 # ──────────────────────────────────────────────────────────
 #  LOKA End-to-End Test Suite
 #
-#  Runs on both macOS (via Lima) and Linux (direct).
+#  Runs on both macOS (via lokavm) and Linux (direct).
 #  On macOS: uses 'loka setup local' / 'loka setup down'
 #  On Linux: starts lokad directly with Firecracker + KVM
 #
@@ -114,7 +114,7 @@ if command -v go &>/dev/null; then
   go build -o "$LOKA_BIN" ./cmd/loka 2>/dev/null
 
   if [ "$IS_MACOS" = true ]; then
-    # Cross-compile Linux binaries for Lima VM
+    # Cross-compile Linux binaries for lokavm
     GOOS=linux GOARCH=arm64 go build -o "$LOKAD_BIN" ./cmd/lokad 2>/dev/null
     GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags="-s -w" -o ./bin/loka-supervisor ./cmd/loka-supervisor 2>/dev/null
     echo "  Built: loka (macOS), lokad + supervisor (Linux/arm64)"
@@ -140,18 +140,13 @@ FC_AVAILABLE=false
 DOCKER_AVAILABLE=false
 
 if [ "$IS_MACOS" = true ]; then
-  # macOS: check Lima
-  if command -v limactl &>/dev/null; then
-    echo "  Lima: yes"
-    if limactl list -q 2>/dev/null | grep -q "^loka$"; then
-      echo "  Lima VM 'loka': exists"
-      FC_AVAILABLE=true
-      DOCKER_AVAILABLE=true  # Docker is inside Lima
-    else
-      echo -e "  ${YELLOW}Lima VM 'loka' not found. Run: curl -fsSL https://vyprai.github.io/loka/install.sh | bash${NC}"
-    fi
+  # macOS: check for lokavm or Lima (legacy)
+  if command -v lokavm &>/dev/null || command -v limactl &>/dev/null; then
+    echo "  VM runtime: $(command -v lokavm 2>/dev/null && echo "lokavm" || echo "lima")"
+    FC_AVAILABLE=true
+    DOCKER_AVAILABLE=true
   else
-    echo -e "  ${YELLOW}Lima not found — install it first${NC}"
+    echo -e "  ${YELLOW}No VM runtime found. Install: curl -fsSL https://vyprai.github.io/loka/install.sh | bash${NC}"
   fi
 else
   # Linux: check KVM, Docker, Firecracker directly
@@ -188,7 +183,7 @@ if [ "$IS_LINUX" = true ]; then
   done
 fi
 
-# Create or reuse cached rootfs (Linux only — macOS uses Lima's rootfs)
+# Create or reuse cached rootfs (Linux only — macOS uses lokavm's rootfs)
 if [ "$IS_LINUX" = true ] && [ "$FC_AVAILABLE" = true ]; then
   CACHED_ROOTFS="/tmp/loka-e2e-rootfs.ext4"
   if [ -f "$CACHED_ROOTFS" ]; then
@@ -234,22 +229,8 @@ echo -e "${CYAN}==> Starting lokad${NC}"
 CURL_OPTS="-s"
 
 if [ "$IS_MACOS" = true ]; then
-  # macOS: use loka setup local (handles Lima, rootfs, kernel, lokad)
+  # macOS: use loka setup local (starts lokavm or Lima)
   stop_lokad
-
-  # Ensure Lima VM is running before copying binaries
-  if ! limactl list 2>/dev/null | grep loka | grep -q Running; then
-    echo "  Starting Lima VM..."
-    limactl start loka 2>&1 | tail -1
-  fi
-
-  # Copy fresh binaries to Lima
-  cp "$LOKAD_BIN" ~/lokad-e2e 2>/dev/null
-  cp ./bin/loka-supervisor ~/supervisor-e2e 2>/dev/null
-  limactl shell loka sudo cp ~/lokad-e2e /usr/local/bin/lokad 2>/dev/null
-  limactl shell loka sudo cp ~/supervisor-e2e /usr/local/bin/loka-supervisor 2>/dev/null
-  rm -f ~/lokad-e2e ~/supervisor-e2e
-  echo "  Binaries updated in Lima"
 
   "$LOKA_BIN" setup local
   if [ $? -ne 0 ]; then
@@ -298,7 +279,7 @@ fi
 echo -n "  Waiting..."
 READY=false
 WAIT_MAX=30
-[ "$IS_MACOS" = true ] && WAIT_MAX=90  # Lima VM cold boot can take ~60s
+[ "$IS_MACOS" = true ] && WAIT_MAX=90  # VM cold boot can take ~60s
 for i in $(seq 1 $WAIT_MAX); do
   if curl $CURL_OPTS "$ENDPOINT/api/v1/health" 2>/dev/null | grep -q "ok"; then
     READY=true; echo " ready!"; break
@@ -1619,7 +1600,7 @@ echo "$RET" | grep -q "168h" && pass "loka admin retention" || fail "loka admin 
 
 # Worker list
 WL=$("$LOKA_BIN" $CLI_S worker list 2>&1)
-echo "$WL" | grep -q "HOSTNAME\|lima\|ready" && pass "loka worker list" || pass "loka worker list (no workers in CP-only)"
+echo "$WL" | grep -q "HOSTNAME\|loka\|ready" && pass "loka worker list" || pass "loka worker list (no workers in CP-only)"
 
 # Session create + exec via CLI
 if [ "$FC_AVAILABLE" = true ] && [ "$DOCKER_AVAILABLE" = true ]; then
@@ -1882,7 +1863,7 @@ pass "CLI: admin gc --dry-run"
 
 # Worker commands
 WK_TOP=$("$LOKA_BIN" $CLI_S worker top 2>&1)
-echo "$WK_TOP" | grep -qi "WORKER\|No workers\|lima" && pass "CLI: worker top" || pass "CLI: worker top (output)"
+echo "$WK_TOP" | grep -qi "WORKER\|No workers\|loka" && pass "CLI: worker top" || pass "CLI: worker top (output)"
 
 # Domains
 DOM=$("$LOKA_BIN" $CLI_S domains 2>&1)
