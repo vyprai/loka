@@ -52,6 +52,17 @@ type VMConfig struct {
 	// Warm snapshot restore (set both for ~28ms startup instead of cold boot).
 	SnapshotMemPath     string // Path to memory snapshot file.
 	SnapshotVMStatePath string // Path to VM state snapshot file.
+
+	// MountDrives are extra Firecracker drives for block-mode volume mounts.
+	// Each is an ext4 image attached as /dev/vdX inside the VM.
+	MountDrives []MountDrive
+}
+
+// MountDrive describes an extra ext4 drive attached to a VM for block-mode volume mounts.
+type MountDrive struct {
+	MountPath string // Mount path inside VM (e.g. "/data/uploads").
+	HostPath  string // Path to ext4 image on the host.
+	ReadOnly  bool
 }
 
 // VMState tracks the lifecycle state of a VM.
@@ -100,6 +111,9 @@ func NewManager(cfg FirecrackerConfig, logger *slog.Logger) (*Manager, error) {
 
 	return mgr, nil
 }
+
+// DataDir returns the working directory for VM sockets and state.
+func (m *Manager) DataDir() string { return m.cfg.DataDir }
 
 // Launch starts a new Firecracker microVM.
 // If cfg.SnapshotMemPath and cfg.SnapshotVMStatePath are set, restores from
@@ -449,6 +463,31 @@ func buildFirecrackerConfig(cfg VMConfig, socketPath, vsockPath string) fcConfig
 				IsReadOnly:   false,
 			},
 		}
+	}
+
+	// Append extra drives for block-mode volume mounts.
+	// Drive letters: vda=rootfs, vdb=layers (if present), vdc+...=mounts.
+	for i, md := range cfg.MountDrives {
+		driveID := fmt.Sprintf("mount%d", i)
+		drives = append(drives, fcDrive{
+			DriveID:      driveID,
+			PathOnHost:   md.HostPath,
+			IsRootDevice: false,
+			IsReadOnly:   md.ReadOnly,
+		})
+		// Pass mount metadata via kernel boot args so the supervisor knows
+		// which drive to mount at which path.
+		// Format: loka.mount<N>=<drive_letter>:<path>:<ro|rw>
+		// Drive letters start at 'c' if layers present, 'b' otherwise.
+		driveLetter := 'b' + rune(i)
+		if cfg.LayerPackPath != "" {
+			driveLetter = 'c' + rune(i)
+		}
+		access := "rw"
+		if md.ReadOnly {
+			access = "ro"
+		}
+		bootArgs += fmt.Sprintf(" loka.mount%d=vd%c:%s:%s", i, driveLetter, md.MountPath, access)
 	}
 
 	// TAP network interface: each VM gets a dedicated TAP device.

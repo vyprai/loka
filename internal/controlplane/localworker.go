@@ -222,6 +222,7 @@ func (lw *LocalWorker) handleCommand(ctx context.Context, cmd cpworker.WorkerCom
 				Port:                 data.Port,
 				BundleKey:            data.BundleKey,
 				RestartPolicy:        data.RestartPolicy,
+				Mounts:               data.Mounts,
 				SnapshotMemPath:      data.SnapshotMemPath,
 				SnapshotVMStatePath:  data.SnapshotVMStatePath,
 				IsAppSnapshotRestore: data.IsAppSnapshotRestore,

@@ -52,6 +52,7 @@ type ServiceLaunchOpts struct {
 	Port                int
 	BundleKey           string
 	RestartPolicy       string
+	Mounts              []loka.VolumeMount // Volume mounts (FUSE or block mode).
 	SnapshotMemPath     string // Warm snapshot memory file for instant restore.
 	SnapshotVMStatePath string // Warm snapshot VM state file.
 	IsAppSnapshotRestore bool  // If true, skip bundle extraction and service_start (app already running).
@@ -444,6 +445,25 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 		mem = 512
 	}
 
+	// Prepare block-mode mount drives (ext4 images populated from objstore).
+	var mountDrives []vm.MountDrive
+	var blockSyncStoppers []func()
+	blockBuilder := NewBlockMountBuilder(a.objStore, a.vmManager.DataDir(), a.logger)
+
+	for _, mount := range opts.Mounts {
+		if mount.EffectiveMode() != "block" {
+			continue
+		}
+		result, err := blockBuilder.BuildImage(ctx, serviceID, mount)
+		if err != nil {
+			a.logger.Warn("failed to build block mount image — skipping mount",
+				"path", mount.Path, "error", err)
+			continue
+		}
+		mountDrives = append(mountDrives, result.Drive)
+		blockSyncStoppers = append(blockSyncStoppers, result.StopSync)
+	}
+
 	// Launch Firecracker microVM — uses warm snapshot if available (~28ms),
 	// otherwise cold boots (~1-2s).
 	microVM, err := a.vmManager.Launch(ctx, serviceID, vm.VMConfig{
@@ -453,23 +473,47 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 		LayerPackPath:       opts.LayerPackPath,
 		SnapshotMemPath:     opts.SnapshotMemPath,
 		SnapshotVMStatePath: opts.SnapshotVMStatePath,
+		MountDrives:         mountDrives,
 	})
 	if err != nil {
+		// Stop any sync goroutines if VM launch failed.
+		for _, stop := range blockSyncStoppers {
+			stop()
+		}
 		return fmt.Errorf("launch VM: %w", err)
 	}
 
 	// Connect to the supervisor inside the VM via vsock.
-	vsock := vm.NewVsockClient(microVM.VsockPath)
+	vsockClient := vm.NewVsockClient(microVM.VsockPath)
 
 	// Wait for supervisor to be ready with exponential backoff.
 	backoff := 100 * time.Millisecond
 	for i := 0; i < 50; i++ {
-		if err := vsock.Ping(); err == nil {
+		if err := vsockClient.Ping(); err == nil {
 			break
 		}
 		time.Sleep(backoff)
 		if backoff < 2*time.Second {
 			backoff = time.Duration(float64(backoff) * 1.5)
+		}
+	}
+
+	// Mount volumes inside the VM via supervisor RPCs.
+	for _, mount := range opts.Mounts {
+		mode := mount.EffectiveMode()
+		mountReq := vm.MountVolumeRequest{
+			Path:     mount.Path,
+			Mode:     mode,
+			ReadOnly: mount.IsReadOnly(),
+			Bucket:   mount.Bucket,
+			Prefix:   mount.Prefix,
+		}
+		if err := vsockClient.MountVolume(mountReq); err != nil {
+			a.logger.Warn("failed to mount volume — continuing without mount",
+				"path", mount.Path, "mode", mode, "error", err)
+		} else {
+			a.logger.Info("volume mounted in VM",
+				"path", mount.Path, "mode", mode, "readOnly", mount.IsReadOnly())
 		}
 	}
 
@@ -481,7 +525,7 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 		a.sessions[serviceID] = &SessionState{
 			ID:       serviceID,
 			VM:       microVM,
-			Vsock:    vsock,
+			Vsock:    vsockClient,
 			GuestIP:  microVM.GuestIP,
 			LayerMap: make(map[string]string),
 		}
@@ -511,7 +555,7 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 
 	// Extract bundle into the VM if a BundleKey is provided.
 	if opts.BundleKey != "" && a.objStore != nil {
-		if err := a.extractBundle(ctx, vsock, opts.BundleKey, opts.Workdir); err != nil {
+		if err := a.extractBundle(ctx, vsockClient, opts.BundleKey, opts.Workdir); err != nil {
 			a.vmManager.Stop(serviceID)
 			return fmt.Errorf("extract bundle: %w", err)
 		}
@@ -522,7 +566,7 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 	if restartPolicy == "" {
 		restartPolicy = "on-failure"
 	}
-	if _, err := vsock.ServiceStart(opts.Command, opts.Args, opts.Env, opts.Workdir, restartPolicy); err != nil {
+	if _, err := vsockClient.ServiceStart(opts.Command, opts.Args, opts.Env, opts.Workdir, restartPolicy); err != nil {
 		a.vmManager.Stop(serviceID)
 		return fmt.Errorf("start service: %w", err)
 	}
@@ -532,7 +576,7 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 	a.sessions[serviceID] = &SessionState{
 		ID:       serviceID,
 		VM:       microVM,
-		Vsock:    vsock,
+		Vsock:    vsockClient,
 		GuestIP:  microVM.GuestIP,
 		LayerMap: make(map[string]string),
 	}

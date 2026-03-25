@@ -24,13 +24,37 @@ type ServiceRoute struct {
 
 // VolumeMount describes a storage volume attached to a service.
 type VolumeMount struct {
-	Path        string `json:"path"`
-	Provider    string `json:"provider"`              // "volume", "s3", "gcs", "azure"
-	Name        string `json:"name,omitempty"`
-	Bucket      string `json:"bucket,omitempty"`
-	Region      string `json:"region,omitempty"`
-	Credentials string `json:"credentials,omitempty"` // ${secret.name}
-	Access      string `json:"access,omitempty"`      // "readwrite" or "readonly"
+	Path         string `json:"path"`
+	Provider     string `json:"provider"`              // "volume", "s3", "gcs", "azure"
+	Name         string `json:"name,omitempty"`
+	Bucket       string `json:"bucket,omitempty"`
+	Prefix       string `json:"prefix,omitempty"`      // Object key prefix within bucket.
+	Region       string `json:"region,omitempty"`
+	Credentials  string `json:"credentials,omitempty"` // ${secret.name}
+	Access       string `json:"access,omitempty"`      // "readwrite" (default) or "readonly"
+	Mode         string `json:"mode,omitempty"`         // "fuse" (default, real-time) or "block" (periodic sync)
+	SyncInterval int    `json:"sync_interval,omitempty"` // Seconds between syncs for block mode (default 30).
+}
+
+// IsReadOnly returns true if the mount access is "readonly".
+func (v *VolumeMount) IsReadOnly() bool {
+	return v.Access == "readonly"
+}
+
+// EffectiveMode returns the mount mode, defaulting to "fuse".
+func (v *VolumeMount) EffectiveMode() string {
+	if v.Mode == "block" {
+		return "block"
+	}
+	return "fuse"
+}
+
+// EffectiveSyncInterval returns the sync interval for block mode, defaulting to 30s.
+func (v *VolumeMount) EffectiveSyncInterval() int {
+	if v.SyncInterval > 0 {
+		return v.SyncInterval
+	}
+	return 30
 }
 
 // AutoscaleConfig controls horizontal scaling of a service.

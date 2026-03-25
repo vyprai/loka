@@ -14,6 +14,7 @@ import (
 
 	"github.com/mdlayher/vsock"
 	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/supervisor/fusemount"
 	"github.com/vyprai/loka/internal/worker/vm"
 )
 
@@ -21,12 +22,14 @@ import (
 // It listens on vsock port 52 and handles RPC calls from the worker on the host.
 // This is the ONLY process that can spawn commands inside the VM.
 type Server struct {
-	executor *Executor
-	listener net.Listener
-	logger   *slog.Logger
-	ctx      context.Context
-	cancel   context.CancelFunc
-	service  *ServiceProcess // At most one service per VM.
+	executor      *Executor
+	listener      net.Listener
+	logger        *slog.Logger
+	ctx           context.Context
+	cancel        context.CancelFunc
+	service       *ServiceProcess // At most one service per VM.
+	volumes       *volumeManager  // Manages FUSE and block volume mounts.
+	hostRPCCaller fusemount.RPCCaller // For FUSE mounts: proxies file ops to the host.
 }
 
 // NewServer creates a new supervisor server.
@@ -42,10 +45,17 @@ func NewServer(policy loka.ExecPolicy, mode loka.ExecMode, logger *slog.Logger) 
 				)
 			},
 		),
-		logger: logger,
-		ctx:    ctx,
-		cancel: cancel,
+		logger:  logger,
+		ctx:     ctx,
+		cancel:  cancel,
+		volumes: newVolumeManager(logger),
 	}
+}
+
+// SetHostRPCCaller sets the RPC caller used by FUSE mounts to proxy file
+// operations back to the host worker.
+func (s *Server) SetHostRPCCaller(caller fusemount.RPCCaller) {
+	s.hostRPCCaller = caller
 }
 
 // ListenAndServe starts the vsock listener.
@@ -89,6 +99,9 @@ func (s *Server) Stop() {
 		s.listener.Close()
 	}
 	s.executor.CancelAll()
+	if s.volumes != nil {
+		s.volumes.unmountAll()
+	}
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
@@ -129,7 +142,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	// Set deadline based on method: long-running operations get more time.
 	switch req.Method {
-	case "service_start", "exec":
+	case "service_start", "exec", "mount_volume":
 		conn.SetDeadline(time.Now().Add(30 * time.Minute))
 	default:
 		conn.SetDeadline(time.Now().Add(5 * time.Minute))
@@ -237,6 +250,9 @@ func (s *Server) handleRPC(req vm.RPCRequest) vm.RPCResponse {
 
 	case "service_logs":
 		return s.handleServiceLogs(req)
+
+	case "mount_volume":
+		return s.handleMountVolume(req)
 
 	default:
 		return vm.RPCResponse{

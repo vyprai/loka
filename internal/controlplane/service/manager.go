@@ -656,6 +656,7 @@ func (m *Manager) Wake(ctx context.Context, id string) (*loka.Service, error) {
 				Workdir:              workdir,
 				Port:                 svc.Port,
 				BundleKey:            svc.BundleKey,
+				Mounts:               svc.Mounts,
 				SnapshotMemPath:      snapshotMemPath,
 				SnapshotVMStatePath:  snapshotVMStatePath,
 				IsAppSnapshotRestore: isAppSnapshotRestore,

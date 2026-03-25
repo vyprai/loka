@@ -225,6 +225,77 @@ func (c *VsockClient) ServiceLogs(lines int) (*ServiceLogsResult, error) {
 	return &result, nil
 }
 
+// MountVolumeRequest is the params for "mount_volume" method.
+type MountVolumeRequest struct {
+	Path     string `json:"path"`      // Mount path inside VM.
+	Mode     string `json:"mode"`      // "fuse" or "block".
+	ReadOnly bool   `json:"readonly"`  // Whether the mount is read-only.
+	Bucket   string `json:"bucket"`    // Object store bucket (for fuse mode).
+	Prefix   string `json:"prefix"`    // Object key prefix (for fuse mode).
+}
+
+// MountVolume sends a mount_volume RPC to the supervisor inside the VM.
+// For FUSE mode, the supervisor mounts a FUSE filesystem backed by vsock RPCs to the host.
+// For block mode, the supervisor mounts the pre-attached /dev/vdX drive.
+func (c *VsockClient) MountVolume(req MountVolumeRequest) error {
+	params, _ := json.Marshal(req)
+	_, err := c.call("mount_volume", params)
+	return err
+}
+
+// FsStatRequest is the params for "fs_stat" host-side RPC.
+type FsStatRequest struct {
+	Bucket string `json:"bucket"`
+	Key    string `json:"key"`
+}
+
+// FsStatResult is the result of an "fs_stat" RPC.
+type FsStatResult struct {
+	Exists bool  `json:"exists"`
+	Size   int64 `json:"size"`
+	IsDir  bool  `json:"is_dir"`
+}
+
+// FsReadRequest is the params for "fs_read" host-side RPC.
+type FsReadRequest struct {
+	Bucket string `json:"bucket"`
+	Key    string `json:"key"`
+	Offset int64  `json:"offset"`
+	Length int    `json:"length"`
+}
+
+// FsReadResult is the result of an "fs_read" RPC.
+type FsReadResult struct {
+	Data string `json:"data"` // Base64-encoded file content.
+	Size int64  `json:"size"` // Total file size.
+}
+
+// FsWriteRequest is the params for "fs_write" host-side RPC.
+type FsWriteRequest struct {
+	Bucket string `json:"bucket"`
+	Key    string `json:"key"`
+	Data   string `json:"data"` // Base64-encoded file content.
+}
+
+// FsListRequest is the params for "fs_list" host-side RPC.
+type FsListRequest struct {
+	Bucket string `json:"bucket"`
+	Prefix string `json:"prefix"`
+}
+
+// FsListEntry describes a single file/directory in a listing.
+type FsListEntry struct {
+	Name  string `json:"name"`
+	Size  int64  `json:"size"`
+	IsDir bool   `json:"is_dir"`
+}
+
+// FsDeleteRequest is the params for "fs_delete" host-side RPC.
+type FsDeleteRequest struct {
+	Bucket string `json:"bucket"`
+	Key    string `json:"key"`
+}
+
 // HealthCheck checks if a port is listening inside the VM, optionally doing an
 // HTTP GET if path is non-empty. Uses the supervisor's health_check RPC.
 func (c *VsockClient) HealthCheck(port int, path string) error {
