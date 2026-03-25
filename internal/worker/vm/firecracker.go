@@ -28,6 +28,8 @@ type MicroVM struct {
 	PID        int    // Firecracker process PID.
 	Config     VMConfig
 	State      VMState
+	TapName    string // TAP device name on the host (e.g. "tap3").
+	GuestIP    string // Guest IP address (e.g. "172.16.0.14").
 
 	cmd    *exec.Cmd
 	cancel context.CancelFunc
@@ -122,6 +124,15 @@ func (m *Manager) Launch(ctx context.Context, id string, cfg VMConfig) (*MicroVM
 	os.Remove(socketPath)
 	os.Remove(vsockPath)
 
+	// Create a TAP network interface for this VM.
+	tapName := fmt.Sprintf("tap%d", cid)
+	guestIP := fmt.Sprintf("172.16.0.%d", cid*4+2)
+	hostIP := fmt.Sprintf("172.16.0.%d/30", cid*4+1)
+	if err := createTAP(tapName, hostIP); err != nil {
+		m.logger.Warn("failed to create TAP device — VM will have no network",
+			"tap", tapName, "error", err)
+	}
+
 	// Determine startup mode: snapshot restore (~28ms) vs cold boot (~1-2s).
 	useSnapshot := cfg.SnapshotMemPath != "" && cfg.SnapshotVMStatePath != ""
 
@@ -157,6 +168,8 @@ func (m *Manager) Launch(ctx context.Context, id string, cfg VMConfig) (*MicroVM
 		VsockPath:  vsockPath,
 		Config:     cfg,
 		State:      VMStateCreating,
+		TapName:    tapName,
+		GuestIP:    guestIP,
 		cmd:        cmd,
 		cancel:     cancel,
 		logger:     m.logger,
@@ -188,6 +201,8 @@ func (m *Manager) Launch(ctx context.Context, id string, cfg VMConfig) (*MicroVM
 		"vcpu", cfg.VCPU,
 		"memory_mb", cfg.MemoryMB,
 		"cid", cid,
+		"tap", tapName,
+		"guest_ip", guestIP,
 		"socket", socketPath,
 	)
 
@@ -233,6 +248,11 @@ func (m *Manager) Stop(id string) error {
 
 	vm.cancel()
 	vm.State = VMStateStopped
+
+	// Clean up TAP device.
+	if vm.TapName != "" {
+		destroyTAP(vm.TapName)
+	}
 
 	// Clean up socket files.
 	os.Remove(vm.SocketPath)
@@ -309,10 +329,16 @@ func (m *Manager) CreateSnapshot(id, memPath, snapPath string) error {
 // ── Firecracker Config Builder ──────────────────────────
 
 type fcConfig struct {
-	BootSource    fcBootSource    `json:"boot-source"`
-	Drives        []fcDrive       `json:"drives"`
-	MachineConfig fcMachineConfig `json:"machine-config"`
-	Vsock         *fcVsock        `json:"vsock,omitempty"`
+	BootSource        fcBootSource         `json:"boot-source"`
+	Drives            []fcDrive            `json:"drives"`
+	MachineConfig     fcMachineConfig      `json:"machine-config"`
+	Vsock             *fcVsock             `json:"vsock,omitempty"`
+	NetworkInterfaces []fcNetworkInterface `json:"network-interfaces,omitempty"`
+}
+
+type fcNetworkInterface struct {
+	IfaceID     string `json:"iface_id"`
+	HostDevName string `json:"host_dev_name"`
 }
 
 type fcBootSource struct {
@@ -348,9 +374,15 @@ func buildFirecrackerConfig(cfg VMConfig, socketPath, vsockPath string) fcConfig
 	}
 
 	// Kernel boot args:
-	// - ip=... configures loopback at kernel level (no userspace tools needed)
+	// - ip=... configures the guest eth0 with a /30 subnet and loopback
 	// - init= sets the supervisor as PID 1
-	bootArgs := "console=ttyS0 reboot=k panic=1 pci=off ip=127.0.0.1:::255.0.0.0::lo:none init=/usr/local/bin/loka-supervisor"
+	// The kernel ip= format: ip=client::gateway:netmask:hostname:device:autoconf
+	guestIP := fmt.Sprintf("172.16.0.%d", cfg.VsockCID*4+2)
+	hostIP := fmt.Sprintf("172.16.0.%d", cfg.VsockCID*4+1)
+	bootArgs := fmt.Sprintf(
+		"console=ttyS0 reboot=k panic=1 pci=off ip=%s::%s:255.255.255.252::eth0:off init=/usr/local/bin/loka-supervisor",
+		guestIP, hostIP,
+	)
 
 	drives := []fcDrive{
 		{
@@ -363,6 +395,9 @@ func buildFirecrackerConfig(cfg VMConfig, socketPath, vsockPath string) fcConfig
 
 	// TODO: Add overlay as a separate ext4 disk image (not directory).
 	// The overlay FS is managed inside the VM by the supervisor.
+
+	// TAP network interface: each VM gets a dedicated TAP device.
+	tapName := fmt.Sprintf("tap%d", cfg.VsockCID)
 
 	return fcConfig{
 		BootSource: fcBootSource{
@@ -377,6 +412,9 @@ func buildFirecrackerConfig(cfg VMConfig, socketPath, vsockPath string) fcConfig
 		Vsock: &fcVsock{
 			GuestCID: int(cfg.VsockCID),
 			UdsPath:  vsockPath,
+		},
+		NetworkInterfaces: []fcNetworkInterface{
+			{IfaceID: "eth0", HostDevName: tapName},
 		},
 	}
 }
@@ -404,6 +442,48 @@ func firecrackerAPICall(socketPath, method, path, body string) error {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s %s: %w (output: %s)", method, path, err, string(out))
+	}
+	return nil
+}
+
+// createTAP creates a TAP network device on the host and assigns it an IP.
+// Each VM gets a /30 subnet so only the host and guest share the link.
+func createTAP(tapName, hostCIDR string) error {
+	// Remove any stale TAP with the same name.
+	exec.Command("ip", "link", "del", tapName).Run()
+
+	if out, err := exec.Command("ip", "tuntap", "add", tapName, "mode", "tap").CombinedOutput(); err != nil {
+		return fmt.Errorf("create TAP %s: %w (%s)", tapName, err, string(out))
+	}
+	if out, err := exec.Command("ip", "addr", "add", hostCIDR, "dev", tapName).CombinedOutput(); err != nil {
+		exec.Command("ip", "link", "del", tapName).Run()
+		return fmt.Errorf("assign IP to TAP %s: %w (%s)", tapName, err, string(out))
+	}
+	if out, err := exec.Command("ip", "link", "set", tapName, "up").CombinedOutput(); err != nil {
+		exec.Command("ip", "link", "del", tapName).Run()
+		return fmt.Errorf("bring up TAP %s: %w (%s)", tapName, err, string(out))
+	}
+	return nil
+}
+
+// destroyTAP removes a TAP network device from the host.
+func destroyTAP(tapName string) {
+	exec.Command("ip", "link", "del", tapName).Run()
+}
+
+// EnableIPForwarding enables IPv4 forwarding and sets up NAT masquerading
+// so VMs can reach the internet through the host. The outIface parameter
+// is the host's outbound interface (e.g. "eth0", "lima0").
+func EnableIPForwarding(outIface string) error {
+	if out, err := exec.Command("sysctl", "-w", "net.ipv4.ip_forward=1").CombinedOutput(); err != nil {
+		return fmt.Errorf("enable ip_forward: %w (%s)", err, string(out))
+	}
+	if out, err := exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING", "-o", outIface, "-j", "MASQUERADE").CombinedOutput(); err != nil {
+		// Rule doesn't exist yet, add it.
+		if out, err := exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING", "-o", outIface, "-j", "MASQUERADE").CombinedOutput(); err != nil {
+			return fmt.Errorf("add MASQUERADE rule: %w (%s)", err, string(out))
+		}
+		_ = out
 	}
 	return nil
 }

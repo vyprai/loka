@@ -223,20 +223,32 @@ func (lw *LocalWorker) handleCommand(ctx context.Context, cmd cpworker.WorkerCom
 				lw.logger.Error("failed to launch service", "service", data.ServiceID, "error", err)
 				return
 			}
-			// Persist the forwarded port so the domain proxy can route to it.
-			if fwdPort := lw.agent.GetForwardedPort(data.ServiceID); fwdPort > 0 && lw.store != nil {
+			// Persist the guest IP and forwarded port so the domain proxy can route to the VM.
+			if lw.store != nil {
 				svc, err := lw.store.Services().Get(ctx, data.ServiceID)
 				if err != nil {
-					lw.logger.Warn("failed to get service for forward port update",
+					lw.logger.Warn("failed to get service for routing update",
 						"service", data.ServiceID, "error", err)
 				} else {
-					svc.ForwardPort = fwdPort
-					if err := lw.store.Services().Update(ctx, svc); err != nil {
-						lw.logger.Warn("failed to persist forward port",
-							"service", data.ServiceID, "error", err)
-					} else {
-						lw.logger.Info("service forward port persisted",
-							"service", data.ServiceID, "forward_port", fwdPort)
+					updated := false
+					if guestIP := lw.agent.GetGuestIP(data.ServiceID); guestIP != "" {
+						svc.GuestIP = guestIP
+						updated = true
+					}
+					if fwdPort := lw.agent.GetForwardedPort(data.ServiceID); fwdPort > 0 {
+						svc.ForwardPort = fwdPort
+						updated = true
+					}
+					if updated {
+						if err := lw.store.Services().Update(ctx, svc); err != nil {
+							lw.logger.Warn("failed to persist service routing info",
+								"service", data.ServiceID, "error", err)
+						} else {
+							lw.logger.Info("service routing info persisted",
+								"service", data.ServiceID,
+								"guest_ip", svc.GuestIP,
+								"forward_port", svc.ForwardPort)
+						}
 					}
 				}
 			}

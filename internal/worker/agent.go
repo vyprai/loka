@@ -61,6 +61,7 @@ type SessionState struct {
 	VM       *vm.MicroVM     // Firecracker VM instance.
 	Vsock    *vm.VsockClient // vsock connection to supervisor inside VM.
 	LayerMap map[string]string
+	GuestIP  string // VM guest IP for direct TCP access (e.g. "172.16.0.14").
 
 	// Port forwarding: local TCP listener that tunnels to VM via vsock.
 	PortForwardListener net.Listener
@@ -185,12 +186,14 @@ func (a *Agent) LaunchSession(ctx context.Context, sessionID string, opts Launch
 		Policy:   opts.Policy,
 		VM:       microVM,
 		Vsock:    vsock,
+		GuestIP:  microVM.GuestIP,
 		LayerMap: make(map[string]string),
 	}
 
 	a.logger.Info("session launched with Firecracker VM",
 		"session", sessionID,
 		"vm_pid", microVM.PID,
+		"guest_ip", microVM.GuestIP,
 		"mode", opts.Mode,
 		"warm_snapshot", opts.SnapshotMemPath != "",
 	)
@@ -474,6 +477,7 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 		ID:       serviceID,
 		VM:       microVM,
 		Vsock:    vsock,
+		GuestIP:  microVM.GuestIP,
 		LayerMap: make(map[string]string),
 	}
 	a.mu.Unlock()
@@ -832,6 +836,17 @@ func (a *Agent) StopPortForward(sessionID string) {
 		sess.ForwardedPort = 0
 		a.logger.Info("port forward stopped", "session", sessionID)
 	}
+}
+
+// GetGuestIP returns the guest IP for a session's VM, or "" if not available.
+func (a *Agent) GetGuestIP(sessionID string) string {
+	a.mu.RLock()
+	sess, ok := a.sessions[sessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return sess.GuestIP
 }
 
 // GetForwardedPort returns the local forwarded port for a session, or 0 if none.

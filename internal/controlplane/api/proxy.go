@@ -272,10 +272,12 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 		p.logger.Warn("failed to touch service", "service", route.ServiceID, "error", err)
 	}
 
-	// Use the vsock-tunnelled forward port if available (Firecracker VMs
-	// have no TAP interface). Otherwise fall back to direct worker IP.
+	// Route to the service: prefer direct VM guest IP (TAP networking),
+	// fall back to vsock-tunnelled forward port, then to worker IP.
 	var targetAddr string
-	if svc.ForwardPort > 0 {
+	if svc.GuestIP != "" {
+		targetAddr = fmt.Sprintf("%s:%d", svc.GuestIP, route.RemotePort)
+	} else if svc.ForwardPort > 0 {
 		targetAddr = fmt.Sprintf("127.0.0.1:%d", svc.ForwardPort)
 	} else {
 		targetAddr = fmt.Sprintf("%s:%d", wc.Worker.IPAddress, route.RemotePort)
