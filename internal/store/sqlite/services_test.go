@@ -40,7 +40,7 @@ func newTestService(name string, status loka.ServiceStatus, workerID string) *lo
 		HealthTimeout:  5,
 		HealthRetries:  3,
 		Labels:         map[string]string{"env": "test"},
-		Mounts:         []loka.VolumeMount{{Path: "/data", Provider: "volume", Name: "data-vol"}},
+		Mounts:         []loka.Volume{{Path: "/data", Provider: "volume", Name: "data-vol"}},
 		Autoscale: &loka.AutoscaleConfig{
 			Min:                1,
 			Max:                5,
@@ -306,7 +306,7 @@ func TestServiceJSONFields(t *testing.T) {
 		{CustomDomain: "app.example.com", Port: 443, Protocol: "http"},
 		{Subdomain: "grpc", Port: 9090, Protocol: "grpc"},
 	}
-	svc.Mounts = []loka.VolumeMount{
+	svc.Mounts = []loka.Volume{
 		{Path: "/data", Provider: "volume", Name: "data-vol", Access: "readwrite"},
 		{Path: "/cache", Provider: "s3", Bucket: "my-bucket", Region: "us-east-1", Credentials: "${secret.aws}", Access: "readonly"},
 		{Path: "/backup", Provider: "gcs", Bucket: "backup-bucket", Region: "us-central1"},

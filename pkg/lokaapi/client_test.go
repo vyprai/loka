@@ -373,30 +373,26 @@ func TestClientHealthPath(t *testing.T) {
 	}
 }
 
-func TestStorageMountJSONRoundTrip(t *testing.T) {
-	mount := StorageMount{
-		Name:      "data-bucket",
-		Provider:  "s3",
-		Bucket:    "my-bucket",
-		Prefix:    "datasets/",
-		MountPath: "/mnt/data",
-		ReadOnly:  true,
-		Region:    "us-east-1",
-		Endpoint:  "https://s3.amazonaws.com",
-		Credentials: map[string]string{
-			"access_key_id":     "AKIA...",
-			"secret_access_key": "secret",
-		},
+func TestVolumeJSONRoundTrip(t *testing.T) {
+	mount := Volume{
+		Path:        "/mnt/data",
+		Name:        "data-bucket",
+		Provider:    "s3",
+		Bucket:      "my-bucket",
+		Prefix:      "datasets/",
+		Region:      "us-east-1",
+		Credentials: "${secret.aws}",
+		Access:      "readonly",
 	}
 
 	data, err := json.Marshal(mount)
 	if err != nil {
-		t.Fatalf("Marshal StorageMount: %v", err)
+		t.Fatalf("Marshal Volume: %v", err)
 	}
 
-	var got StorageMount
+	var got Volume
 	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("Unmarshal StorageMount: %v", err)
+		t.Fatalf("Unmarshal Volume: %v", err)
 	}
 
 	if got.Name != mount.Name {
@@ -411,20 +407,17 @@ func TestStorageMountJSONRoundTrip(t *testing.T) {
 	if got.Prefix != mount.Prefix {
 		t.Errorf("Prefix: expected %q, got %q", mount.Prefix, got.Prefix)
 	}
-	if got.MountPath != mount.MountPath {
-		t.Errorf("MountPath: expected %q, got %q", mount.MountPath, got.MountPath)
+	if got.Path != mount.Path {
+		t.Errorf("Path: expected %q, got %q", mount.Path, got.Path)
 	}
-	if got.ReadOnly != mount.ReadOnly {
-		t.Errorf("ReadOnly: expected %v, got %v", mount.ReadOnly, got.ReadOnly)
+	if got.Access != mount.Access {
+		t.Errorf("Access: expected %q, got %q", mount.Access, got.Access)
 	}
 	if got.Region != mount.Region {
 		t.Errorf("Region: expected %q, got %q", mount.Region, got.Region)
 	}
-	if got.Endpoint != mount.Endpoint {
-		t.Errorf("Endpoint: expected %q, got %q", mount.Endpoint, got.Endpoint)
-	}
-	if got.Credentials["access_key_id"] != "AKIA..." {
-		t.Errorf("Credentials[access_key_id]: expected %q, got %q", "AKIA...", got.Credentials["access_key_id"])
+	if got.Credentials != mount.Credentials {
+		t.Errorf("Credentials: expected %q, got %q", mount.Credentials, got.Credentials)
 	}
 }
 
@@ -474,18 +467,17 @@ func TestCreateSessionReqWithMountsAndPorts(t *testing.T) {
 		VCPUs:    4,
 		MemoryMB: 2048,
 		Labels:   map[string]string{"team": "ml"},
-		Mounts: []StorageMount{
+		Mounts: []Volume{
 			{
-				Provider:  "s3",
-				Bucket:    "training-data",
-				MountPath: "/mnt/training",
-				ReadOnly:  true,
+				Path:     "/mnt/training",
+				Provider: "s3",
+				Bucket:   "training-data",
+				Access:   "readonly",
 			},
 			{
-				Provider:  "gcs",
-				Bucket:    "output-data",
-				MountPath: "/mnt/output",
-				ReadOnly:  false,
+				Path:     "/mnt/output",
+				Provider: "gcs",
+				Bucket:   "output-data",
 			},
 		},
 		Ports: []PortMapping{

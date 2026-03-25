@@ -1008,17 +1008,17 @@ func TestRESTSessionWithMounts(t *testing.T) {
 		"image": "alpine:latest",
 		"mounts": []map[string]any{
 			{
-				"provider":   "s3",
-				"bucket":     "my-bucket",
-				"prefix":     "datasets/",
-				"mount_path": "/data",
-				"read_only":  true,
-				"region":     "us-east-1",
+				"provider": "s3",
+				"bucket":   "my-bucket",
+				"prefix":   "datasets/",
+				"path":     "/data",
+				"access":   "readonly",
+				"region":   "us-east-1",
 			},
 			{
-				"provider":   "gcs",
-				"bucket":     "gcs-bucket",
-				"mount_path": "/gcs",
+				"provider": "gcs",
+				"bucket":   "gcs-bucket",
+				"path":     "/gcs",
 			},
 		},
 	}
@@ -1044,11 +1044,11 @@ func TestRESTSessionWithMounts(t *testing.T) {
 			if m.Prefix != "datasets/" {
 				t.Errorf("s3 mount: prefix = %q, want datasets/", m.Prefix)
 			}
-			if m.MountPath != "/data" {
-				t.Errorf("s3 mount: mount_path = %q, want /data", m.MountPath)
+			if m.Path != "/data" {
+				t.Errorf("s3 mount: path = %q, want /data", m.Path)
 			}
-			if !m.ReadOnly {
-				t.Error("s3 mount: expected read_only=true")
+			if !m.IsReadOnly() {
+				t.Error("s3 mount: expected access=readonly")
 			}
 			if m.Region != "us-east-1" {
 				t.Errorf("s3 mount: region = %q, want us-east-1", m.Region)
@@ -1059,8 +1059,8 @@ func TestRESTSessionWithMounts(t *testing.T) {
 			if m.Bucket != "gcs-bucket" {
 				t.Errorf("gcs mount: bucket = %q, want gcs-bucket", m.Bucket)
 			}
-			if m.MountPath != "/gcs" {
-				t.Errorf("gcs mount: mount_path = %q, want /gcs", m.MountPath)
+			if m.Path != "/gcs" {
+				t.Errorf("gcs mount: path = %q, want /gcs", m.Path)
 			}
 		}
 	}

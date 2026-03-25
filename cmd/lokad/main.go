@@ -28,6 +28,7 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
 	"github.com/vyprai/loka/internal/controlplane/service"
 	"github.com/vyprai/loka/internal/controlplane/session"
+	"github.com/vyprai/loka/internal/controlplane/volume"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/objstore"
 	azureobjstore "github.com/vyprai/loka/internal/objstore/azure"
@@ -415,11 +416,14 @@ func main() {
 	// Initialize scheduler.
 	sched := scheduler.New(registry, scheduler.Strategy(cfg.Scheduler.Strategy))
 
+	// Initialize volume manager.
+	volMgr := volume.NewManager(db, objStore, logger)
+
 	// Initialize session manager.
 	sm := session.NewManager(db, registry, sched, imgMgr, objStore, logger)
 
 	// Initialize service manager.
-	svcMgr := service.NewManager(db, registry, sched, imgMgr, objStore, logger)
+	svcMgr := service.NewManager(db, registry, sched, imgMgr, objStore, volMgr, logger)
 
 	// Mark stale services as stopped — VMs don't survive lokad restart,
 	// so any service in "deploying" or "running" state is orphaned.

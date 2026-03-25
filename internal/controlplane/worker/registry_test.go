@@ -82,6 +82,7 @@ func (s *mockStore) Checkpoints() store.CheckpointRepository { return nil }
 func (s *mockStore) Workers() store.WorkerRepository         { return s.workerRepo }
 func (s *mockStore) Tokens() store.TokenRepository           { return nil }
 func (s *mockStore) Services() store.ServiceRepository       { return nil }
+func (s *mockStore) Volumes() store.VolumeRepository         { return nil }
 func (s *mockStore) Migrate(_ context.Context) error         { return nil }
 func (s *mockStore) Close() error                            { return nil }
 

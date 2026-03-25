@@ -30,39 +30,6 @@ type PortMapping struct {
 	Protocol   string `json:"protocol,omitempty"`    // "tcp" (default) or "udp".
 }
 
-// StorageMount defines an object storage bucket mounted into a session's VM.
-type StorageMount struct {
-	// Name is a human-readable identifier for this mount.
-	Name string `json:"name,omitempty"`
-
-	// Provider is the storage backend: "s3", "gcs", "azure-blob", "local".
-	Provider string `json:"provider"`
-
-	// Bucket is the bucket or container name.
-	Bucket string `json:"bucket"`
-
-	// Prefix limits the mount to a key prefix within the bucket (optional).
-	// e.g. "datasets/2024/" → only keys under that prefix are visible.
-	Prefix string `json:"prefix,omitempty"`
-
-	// MountPath is where the storage appears inside the VM's filesystem.
-	// e.g. "/data", "/mnt/s3"
-	MountPath string `json:"mount_path"`
-
-	// ReadOnly makes the mount read-only inside the VM.
-	ReadOnly bool `json:"read_only,omitempty"`
-
-	// Credentials for accessing the storage.
-	// These are passed to the in-VM mount agent, not stored in the database.
-	Credentials *StorageCredentials `json:"credentials,omitempty"`
-
-	// Region for the storage bucket (optional, used for S3/GCS).
-	Region string `json:"region,omitempty"`
-
-	// Endpoint for S3-compatible storage (MinIO, R2, etc). Optional.
-	Endpoint string `json:"endpoint,omitempty"`
-}
-
 // SyncDirection controls which way data flows during a sync.
 type SyncDirection string
 
@@ -75,7 +42,7 @@ const (
 
 // SyncRequest describes a sync operation on a session's storage mount.
 type SyncRequest struct {
-	// MountPath identifies which mount to sync (matches StorageMount.MountPath).
+	// MountPath identifies which mount to sync (matches Volume.Path).
 	MountPath string `json:"mount_path"`
 	// Direction: "push" (VM → bucket) or "pull" (bucket → VM).
 	Direction SyncDirection `json:"direction"`

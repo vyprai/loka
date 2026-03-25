@@ -148,6 +148,7 @@ func main() {
 		newAdminCmd(),
 		newSecretCmd(),
 		newImageCmd(),
+		newVolumeCmd(),
 	)
 
 	rootCmd.AddCommand(&cobra.Command{

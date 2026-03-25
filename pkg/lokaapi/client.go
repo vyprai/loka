@@ -131,18 +131,21 @@ type Session struct {
 	UpdatedAt     time.Time         `json:"UpdatedAt"`
 }
 
-// StorageMount defines an object storage bucket to mount into a session.
-type StorageMount struct {
-	Name        string            `json:"name,omitempty"`
-	Provider    string            `json:"provider"`              // "s3", "gcs", "azure-blob", "local"
-	Bucket      string            `json:"bucket"`
-	Prefix      string            `json:"prefix,omitempty"`
-	MountPath   string            `json:"mount_path"`
-	ReadOnly    bool              `json:"read_only,omitempty"`
-	Region      string            `json:"region,omitempty"`
-	Endpoint    string            `json:"endpoint,omitempty"`    // For S3-compatible (MinIO, R2)
-	Credentials map[string]string `json:"credentials,omitempty"` // access_key_id, secret_access_key, etc.
+// Volume defines a storage volume to mount into a session or service.
+type Volume struct {
+	Path        string `json:"path"`
+	Provider    string `json:"provider"`              // "s3", "gcs", "azure", "volume"
+	Name        string `json:"name,omitempty"`
+	Bucket      string `json:"bucket,omitempty"`
+	Prefix      string `json:"prefix,omitempty"`
+	Region      string `json:"region,omitempty"`
+	Credentials string `json:"credentials,omitempty"` // ${secret.name}
+	Access      string `json:"access,omitempty"`      // "readonly" or "readwrite" (default)
 }
+
+// StorageMount is an alias for Volume for backward compatibility.
+// Deprecated: Use Volume instead.
+type StorageMount = Volume
 
 // PortMapping maps a local port to a port inside the session VM.
 type PortMapping struct {

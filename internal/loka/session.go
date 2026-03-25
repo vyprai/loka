@@ -29,7 +29,7 @@ type Session struct {
 	VCPUs      int
 	MemoryMB   int
 	Labels     map[string]string
-	Mounts     []StorageMount `json:"Mounts,omitempty"` // Object storage mounts.
+	Mounts     []Volume       `json:"Mounts,omitempty"` // Volume mounts.
 	Ports       []PortMapping  `json:"Ports,omitempty"`  // Port forwarding declarations.
 	ExecPolicy    ExecPolicy     `json:"ExecPolicy"`                  // Command/package restrictions.
 	IdleTimeout   int            `json:"IdleTimeout,omitempty"`       // Seconds of inactivity before auto-idle (0 = never).

@@ -82,6 +82,7 @@ func (s *Store) Checkpoints() store.CheckpointRepository { return &checkpointRep
 func (s *Store) Workers() store.WorkerRepository         { return &workerRepo{db: s.db} }
 func (s *Store) Tokens() store.TokenRepository           { return &tokenRepo{db: s.db} }
 func (s *Store) Services() store.ServiceRepository       { return &serviceRepo{db: s.db} }
+func (s *Store) Volumes() store.VolumeRepository         { return &volumeRepo{db: s.db} }
 
 var _ store.Store = (*Store)(nil)
 
@@ -210,5 +211,13 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
 	used       INTEGER NOT NULL DEFAULT 0,
 	worker_id  TEXT NOT NULL DEFAULT '',
 	created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS volumes (
+	name        TEXT PRIMARY KEY,
+	provider    TEXT NOT NULL DEFAULT 'volume',
+	mount_count INTEGER NOT NULL DEFAULT 0,
+	created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+	updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 `

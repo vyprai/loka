@@ -33,7 +33,7 @@ type lokaYAML struct {
 
 	// Routes and mounts.
 	Routes []loka.ServiceRoute `yaml:"routes,omitempty"`
-	Mounts []loka.VolumeMount  `yaml:"mounts,omitempty"`
+	Mounts []loka.Volume  `yaml:"mounts,omitempty"`
 
 	// Health check config.
 	HealthPath     string `yaml:"health_path,omitempty"`

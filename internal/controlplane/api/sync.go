@@ -46,9 +46,9 @@ func (s *Server) syncMount(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find the matching mount.
-	var mount *loka.StorageMount
+	var mount *loka.Volume
 	for i := range sess.Mounts {
-		if sess.Mounts[i].MountPath == req.MountPath {
+		if sess.Mounts[i].Path == req.MountPath {
 			mount = &sess.Mounts[i]
 			break
 		}
@@ -58,10 +58,10 @@ func (s *Server) syncMount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if mount.ReadOnly && req.Direction == loka.SyncPull {
+	if mount.IsReadOnly() && req.Direction == loka.SyncPull {
 		// Pull into a read-only mount updates the VM's view — allowed.
 	}
-	if mount.ReadOnly && req.Direction == loka.SyncPush {
+	if mount.IsReadOnly() && req.Direction == loka.SyncPush {
 		writeError(w, http.StatusBadRequest, "cannot push from a read-only mount")
 		return
 	}

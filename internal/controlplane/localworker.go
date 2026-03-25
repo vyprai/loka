@@ -118,6 +118,7 @@ func (lw *LocalWorker) handleCommand(ctx context.Context, cmd cpworker.WorkerCom
 			RootfsPath:          data.RootfsPath,
 			SnapshotMemPath:     data.SnapshotMemPath,
 			SnapshotVMStatePath: data.SnapshotVMStatePath,
+			Mounts:              data.Mounts,
 		}); err != nil {
 			lw.logger.Error("failed to launch session", "session", data.SessionID, "error", err)
 		}

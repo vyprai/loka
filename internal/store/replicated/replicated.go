@@ -300,6 +300,7 @@ func (s *Store) Checkpoints() store.CheckpointRepository { return &replicatedChe
 func (s *Store) Workers() store.WorkerRepository         { return &replicatedWorkerRepo{s: s} }
 func (s *Store) Tokens() store.TokenRepository           { return &replicatedTokenRepo{s: s} }
 func (s *Store) Services() store.ServiceRepository       { return &replicatedServiceRepo{s: s} }
+func (s *Store) Volumes() store.VolumeRepository         { return s.local.Volumes() }
 func (s *Store) Migrate(ctx context.Context) error     { return s.local.Migrate(ctx) }
 func (s *Store) Close() error                          { return s.local.Close() }
 

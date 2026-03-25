@@ -75,7 +75,7 @@ type LaunchServiceData struct {
 	Port                int
 	BundleKey           string
 	RestartPolicy       string
-	Mounts              []loka.VolumeMount
+	Mounts              []loka.Volume
 	SnapshotMemPath     string // Warm snapshot memory file for instant restore.
 	SnapshotVMStatePath string // Warm snapshot VM state file.
 	IsAppSnapshotRestore bool  // If true, skip bundle extraction and service_start.

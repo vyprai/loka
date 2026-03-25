@@ -20,7 +20,7 @@ func setupServiceTestServer(t *testing.T) *testServer {
 	ts := setupTestServer(t)
 	ts.registerTestWorker(t)
 
-	svcMgr := service.NewManager(ts.store, ts.registry, ts.sched, ts.imgMgr, nil, ts.server.logger)
+	svcMgr := service.NewManager(ts.store, ts.registry, ts.sched, ts.imgMgr, nil, nil, ts.server.logger)
 	t.Cleanup(func() { svcMgr.Close() })
 	ts.server.serviceManager = svcMgr
 	return ts

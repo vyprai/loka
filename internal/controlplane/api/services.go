@@ -30,7 +30,7 @@ type deployServiceReq struct {
 	HealthTimeout  int                   `json:"health_timeout,omitempty"`
 	HealthRetries  int                   `json:"health_retries,omitempty"`
 	Labels         map[string]string     `json:"labels,omitempty"`
-	Mounts         []loka.VolumeMount    `json:"mounts,omitempty"`
+	Mounts         []loka.Volume    `json:"mounts,omitempty"`
 	Autoscale      *loka.AutoscaleConfig `json:"autoscale,omitempty"`
 }
 

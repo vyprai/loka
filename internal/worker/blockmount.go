@@ -44,7 +44,7 @@ type BlockMountResult struct {
 // BuildImage creates a sparse ext4 image, populates it with files from the
 // object store, and returns the image path. The image can be attached as a
 // Firecracker drive.
-func (b *BlockMountBuilder) BuildImage(ctx context.Context, serviceID string, mount loka.VolumeMount) (*BlockMountResult, error) {
+func (b *BlockMountBuilder) BuildImage(ctx context.Context, serviceID string, mount loka.Volume) (*BlockMountResult, error) {
 	// Create a directory for this service's block mounts.
 	mountDir := filepath.Join(b.dataDir, "vms", serviceID, "mounts")
 	if err := os.MkdirAll(mountDir, 0o755); err != nil {
@@ -107,7 +107,7 @@ func (b *BlockMountBuilder) BuildImage(ctx context.Context, serviceID string, mo
 
 // populateImage mounts the ext4 image, downloads files from the object store
 // into it, then unmounts.
-func (b *BlockMountBuilder) populateImage(ctx context.Context, imagePath string, mount loka.VolumeMount) error {
+func (b *BlockMountBuilder) populateImage(ctx context.Context, imagePath string, mount loka.Volume) error {
 	// Create a temporary mount point.
 	tmpMount, err := os.MkdirTemp("", "loka-blockmount-*")
 	if err != nil {
@@ -159,8 +159,8 @@ func (b *BlockMountBuilder) populateImage(ctx context.Context, imagePath string,
 }
 
 // syncLoop periodically syncs the ext4 image contents with the object store.
-func (b *BlockMountBuilder) syncLoop(ctx context.Context, imagePath string, mount loka.VolumeMount, stopCh chan struct{}) {
-	interval := time.Duration(mount.EffectiveSyncInterval()) * time.Second
+func (b *BlockMountBuilder) syncLoop(ctx context.Context, imagePath string, mount loka.Volume, stopCh chan struct{}) {
+	interval := 30 * time.Second // Default sync interval for block mode.
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -181,7 +181,7 @@ func (b *BlockMountBuilder) syncLoop(ctx context.Context, imagePath string, moun
 
 // syncOnce mounts the ext4 image, compares files with the object store,
 // and uploads changed files.
-func (b *BlockMountBuilder) syncOnce(ctx context.Context, imagePath string, mount loka.VolumeMount) error {
+func (b *BlockMountBuilder) syncOnce(ctx context.Context, imagePath string, mount loka.Volume) error {
 	tmpMount, err := os.MkdirTemp("", "loka-blocksync-*")
 	if err != nil {
 		return fmt.Errorf("create temp mount: %w", err)

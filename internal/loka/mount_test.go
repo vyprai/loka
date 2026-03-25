@@ -45,56 +45,70 @@ func TestPortMapping_OmitEmptyProtocol(t *testing.T) {
 	}
 }
 
-func TestStorageMount_JSON(t *testing.T) {
-	sm := StorageMount{
-		Name:      "data",
-		Provider:  "s3",
-		Bucket:    "my-bucket",
-		Prefix:    "datasets/",
-		MountPath: "/data",
-		ReadOnly:  true,
-		Region:    "us-east-1",
-		Endpoint:  "http://minio:9000",
-		Credentials: &StorageCredentials{
-			AccessKeyID:    "AKIA",
-			SecretAccessKey: "secret",
-		},
+func TestVolume_JSON(t *testing.T) {
+	v := Volume{
+		Path:        "/data",
+		Provider:    "s3",
+		Bucket:      "my-bucket",
+		Prefix:      "datasets/",
+		Region:      "us-east-1",
+		Credentials: "${secret.aws}",
+		Access:      "readonly",
 	}
-	data, err := json.Marshal(sm)
+	data, err := json.Marshal(v)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	var got StorageMount
+	var got Volume
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.Provider != sm.Provider {
-		t.Errorf("Provider: got %q, want %q", got.Provider, sm.Provider)
+	if got.Provider != v.Provider {
+		t.Errorf("Provider: got %q, want %q", got.Provider, v.Provider)
 	}
-	if got.Bucket != sm.Bucket {
-		t.Errorf("Bucket: got %q, want %q", got.Bucket, sm.Bucket)
+	if got.Bucket != v.Bucket {
+		t.Errorf("Bucket: got %q, want %q", got.Bucket, v.Bucket)
 	}
-	if got.ReadOnly != sm.ReadOnly {
-		t.Errorf("ReadOnly: got %v, want %v", got.ReadOnly, sm.ReadOnly)
+	if got.Access != v.Access {
+		t.Errorf("Access: got %q, want %q", got.Access, v.Access)
 	}
-	if got.Credentials == nil {
-		t.Fatal("Credentials is nil after unmarshal")
-	}
-	if got.Credentials.AccessKeyID != "AKIA" {
-		t.Errorf("AccessKeyID: got %q, want %q", got.Credentials.AccessKeyID, "AKIA")
+	if got.Credentials != "${secret.aws}" {
+		t.Errorf("Credentials: got %q, want %q", got.Credentials, "${secret.aws}")
 	}
 }
 
-func TestStorageMount_OmitEmpty(t *testing.T) {
-	sm := StorageMount{Provider: "s3", Bucket: "b", MountPath: "/m"}
-	data, _ := json.Marshal(sm)
+func TestVolume_OmitEmpty(t *testing.T) {
+	v := Volume{Path: "/m", Provider: "s3"}
+	data, _ := json.Marshal(v)
 	var raw map[string]any
 	json.Unmarshal(data, &raw)
-	for _, key := range []string{"name", "prefix", "read_only", "credentials", "region", "endpoint"} {
+	for _, key := range []string{"name", "bucket", "prefix", "credentials", "region", "access"} {
 		if _, ok := raw[key]; ok {
 			t.Errorf("key %q should be omitted when empty/zero", key)
 		}
+	}
+}
+
+func TestVolume_IsReadOnly(t *testing.T) {
+	v := Volume{Access: "readonly"}
+	if !v.IsReadOnly() {
+		t.Error("expected IsReadOnly to return true")
+	}
+	v.Access = "readwrite"
+	if v.IsReadOnly() {
+		t.Error("expected IsReadOnly to return false")
+	}
+}
+
+func TestVolume_EffectiveMode(t *testing.T) {
+	v := Volume{Access: "readonly"}
+	if v.EffectiveMode() != "block" {
+		t.Errorf("expected block, got %s", v.EffectiveMode())
+	}
+	v.Access = "readwrite"
+	if v.EffectiveMode() != "fuse" {
+		t.Errorf("expected fuse, got %s", v.EffectiveMode())
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/internal/controlplane/service"
 	"github.com/vyprai/loka/internal/controlplane/session"
+	"github.com/vyprai/loka/internal/controlplane/volume"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/objstore"
 	"github.com/vyprai/loka/internal/provider"
@@ -36,6 +37,7 @@ type Server struct {
 	gc               GCRunner
 	retention        config.RetentionConfig
 	caCertPath       string // Path to CA certificate (served at /ca.crt).
+	volumeManager    *volume.Manager // Named volume lifecycle manager.
 	domainProxy      *DomainProxy // Domain proxy for subdomain routing.
 	registryStore    *registry.Store // OCI registry blob/manifest store.
 	raftStatusFn     RaftStatusFn    // Optional: returns Raft cluster status for debug endpoint.
@@ -65,10 +67,17 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		regStore = registry.NewStore(o.ObjStore)
 	}
 
+	// Create volume manager if object store is available.
+	var volMgr *volume.Manager
+	if o.ObjStore != nil {
+		volMgr = volume.NewManager(s, o.ObjStore, logger)
+	}
+
 	srv := &Server{
 		router:           chi.NewRouter(),
 		sessionManager:   sm,
 		serviceManager:   o.ServiceManager,
+		volumeManager:    volMgr,
 		workerRegistry:   reg,
 		providerRegistry: provReg,
 		imageManager:     imgMgr,
@@ -96,6 +105,11 @@ func (s *Server) Handler() http.Handler {
 // RegistryStore returns the OCI registry store, or nil if not configured.
 func (s *Server) RegistryStore() *registry.Store {
 	return s.registryStore
+}
+
+// VolumeManager returns the named volume manager, or nil if not configured.
+func (s *Server) VolumeManager() *volume.Manager {
+	return s.volumeManager
 }
 
 // NewRegistryAPI creates an OCI Distribution Spec registry server backed by
@@ -229,6 +243,12 @@ func (s *Server) routes() {
 		r.Post("/worker-tokens", s.createWorkerToken)
 		r.Get("/worker-tokens", s.listWorkerTokens)
 		r.Delete("/worker-tokens/{tokenId}", s.revokeWorkerToken)
+
+		// Volumes
+		r.Post("/volumes", s.createVolume)
+		r.Get("/volumes", s.listVolumes)
+		r.Get("/volumes/{name}", s.getVolume)
+		r.Delete("/volumes/{name}", s.deleteVolume)
 
 		// Image Registry Management
 		s.registerRegistryRoutes(r)

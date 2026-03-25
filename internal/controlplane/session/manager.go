@@ -33,7 +33,7 @@ type CreateOpts struct {
 	Labels       map[string]string
 	WorkerLabels map[string]string    // Scheduling affinity labels.
 	ExecPolicy   *loka.ExecPolicy     // Command restrictions. Nil = default policy.
-	Mounts       []loka.StorageMount  // Object storage mounts.
+	Mounts       []loka.Volume  // Object storage mounts.
 	Ports        []loka.PortMapping   // Port forwarding declarations.
 	IdleTimeout  int                  // Seconds before auto-idle (0 = never).
 }
@@ -119,6 +119,16 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 	} else {
 		s.WorkerID = wConn.Worker.ID
 
+		// Auto-create persistent workspace volume for this session.
+		workspaceVol := loka.Volume{
+			Path:     "/workspace",
+			Provider: "volume",
+			Name:     "session-" + s.Name,
+			Access:   "readwrite",
+		}
+		// Prepend workspace to user-specified mounts.
+		allMounts := append([]loka.Volume{workspaceVol}, opts.Mounts...)
+
 		// Check if image is cached — if not, we go to provisioning first.
 		imageReady := false
 		launchData := worker.LaunchSessionData{
@@ -128,6 +138,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 			ExecPolicy: s.ExecPolicy,
 			VCPUs:      s.VCPUs,
 			MemoryMB:   s.MemoryMB,
+			Mounts:     allMounts,
 		}
 		if m.images != nil {
 			if img, ok := m.images.GetByRef(s.ImageRef); ok {
@@ -942,6 +953,7 @@ func (m *Manager) SyncMount(ctx context.Context, sessionID string, req loka.Sync
 // ListArtifacts returns files changed in a session relative to the base image.
 // If checkpointID is empty, returns the live diff from the worker.
 // If checkpointID is set, returns the diff stored with that checkpoint.
+// Also includes files from the session's workspace volume (volumes/session-<name>/).
 func (m *Manager) ListArtifacts(ctx context.Context, sessionID, checkpointID string) ([]*loka.Artifact, error) {
 	s, err := m.store.Sessions().Get(ctx, sessionID)
 	if err != nil {
@@ -966,6 +978,10 @@ func (m *Manager) ListArtifacts(ctx context.Context, sessionID, checkpointID str
 		return arts, nil
 	}
 
+	// Try reading from the session's workspace volume first.
+	// The volume name convention is "session-<name>".
+	volArts := m.listVolumeArtifacts(ctx, s)
+
 	// Live diff: try the worker first, fall back to objstore manifest.
 	s, err = m.ensureRunning(ctx, s)
 	if err != nil {
@@ -973,7 +989,11 @@ func (m *Manager) ListArtifacts(ctx context.Context, sessionID, checkpointID str
 		key := fmt.Sprintf("%s/artifacts/manifest.json", sessionID)
 		arts, objErr := m.readArtifactManifest(ctx, key)
 		if objErr == nil {
-			return arts, nil
+			return append(arts, volArts...), nil
+		}
+		// If we have volume artifacts, return those even if session is not running.
+		if len(volArts) > 0 {
+			return volArts, nil
 		}
 		return nil, err
 	}
@@ -983,7 +1003,10 @@ func (m *Manager) ListArtifacts(ctx context.Context, sessionID, checkpointID str
 		key := fmt.Sprintf("%s/artifacts/manifest.json", sessionID)
 		arts, objErr := m.readArtifactManifest(ctx, key)
 		if objErr == nil {
-			return arts, nil
+			return append(arts, volArts...), nil
+		}
+		if len(volArts) > 0 {
+			return volArts, nil
 		}
 		return nil, fmt.Errorf("session has no assigned worker")
 	}
@@ -1001,11 +1024,48 @@ func (m *Manager) ListArtifacts(ctx context.Context, sessionID, checkpointID str
 	key := fmt.Sprintf("%s/artifacts/manifest.json", sessionID)
 	arts, objErr := m.readArtifactManifest(ctx, key)
 	if objErr == nil && len(arts) > 0 {
-		return arts, nil
+		return append(arts, volArts...), nil
+	}
+
+	if len(volArts) > 0 {
+		return volArts, nil
 	}
 
 	m.logger.Info("list_artifacts dispatched", "session", sessionID, "worker", s.WorkerID)
 	return []*loka.Artifact{}, nil
+}
+
+// listVolumeArtifacts lists files from the session's workspace volume.
+// The volume name convention is "session-<name>".
+// This works even after the session is destroyed because the volume persists in objstore.
+func (m *Manager) listVolumeArtifacts(ctx context.Context, s *loka.Session) []*loka.Artifact {
+	if m.objStore == nil {
+		return nil
+	}
+
+	volName := "session-" + s.Name
+	objects, err := m.objStore.List(ctx, "volumes", volName+"/")
+	if err != nil {
+		return nil
+	}
+
+	var arts []*loka.Artifact
+	for _, obj := range objects {
+		// Strip the volume prefix to get the relative path.
+		path := strings.TrimPrefix(obj.Key, volName+"/")
+		if path == "" {
+			continue
+		}
+		arts = append(arts, &loka.Artifact{
+			ID:        fmt.Sprintf("%x", sha256.Sum256([]byte(obj.Key)))[:16],
+			SessionID: s.ID,
+			Path:      "/" + path,
+			Size:      obj.Size,
+			Type:      "added",
+			CreatedAt: obj.LastModified,
+		})
+	}
+	return arts
 }
 
 // readArtifactManifest reads and decodes an artifact manifest from the object store.
@@ -1032,14 +1092,30 @@ func (m *Manager) readArtifactManifest(ctx context.Context, key string) ([]*loka
 }
 
 // DownloadArtifact reads a single file from the session's overlay.
-// It first tries the object store, falling back to the worker if not found.
+// It first tries the workspace volume, then the object store, falling back to the worker.
 func (m *Manager) DownloadArtifact(ctx context.Context, sessionID, path string) ([]byte, error) {
 	s, err := m.store.Sessions().Get(ctx, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("session not found: %w", err)
 	}
 
-	// Try reading from objstore first.
+	// Try reading from the session's workspace volume first.
+	if m.objStore != nil {
+		volName := "session-" + s.Name
+		// Strip leading slash from path for objstore key.
+		objPath := strings.TrimPrefix(path, "/")
+		reader, volErr := m.objStore.Get(ctx, "volumes", volName+"/"+objPath)
+		if volErr == nil {
+			defer reader.Close()
+			data, err := io.ReadAll(reader)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read artifact from volume: %w", err)
+			}
+			return data, nil
+		}
+	}
+
+	// Try reading from objstore artifact store.
 	if m.objStore != nil {
 		pathHash := fmt.Sprintf("%x", sha256.Sum256([]byte(path)))
 		key := fmt.Sprintf("%s/artifacts/%s.dat", sessionID, pathHash)

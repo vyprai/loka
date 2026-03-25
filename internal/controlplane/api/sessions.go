@@ -22,7 +22,7 @@ type createSessionReq struct {
 	BlockedCommands []string              `json:"blocked_commands,omitempty"`
 	NetworkPolicy   *loka.NetworkPolicy   `json:"network_policy,omitempty"`
 	ExecPolicy      *loka.ExecPolicy      `json:"exec_policy,omitempty"`
-	Mounts          []loka.StorageMount   `json:"mounts,omitempty"`
+	Mounts          []loka.Volume   `json:"mounts,omitempty"`
 	Ports           []loka.PortMapping    `json:"ports,omitempty"`
 }
 

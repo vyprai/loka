@@ -16,6 +16,7 @@ type Store interface {
 	Workers() WorkerRepository
 	Tokens() TokenRepository
 	Services() ServiceRepository
+	Volumes() VolumeRepository
 	Migrate(ctx context.Context) error
 	Close() error
 }
@@ -117,4 +118,13 @@ type TokenRepository interface {
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context) ([]*loka.WorkerToken, error)
 	DeleteExpiredBefore(ctx context.Context, before time.Time) (int, error)
+}
+
+// VolumeRepository manages named volume persistence.
+type VolumeRepository interface {
+	Create(ctx context.Context, vol *loka.VolumeRecord) error
+	Get(ctx context.Context, name string) (*loka.VolumeRecord, error)
+	Update(ctx context.Context, vol *loka.VolumeRecord) error
+	Delete(ctx context.Context, name string) error
+	List(ctx context.Context) ([]*loka.VolumeRecord, error)
 }

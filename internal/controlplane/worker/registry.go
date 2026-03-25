@@ -36,6 +36,7 @@ type LaunchSessionData struct {
 	RootfsPath          string // Image rootfs.
 	SnapshotMemPath     string // Warm snapshot memory (for instant restore).
 	SnapshotVMStatePath string // Warm snapshot VM state.
+	Mounts              []loka.Volume // Volume mounts for the session.
 }
 
 // StopSessionData is the payload for stopping/suspending a session.

@@ -161,9 +161,9 @@ func newSessionCreateCmd() *cobra.Command {
 	return cmd
 }
 
-// parseMount parses a mount string like "s3://bucket/prefix@/mount/path:ro?endpoint=..."
-func parseMount(s string) (lokaapi.StorageMount, error) {
-	mount := lokaapi.StorageMount{}
+// parseMount parses a mount string like "s3://bucket/prefix@/mount/path:ro?region=us-east-1&credentials=${secret.aws}"
+func parseMount(s string) (lokaapi.Volume, error) {
+	mount := lokaapi.Volume{}
 
 	// Split off query params.
 	query := ""
@@ -198,41 +198,45 @@ func parseMount(s string) (lokaapi.StorageMount, error) {
 
 	// Check for :ro suffix.
 	if strings.HasSuffix(mountPath, ":ro") {
-		mount.ReadOnly = true
+		mount.Access = "readonly"
 		mountPath = strings.TrimSuffix(mountPath, ":ro")
 	}
-	mount.MountPath = mountPath
+	mount.Path = mountPath
 
-	// Parse query params — known keys go to typed fields, rest go to credentials.
-	creds := map[string]string{}
+	// Parse query params. Known params go to typed fields;
+	// unknown params (credentials, endpoints) are collected into Credentials string.
+	var credParts []string
 	for _, kv := range strings.Split(query, "&") {
 		if kv == "" {
 			continue
 		}
 		k, v, _ := strings.Cut(kv, "=")
 		switch k {
-		case "endpoint":
-			mount.Endpoint = v
 		case "region":
 			mount.Region = v
-		case "access_key_id", "secret_access_key", "session_token",
-			"service_account_json",
-			"account_name", "account_key", "sas_token":
-			// If value starts with @, read from file.
+		case "credentials":
+			mount.Credentials = v
+		case "access":
+			mount.Access = v
+		case "name":
+			mount.Name = v
+		default:
+			// Collect provider-specific params (access_key_id, service_account_json, etc.)
+			// If value starts with @, read file contents.
 			if strings.HasPrefix(v, "@") {
-				data, err := os.ReadFile(strings.TrimPrefix(v, "@"))
+				filePath := v[1:]
+				data, err := os.ReadFile(filePath)
 				if err != nil {
-					return mount, fmt.Errorf("read credential file %s: %w", v, err)
+					return mount, fmt.Errorf("read credential file %s: %w", filePath, err)
 				}
 				v = strings.TrimSpace(string(data))
+				kv = k + "=" + v
 			}
-			creds[k] = v
-		default:
-			creds[k] = v
+			credParts = append(credParts, kv)
 		}
 	}
-	if len(creds) > 0 {
-		mount.Credentials = creds
+	if mount.Credentials == "" && len(credParts) > 0 {
+		mount.Credentials = strings.Join(credParts, "&")
 	}
 
 	return mount, nil

@@ -52,7 +52,7 @@ type ServiceLaunchOpts struct {
 	Port                int
 	BundleKey           string
 	RestartPolicy       string
-	Mounts              []loka.VolumeMount // Volume mounts (FUSE or block mode).
+	Mounts              []loka.Volume // Volume mounts (FUSE or block mode).
 	SnapshotMemPath     string // Warm snapshot memory file for instant restore.
 	SnapshotVMStatePath string // Warm snapshot VM state file.
 	IsAppSnapshotRestore bool  // If true, skip bundle extraction and service_start (app already running).
@@ -144,6 +144,7 @@ type LaunchOpts struct {
 	LayerPackPath       string // Path to read-only layer-pack ext4.
 	SnapshotMemPath     string // Warm snapshot memory file for instant restore.
 	SnapshotVMStatePath string // Warm snapshot VM state file.
+	Mounts              []loka.Volume // Volume mounts for the session.
 }
 
 // LaunchSession starts a Firecracker microVM for this session.
@@ -165,6 +166,23 @@ func (a *Agent) LaunchSession(ctx context.Context, sessionID string, opts Launch
 	mem := opts.MemoryMB
 	if mem == 0 { mem = 512 }
 
+	// Prepare block-mode mount drives (ext4 images for readonly volumes).
+	var mountDrives []vm.MountDrive
+	blockBuilder := NewBlockMountBuilder(a.objStore, a.vmManager.DataDir(), a.logger)
+
+	for _, mount := range opts.Mounts {
+		if mount.EffectiveMode() != "block" {
+			continue
+		}
+		result, err := blockBuilder.BuildImage(ctx, sessionID, mount)
+		if err != nil {
+			a.logger.Warn("failed to build block mount image — skipping mount",
+				"path", mount.Path, "error", err)
+			continue
+		}
+		mountDrives = append(mountDrives, result.Drive)
+	}
+
 	// Launch Firecracker microVM — uses warm snapshot if available (~28ms),
 	// otherwise cold boots (~1-2s).
 	microVM, err := a.vmManager.Launch(ctx, sessionID, vm.VMConfig{
@@ -174,6 +192,7 @@ func (a *Agent) LaunchSession(ctx context.Context, sessionID string, opts Launch
 		LayerPackPath:       opts.LayerPackPath,
 		SnapshotMemPath:     opts.SnapshotMemPath,
 		SnapshotVMStatePath: opts.SnapshotVMStatePath,
+		MountDrives:         mountDrives,
 	})
 	if err != nil {
 		return fmt.Errorf("launch VM: %w", err)
@@ -197,6 +216,25 @@ func (a *Agent) LaunchSession(ctx context.Context, sessionID string, opts Launch
 	// Send exec policy and mode to the supervisor.
 	vsock.SetPolicy(opts.Policy)
 	vsock.SetMode(opts.Mode)
+
+	// Mount volumes inside the VM via supervisor RPCs.
+	for _, mount := range opts.Mounts {
+		mode := mount.EffectiveMode()
+		mountReq := vm.MountVolumeRequest{
+			Path:     mount.Path,
+			Mode:     mode,
+			ReadOnly: mount.IsReadOnly(),
+			Bucket:   mount.Bucket,
+			Prefix:   mount.Prefix,
+		}
+		if err := vsock.MountVolume(mountReq); err != nil {
+			a.logger.Warn("failed to mount volume — continuing without mount",
+				"path", mount.Path, "mode", mode, "error", err)
+		} else {
+			a.logger.Info("volume mounted in VM",
+				"path", mount.Path, "mode", mode, "readOnly", mount.IsReadOnly())
+		}
+	}
 
 	a.sessions[sessionID] = &SessionState{
 		ID:       sessionID,
@@ -553,8 +591,18 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 		return nil
 	}
 
-	// Extract bundle into the VM if a BundleKey is provided.
-	if opts.BundleKey != "" && a.objStore != nil {
+	// Check if /workspace is already mounted as a read-only volume (bundle volume).
+	// If so, skip inline bundle extraction — the bundle is already available.
+	hasBundleVolume := false
+	for _, m := range opts.Mounts {
+		if m.Path == "/workspace" {
+			hasBundleVolume = true
+			break
+		}
+	}
+
+	// Extract bundle into the VM if a BundleKey is provided and no volume covers /workspace.
+	if !hasBundleVolume && opts.BundleKey != "" && a.objStore != nil {
 		if err := a.extractBundle(ctx, vsockClient, opts.BundleKey, opts.Workdir); err != nil {
 			a.vmManager.Stop(serviceID)
 			return fmt.Errorf("extract bundle: %w", err)

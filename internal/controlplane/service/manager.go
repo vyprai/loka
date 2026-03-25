@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
+	"github.com/vyprai/loka/internal/controlplane/volume"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/loka"
 	"github.com/vyprai/loka/internal/objstore"
@@ -40,7 +41,7 @@ type DeployOpts struct {
 	HealthTimeout  int
 	HealthRetries  int
 	Labels         map[string]string
-	Mounts         []loka.VolumeMount
+	Mounts         []loka.Volume
 	Autoscale      *loka.AutoscaleConfig
 }
 
@@ -55,12 +56,13 @@ type DomainRouteRegistrar interface {
 
 // Manager orchestrates service lifecycle.
 type Manager struct {
-	store     store.Store
-	registry  *worker.Registry
-	scheduler *scheduler.Scheduler
-	images    *image.Manager
-	objStore  objstore.ObjectStore
-	logger    *slog.Logger
+	store         store.Store
+	registry      *worker.Registry
+	scheduler     *scheduler.Scheduler
+	images        *image.Manager
+	objStore      objstore.ObjectStore
+	volumeManager *volume.Manager
+	logger        *slog.Logger
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -73,18 +75,19 @@ type Manager struct {
 }
 
 // NewManager creates a new service manager.
-func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler, imgMgr *image.Manager, objStore objstore.ObjectStore, logger *slog.Logger) *Manager {
+func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler, imgMgr *image.Manager, objStore objstore.ObjectStore, volMgr *volume.Manager, logger *slog.Logger) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
-		store:     s,
-		registry:  reg,
-		scheduler: sched,
-		images:    imgMgr,
-		objStore:  objStore,
-		logger:    logger,
-		ctx:       ctx,
-		cancel:    cancel,
-		deploySem: make(chan struct{}, 10), // max 10 concurrent deploys
+		store:         s,
+		registry:      reg,
+		scheduler:     sched,
+		images:        imgMgr,
+		objStore:      objStore,
+		volumeManager: volMgr,
+		logger:        logger,
+		ctx:           ctx,
+		cancel:        cancel,
+		deploySem:     make(chan struct{}, 10), // max 10 concurrent deploys
 	}
 	m.wg.Add(1)
 	go m.idleMonitor()
@@ -279,6 +282,25 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 		}
 	}
 
+	// If a bundle is provided, extract it into a named volume and mount
+	// as read-only at /workspace instead of inline extraction via vsock.
+	allMounts := svc.Mounts
+	if svc.BundleKey != "" && m.volumeManager != nil {
+		bundleVolName := fmt.Sprintf("bundle-%s-%s", svc.Name, svc.ID[:8])
+		if err := m.volumeManager.ExtractBundle(ctx, bundleVolName, svc.BundleKey); err != nil {
+			m.logger.Error("failed to extract bundle into volume — falling back to inline",
+				"service", serviceID, "error", err)
+		} else {
+			bundleVol := loka.Volume{
+				Path:     "/workspace",
+				Provider: "volume",
+				Name:     bundleVolName,
+				Access:   "readonly",
+			}
+			allMounts = append([]loka.Volume{bundleVol}, svc.Mounts...)
+		}
+	}
+
 	launchData := worker.LaunchServiceData{
 		ServiceID:           serviceID,
 		ImageRef:            svc.ImageRef,
@@ -292,7 +314,7 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 		Workdir:             workdir,
 		Port:                svc.Port,
 		BundleKey:           svc.BundleKey,
-		Mounts:              svc.Mounts,
+		Mounts:              allMounts,
 		SnapshotMemPath:     snapshotMemPath,
 		SnapshotVMStatePath: snapshotVMStatePath,
 		HealthPath:          svc.HealthPath,
@@ -909,6 +931,49 @@ func (m *Manager) downloadSnapshot(key string) (string, error) {
 	}
 	tmpFile.Close()
 	return tmpFile.Name(), nil
+}
+
+// ListArtifacts returns files stored in the service's writable mounted volumes.
+// This works even after the service is destroyed because volumes persist in objstore.
+func (m *Manager) ListArtifacts(ctx context.Context, serviceID string) ([]loka.Artifact, error) {
+	svc, err := m.store.Services().Get(ctx, serviceID)
+	if err != nil {
+		return nil, fmt.Errorf("service not found: %w", err)
+	}
+
+	if m.objStore == nil {
+		return nil, fmt.Errorf("object store not configured")
+	}
+
+	var artifacts []loka.Artifact
+	for _, mount := range svc.Mounts {
+		if mount.Access != "readonly" && mount.Provider == "volume" && mount.Name != "" {
+			objects, err := m.objStore.List(ctx, "volumes", mount.Name+"/")
+			if err != nil {
+				m.logger.Warn("failed to list volume files", "volume", mount.Name, "error", err)
+				continue
+			}
+			for _, obj := range objects {
+				path := strings.TrimPrefix(obj.Key, mount.Name+"/")
+				if path == "" {
+					continue
+				}
+				hash := fmt.Sprintf("%x", obj.Key)
+				if len(hash) > 16 {
+					hash = hash[:16]
+				}
+				artifacts = append(artifacts, loka.Artifact{
+					ID:        hash,
+					SessionID: serviceID, // Use service ID in the session field.
+					Path:      mount.Path + "/" + path,
+					Size:      obj.Size,
+					Type:      "added",
+					CreatedAt: obj.LastModified,
+				})
+			}
+		}
+	}
+	return artifacts, nil
 }
 
 // setError marks a service as errored.
