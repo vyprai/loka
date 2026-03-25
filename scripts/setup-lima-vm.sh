@@ -31,6 +31,11 @@ portForwards:
     hostPort: 6840
   - guestPort: 6841
     hostPort: 6841
+  - guestPort: 6843
+    hostPort: 6843
+  - guestPort: 5453
+    hostPort: 5453
+    proto: udp
 provision:
   - mode: system
     script: |
@@ -66,6 +71,11 @@ portForwards:
     hostPort: 6840
   - guestPort: 6841
     hostPort: 6841
+  - guestPort: 6843
+    hostPort: 6843
+  - guestPort: 5453
+    hostPort: 5453
+    proto: udp
 provision:
   - mode: system
     script: |

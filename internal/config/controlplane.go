@@ -38,6 +38,8 @@ type DomainConfig struct {
 	Enabled    bool   `yaml:"enabled"`     // Enable domain forwarding.
 	BaseDomain string `yaml:"base_domain"` // e.g. "loka.example.com" → {subdomain}.loka.example.com
 	ListenAddr string `yaml:"listen_addr"` // Separate listener for proxied traffic (default ":6843")
+	DNSAddr    string `yaml:"dns_addr"`    // DNS server listen address (default ":5453")
+	DNSEnabled bool   `yaml:"dns_enabled"` // Enable built-in DNS server.
 }
 
 // AuthConfig configures API authentication.
@@ -160,5 +162,16 @@ func (c *ControlPlaneConfig) Defaults() {
 	}
 	if c.Retention.CleanupInterval == "" {
 		c.Retention.CleanupInterval = "1h"
+	}
+
+	// Domain proxy defaults.
+	if c.Domain.BaseDomain == "" {
+		c.Domain.BaseDomain = "loka"
+	}
+	if c.Domain.ListenAddr == "" {
+		c.Domain.ListenAddr = ":6843"
+	}
+	if c.Domain.DNSAddr == "" {
+		c.Domain.DNSAddr = ":5453"
 	}
 }

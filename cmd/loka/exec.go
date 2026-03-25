@@ -21,11 +21,13 @@ func newExecCmd() *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:   "exec <session-id> [-- command args...]",
+		Use:   "exec <session-id-or-name> [-- command args...]",
 		Short: "Execute command(s) in a session",
 		Long: `Execute a single command or multiple commands in parallel.
+Accepts a session UUID or human-readable name.
 
 Examples:
+  loka exec brave-falcon-a3f2 -- echo hello
   loka exec <session-id> -- python script.py
   loka exec <session-id> --workdir /workspace -- npm test
   loka exec <session-id> --parallel --cmd "python analyze.py" --cmd "npm test"`,

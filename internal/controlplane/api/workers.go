@@ -156,7 +156,11 @@ func (s *Server) labelWorker(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) migrateSession(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var req struct {
 		TargetWorkerID string `json:"target_worker_id"`
 	}

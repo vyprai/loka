@@ -174,6 +174,9 @@ CREATE INDEX IF NOT EXISTS idx_services_status_updated ON services(status, updat
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_worker ON sessions(worker_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status_updated ON sessions(status, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name) WHERE name != '';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_services_name ON services(name) WHERE name != '';
 
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
 

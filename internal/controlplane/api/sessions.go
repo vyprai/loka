@@ -80,7 +80,11 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	sess, err := s.sessionManager.Get(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
@@ -114,9 +118,12 @@ func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) destroySession(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	purge := r.URL.Query().Get("purge") == "true"
-	var err error
 	if purge {
 		err = s.sessionManager.Purge(r.Context(), id)
 	} else {
@@ -130,7 +137,11 @@ func (s *Server) destroySession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) pauseSession(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	sess, err := s.sessionManager.Pause(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -140,7 +151,11 @@ func (s *Server) pauseSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	sess, err := s.sessionManager.Resume(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -150,7 +165,11 @@ func (s *Server) resumeSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) idleSession(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	sess, err := s.sessionManager.Idle(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -164,7 +183,11 @@ type setModeReq struct {
 }
 
 func (s *Server) setSessionMode(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var req setModeReq
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -180,7 +203,11 @@ func (s *Server) setSessionMode(w http.ResponseWriter, r *http.Request) {
 
 // getWhitelist returns the session's command whitelist and blocklist.
 func (s *Server) getWhitelist(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	sess, err := s.sessionManager.Get(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
@@ -194,7 +221,11 @@ func (s *Server) getWhitelist(w http.ResponseWriter, r *http.Request) {
 
 // updateWhitelist adds/removes commands from the whitelist and blocklist.
 func (s *Server) updateWhitelist(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var req struct {
 		Add    []string `json:"add"`    // Add to allowed.
 		Remove []string `json:"remove"` // Remove from allowed.

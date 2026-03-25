@@ -364,6 +364,9 @@ Examples:
 			if baseDomain != "" {
 				fmt.Printf("  URL:       https://%s.%s\n", finalSubdomain, baseDomain)
 			}
+			if finalSubdomain != "" {
+				fmt.Printf("  URL:       http://%s.loka:6843\n", finalSubdomain)
+			}
 			fmt.Printf("\n")
 			fmt.Printf("Manage:\n")
 			fmt.Printf("  loka service get %s\n", shortID(svc.ID))

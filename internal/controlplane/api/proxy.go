@@ -450,7 +450,11 @@ func isWebSocket(r *http.Request) bool {
 
 func (s *Server) registerDomainRoutes(r chi.Router, proxy *DomainProxy) {
 	r.Post("/api/v1/sessions/{id}/expose", func(w http.ResponseWriter, r *http.Request) {
-		sessionID := chi.URLParam(r, "id")
+		sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+		if err != nil {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
 		var req struct {
 			Subdomain  string `json:"subdomain"`
 			RemotePort int    `json:"remote_port"`

@@ -44,7 +44,8 @@ type approvalData struct {
 //   event: error       — error occurred
 //   event: done        — stream complete
 func (s *Server) streamExecution(w http.ResponseWriter, r *http.Request) {
-	_ = chi.URLParam(r, "id") // sessionID for future use.
+	// Resolve session ID (supports name-based lookup).
+	_, _ = s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
 	execID := chi.URLParam(r, "execId")
 
 	// Set SSE headers.
@@ -159,7 +160,14 @@ func (s *Server) execAndStream(w http.ResponseWriter, r *http.Request) {
 		sendSSE(w, flusher, "error", map[string]string{"message": "invalid request body"})
 		return
 	}
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		f, _ := w.(http.Flusher)
+		sendSSE(w, f, "error", map[string]string{"message": err.Error()})
+		return
+	}
 
 	var commands []loka.Command
 	if req.Command != "" {

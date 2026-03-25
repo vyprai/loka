@@ -34,6 +34,7 @@ import (
 	leaderobjstore "github.com/vyprai/loka/internal/objstore/leader"
 	localobjstore "github.com/vyprai/loka/internal/objstore/local"
 	s3objstore "github.com/vyprai/loka/internal/objstore/s3"
+	lokadns "github.com/vyprai/loka/internal/dns"
 	"github.com/vyprai/loka/internal/worker/vm"
 	"github.com/vyprai/loka/internal/provider"
 	"github.com/vyprai/loka/pkg/tlsutil"
@@ -208,6 +209,21 @@ func main() {
 		caCertPath = cfg.TLS.CACertFile
 		logger.Info("TLS enabled (user-provided certs)", "cert", cfg.TLS.CertFile)
 	} else if autoTLS {
+		// If domain proxy is enabled with base domain "loka", add wildcard SAN
+		// so that *.loka and loka resolve with the auto-generated certificate.
+		if cfg.Domain.Enabled && cfg.Domain.BaseDomain == "loka" {
+			hasLoka := false
+			for _, san := range cfg.TLS.SANs {
+				if san == "*.loka" || san == "loka" {
+					hasLoka = true
+					break
+				}
+			}
+			if !hasLoka {
+				cfg.TLS.SANs = append(cfg.TLS.SANs, "*.loka", "loka")
+			}
+		}
+
 		// Auto-TLS: try loading shared certs from objstore, generate if not found.
 		tlsDir := cfg.DataDir + "/tls"
 		if err := os.MkdirAll(tlsDir, 0700); err != nil {
@@ -457,6 +473,19 @@ func main() {
 		logger.Info("running as control plane only (no embedded worker)")
 	}
 
+	// ── Initialize domain proxy ─────────────────────────────
+	var domainProxy *api.DomainProxy
+	if cfg.Domain.Enabled {
+		domainProxy = api.NewDomainProxy(
+			cfg.Domain.BaseDomain,
+			sm,
+			registry,
+			logger,
+			api.DomainProxyOpts{ServiceManager: svcMgr},
+		)
+		svcMgr.SetDomainProxy(domainProxy)
+	}
+
 	// ── Initialize API server ───────────────────────────────
 	srv := api.NewServer(sm, registry, providerRegistry, imgMgr, drainer, db, logger, api.ServerOpts{
 		APIKey:         cfg.Auth.APIKey,
@@ -464,12 +493,47 @@ func main() {
 		CACertPath:     caCertPath,
 		ObjStore:       objStore,
 		ServiceManager: svcMgr,
+		DomainProxy:    domainProxy,
 	})
 
 	httpServer := &http.Server{
 		Addr:    cfg.ListenAddr,
 		Handler: srv.Handler(),
 	}
+
+	// ── Start domain proxy listener ─────────────────────────
+	var domainServer *http.Server
+	if domainProxy != nil {
+		domainServer = &http.Server{
+			Addr:    cfg.Domain.ListenAddr,
+			Handler: domainProxy.Handler(),
+		}
+		go func() {
+			logger.Info("domain proxy listening", "addr", cfg.Domain.ListenAddr, "base_domain", cfg.Domain.BaseDomain)
+			if err := domainServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("domain proxy failed", "error", err)
+			}
+		}()
+	}
+
+	// ── Start embedded DNS server ───────────────────────────
+	var dnsServer *lokadns.Server
+	if cfg.Domain.DNSEnabled && cfg.Domain.DNSAddr != "" {
+		dnsServer = lokadns.NewServer(cfg.Domain.BaseDomain, "127.0.0.1", cfg.Domain.DNSAddr)
+		if err := dnsServer.Start(); err != nil {
+			logger.Error("DNS server failed to start", "error", err)
+		} else {
+			logger.Info("DNS server listening", "addr", cfg.Domain.DNSAddr, "domain", cfg.Domain.BaseDomain)
+			defer dnsServer.Stop()
+		}
+	}
+	// Wire DNS toggler into the API server for runtime enable/disable.
+	srv.SetDNSToggler(&dnsToggleAdapter{
+		domain: cfg.Domain.BaseDomain,
+		addr:   cfg.Domain.DNSAddr,
+		logger: logger,
+		server: &dnsServer,
+	})
 
 	// ── Start gRPC server ───────────────────────────────────
 	var grpcOpts []grpc.ServerOption
@@ -499,6 +563,9 @@ func main() {
 		<-sigCh
 		logger.Info("shutting down...")
 		cancel()
+		if domainServer != nil {
+			domainServer.Shutdown(context.Background())
+		}
 		grpcSrv.GracefulStop()
 		httpServer.Shutdown(context.Background())
 	}()
@@ -528,4 +595,34 @@ func envOrDefault(key, defaultVal string) string {
 		return v
 	}
 	return defaultVal
+}
+
+// dnsToggleAdapter implements api.DNSToggler so the admin endpoint can
+// start/stop the embedded DNS server at runtime.
+type dnsToggleAdapter struct {
+	domain string
+	addr   string
+	logger *slog.Logger
+	server **lokadns.Server
+}
+
+func (d *dnsToggleAdapter) Start() error {
+	if *d.server != nil {
+		return nil // already running
+	}
+	s := lokadns.NewServer(d.domain, "127.0.0.1", d.addr)
+	if err := s.Start(); err != nil {
+		return err
+	}
+	*d.server = s
+	d.logger.Info("DNS server started via admin API", "addr", d.addr, "domain", d.domain)
+	return nil
+}
+
+func (d *dnsToggleAdapter) Stop() {
+	if *d.server != nil {
+		(*d.server).Stop()
+		*d.server = nil
+		d.logger.Info("DNS server stopped via admin API")
+	}
 }

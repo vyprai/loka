@@ -15,11 +15,12 @@ func newServiceCmd() *cobra.Command {
 		Use:   "service",
 		Short: "Manage LOKA services",
 		Long: `Manage long-running services deployed to LOKA.
+Accepts a service UUID or human-readable name wherever <id> is used.
 
 Examples:
   loka service list
-  loka service get <id>
-  loka service logs <id>
+  loka service get my-app
+  loka service logs brave-falcon-a3f2
   loka service stop <id>
   loka service destroy <id>
   loka service redeploy <id>

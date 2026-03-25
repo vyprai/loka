@@ -35,7 +35,9 @@ type Server struct {
 	gc               GCRunner
 	retention        config.RetentionConfig
 	caCertPath       string // Path to CA certificate (served at /ca.crt).
+	domainProxy      *DomainProxy // Domain proxy for subdomain routing.
 	raftStatusFn     RaftStatusFn // Optional: returns Raft cluster status for debug endpoint.
+	dnsToggler       DNSToggler   // Optional: toggles the embedded DNS server at runtime.
 }
 
 // ServerOpts holds optional configuration for the API server.
@@ -46,6 +48,7 @@ type ServerOpts struct {
 	Retention      config.RetentionConfig  // Retention configuration.
 	ObjStore       objstore.ObjectStore    // Object store (exposed to workers/HA nodes).
 	ServiceManager *service.Manager        // Service manager (optional).
+	DomainProxy    *DomainProxy            // Domain proxy for subdomain-based routing (optional).
 }
 
 // NewServer creates a new API server.
@@ -69,6 +72,7 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		gc:               o.GC,
 		retention:        o.Retention,
 		caCertPath:       o.CACertPath,
+		domainProxy:      o.DomainProxy,
 	}
 	srv.routes()
 	srv.registerInternalRoutes()
@@ -209,6 +213,11 @@ func (s *Server) routes() {
 		// Health
 		r.Get("/health", s.health)
 	})
+
+	// Register domain proxy routes (expose/unexpose/list) if proxy is available.
+	if s.domainProxy != nil {
+		s.registerDomainRoutes(s.router, s.domainProxy)
+	}
 }
 
 // JSON helpers

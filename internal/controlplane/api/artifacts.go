@@ -9,7 +9,11 @@ import (
 // listArtifacts returns files changed in a session relative to the base image.
 // GET /sessions/{id}/artifacts?checkpoint={cpId}
 func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	checkpointID := r.URL.Query().Get("checkpoint")
 
 	artifacts, err := s.sessionManager.ListArtifacts(r.Context(), sessionID, checkpointID)
@@ -27,7 +31,11 @@ func (s *Server) listArtifacts(w http.ResponseWriter, r *http.Request) {
 // GET /sessions/{id}/artifacts/download?path=/workspace/output.csv
 // GET /sessions/{id}/artifacts/download?format=tar
 func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	path := r.URL.Query().Get("path")
 	format := r.URL.Query().Get("format")
 
@@ -63,7 +71,11 @@ func (s *Server) downloadArtifact(w http.ResponseWriter, r *http.Request) {
 // listCheckpointArtifacts returns files changed up to a specific checkpoint.
 // GET /sessions/{id}/checkpoints/{cpId}/artifacts
 func (s *Server) listCheckpointArtifacts(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	cpID := chi.URLParam(r, "cpId")
 
 	artifacts, err := s.sessionManager.ListArtifacts(r.Context(), sessionID, cpID)

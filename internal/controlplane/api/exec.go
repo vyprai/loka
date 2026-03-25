@@ -28,7 +28,11 @@ type commandReq struct {
 }
 
 func (s *Server) execCommand(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var req execReq
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -95,7 +99,11 @@ func (s *Server) getExecution(w http.ResponseWriter, r *http.Request) {
 //	  "scope": "always"     — add to permanent whitelist (persisted in session policy)
 //	}
 func (s *Server) approveExecution(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	execID := chi.URLParam(r, "execId")
 	var req struct {
 		Scope string `json:"scope"` // "once", "command", "always"
@@ -116,7 +124,11 @@ func (s *Server) approveExecution(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) rejectExecution(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	execID := chi.URLParam(r, "execId")
 	var req struct {
 		Reason string `json:"reason"`
@@ -134,7 +146,11 @@ func (s *Server) rejectExecution(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) cancelExecution(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	execID := chi.URLParam(r, "execId")
 	exec, err := s.sessionManager.CancelExecution(r.Context(), sessionID, execID)
 	if err != nil {
@@ -145,7 +161,11 @@ func (s *Server) cancelExecution(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listExecutions(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var filter store.ExecutionFilter
 	if status := r.URL.Query().Get("status"); status != "" {
 		st := loka.ExecStatus(status)

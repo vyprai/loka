@@ -359,8 +359,8 @@ func TestRESTSetSessionMode_InvalidTransition(t *testing.T) {
 	// Setting mode on a nonexistent session or terminated one should fail.
 	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/nonexistent-id/mode",
 		map[string]string{"mode": "execute"}, nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -417,8 +417,8 @@ func TestRESTExecCommand_SessionNotFound(t *testing.T) {
 	ts := setupTestServer(t)
 	rec := ts.doRequest(t, http.MethodPost, "/api/v1/sessions/nonexistent/exec",
 		map[string]any{"command": "ls"}, nil)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -1224,9 +1224,9 @@ func TestRESTListArtifacts_SessionNotFound(t *testing.T) {
 	ts := setupTestServer(t)
 
 	rec := ts.doRequest(t, http.MethodGet, "/api/v1/sessions/nonexistent-id/artifacts", nil, nil)
-	// The artifacts handler returns 500 for all errors from the manager.
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	// The resolve handler returns 404 for nonexistent sessions.
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 	var body map[string]string
 	decodeBody(t, rec, &body)
@@ -1301,9 +1301,9 @@ func TestRESTDownloadArtifact_SessionNotFound(t *testing.T) {
 
 	// Try to download from a non-existent session.
 	rec := ts.doRequest(t, http.MethodGet, "/api/v1/sessions/nonexistent-id/artifacts/download?path=/file.txt", nil, nil)
-	// The download handler returns 500 for session-not-found errors.
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	// The resolve handler returns 404 for nonexistent sessions.
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 

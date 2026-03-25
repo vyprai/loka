@@ -17,10 +17,17 @@ type GCRunner interface {
 // RaftStatusFn is a function that returns Raft cluster status for debugging.
 type RaftStatusFn func() map[string]interface{}
 
+// DNSToggler is the interface for starting/stopping the embedded DNS server at runtime.
+type DNSToggler interface {
+	Start() error
+	Stop()
+}
+
 func (s *Server) registerAdminRoutes(r chi.Router) {
 	r.Post("/admin/gc", s.triggerGC)
 	r.Get("/admin/gc/status", s.gcStatus)
 	r.Get("/admin/retention", s.retentionConfig)
+	r.Post("/admin/dns", s.toggleDNS)
 	r.Get("/debug/raft", s.getRaftStatus)
 }
 
@@ -63,6 +70,37 @@ func (s *Server) SetRetention(rc config.RetentionConfig) {
 // SetRaftStatusFn sets the function that returns Raft cluster status.
 func (s *Server) SetRaftStatusFn(fn RaftStatusFn) {
 	s.raftStatusFn = fn
+}
+
+// SetDNSToggler sets the DNS server toggler for the admin endpoint.
+func (s *Server) SetDNSToggler(dt DNSToggler) {
+	s.dnsToggler = dt
+}
+
+func (s *Server) toggleDNS(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if s.dnsToggler == nil {
+		writeError(w, http.StatusServiceUnavailable, "DNS server not configured")
+		return
+	}
+
+	if req.Enabled {
+		if err := s.dnsToggler.Start(); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to start DNS server: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "dns enabled"})
+	} else {
+		s.dnsToggler.Stop()
+		writeJSON(w, http.StatusOK, map[string]string{"status": "dns disabled"})
+	}
 }
 
 func (s *Server) getRaftStatus(w http.ResponseWriter, r *http.Request) {

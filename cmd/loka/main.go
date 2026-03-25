@@ -143,6 +143,7 @@ func main() {
 		newTokenCmd(),
 		newStatusCmd(),
 		newDomainsCmd(),
+		newDNSCmd(),
 		newRecipeCmd(),
 		newAdminCmd(),
 		newSecretCmd(),

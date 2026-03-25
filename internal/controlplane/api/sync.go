@@ -9,7 +9,11 @@ import (
 )
 
 func (s *Server) syncMount(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 
 	var req loka.SyncRequest
 	if err := decodeJSON(r, &req); err != nil {

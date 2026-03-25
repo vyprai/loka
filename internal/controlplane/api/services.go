@@ -81,7 +81,11 @@ func (s *Server) deployService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getService(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	svc, err := s.serviceManager.Get(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
@@ -128,7 +132,11 @@ func (s *Server) listServices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) destroyService(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	if err := s.serviceManager.Destroy(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -137,7 +145,11 @@ func (s *Server) destroyService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) stopService(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	svc, err := s.serviceManager.Stop(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -147,7 +159,11 @@ func (s *Server) stopService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) redeployService(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	svc, err := s.serviceManager.Redeploy(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -171,7 +187,11 @@ type updateServiceEnvReq struct {
 }
 
 func (s *Server) updateServiceEnv(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var req updateServiceEnvReq
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -186,7 +206,11 @@ func (s *Server) updateServiceEnv(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getServiceLogs(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	lines := 100
 	if linesStr := r.URL.Query().Get("lines"); linesStr != "" {
 		if v, err := strconv.Atoi(linesStr); err == nil && v > 0 {
@@ -215,7 +239,11 @@ type addRouteReq struct {
 }
 
 func (s *Server) addServiceRoute(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var req addRouteReq
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -249,11 +277,25 @@ func (s *Server) addServiceRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Register with domain proxy if service is running and has a subdomain.
+	if s.domainProxy != nil && route.Subdomain != "" && (svc.Status == loka.ServiceStatusRunning || svc.Status == loka.ServiceStatusIdle) {
+		s.domainProxy.AddRoute(&loka.DomainRoute{
+			Subdomain:  route.Subdomain,
+			ServiceID:  svc.ID,
+			RemotePort: route.Port,
+			Type:       loka.DomainRouteService,
+		})
+	}
+
 	writeJSON(w, http.StatusCreated, svc)
 }
 
 func (s *Server) removeServiceRoute(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	subdomain := chi.URLParam(r, "subdomain")
 
 	svc, err := s.serviceManager.Get(r.Context(), id)
@@ -283,11 +325,20 @@ func (s *Server) removeServiceRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Remove from domain proxy.
+	if s.domainProxy != nil {
+		s.domainProxy.RemoveRoute(subdomain)
+	}
+
 	writeJSON(w, http.StatusOK, svc)
 }
 
 func (s *Server) listServiceRoutes(w http.ResponseWriter, r *http.Request) {
-	id := chi.URLParam(r, "id")
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	svc, err := s.serviceManager.Get(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())

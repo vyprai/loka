@@ -14,6 +14,7 @@ import (
 	"github.com/vyprai/loka/internal/loka"
 	"github.com/vyprai/loka/internal/objstore"
 	"github.com/vyprai/loka/internal/store"
+	"github.com/vyprai/loka/pkg/slug"
 )
 
 // DeployOpts holds options for deploying a new service.
@@ -40,6 +41,15 @@ type DeployOpts struct {
 	Autoscale      *loka.AutoscaleConfig
 }
 
+// DomainRouteRegistrar is an interface for registering/removing domain routes.
+// This allows the service manager to update the domain proxy without importing
+// the api package directly.
+type DomainRouteRegistrar interface {
+	AddRoute(route *loka.DomainRoute)
+	RemoveRoute(subdomain string) bool
+	ListRoutes() []*loka.DomainRoute
+}
+
 // Manager orchestrates service lifecycle.
 type Manager struct {
 	store     store.Store
@@ -56,6 +66,7 @@ type Manager struct {
 	deploySem chan struct{} // semaphore limiting concurrent deploys
 
 	logsFn func(serviceID string, lines int) ([]string, []string, error) // set by localworker
+	proxy  DomainRouteRegistrar // domain proxy for route registration
 }
 
 // NewManager creates a new service manager.
@@ -85,6 +96,15 @@ func (m *Manager) Close() {
 
 // Deploy creates a new service record and schedules it to a worker.
 func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, error) {
+	if opts.Name == "" {
+		opts.Name = slug.Generate()
+	}
+	// Check name uniqueness.
+	existing, _, _ := m.store.Services().List(ctx, store.ServiceFilter{Name: &opts.Name, Limit: 1})
+	if len(existing) > 0 {
+		return nil, fmt.Errorf("service name %q already exists", opts.Name)
+	}
+
 	if opts.VCPUs == 0 {
 		opts.VCPUs = 1
 	}
@@ -322,6 +342,20 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 					m.logger.Error("async deploy: failed to mark service running", "service", serviceID, "error", err)
 					return
 				}
+				// Register domain routes with the proxy.
+				if m.proxy != nil && len(s.Routes) > 0 {
+					for _, route := range s.Routes {
+						if route.Subdomain == "" {
+							continue
+						}
+						m.proxy.AddRoute(&loka.DomainRoute{
+							Subdomain:  route.Subdomain,
+							ServiceID:  s.ID,
+							RemotePort: route.Port,
+							Type:       loka.DomainRouteService,
+						})
+					}
+				}
 				m.logger.Info("service deployed and running", "service", serviceID)
 				return
 			}
@@ -355,6 +389,15 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		})
 	}
 
+	// Remove domain routes from the proxy.
+	if m.proxy != nil {
+		for _, route := range svc.Routes {
+			if route.Subdomain != "" {
+				m.proxy.RemoveRoute(route.Subdomain)
+			}
+		}
+	}
+
 	if err := m.store.Services().Delete(ctx, id); err != nil {
 		return fmt.Errorf("delete service: %w", err)
 	}
@@ -379,6 +422,15 @@ func (m *Manager) Stop(ctx context.Context, id string) (*loka.Service, error) {
 			Type: "stop_service",
 			Data: worker.StopServiceData{ServiceID: svc.ID},
 		})
+	}
+
+	// Remove domain routes from the proxy.
+	if m.proxy != nil {
+		for _, route := range svc.Routes {
+			if route.Subdomain != "" {
+				m.proxy.RemoveRoute(route.Subdomain)
+			}
+		}
 	}
 
 	svc.Status = loka.ServiceStatusStopped
@@ -579,6 +631,43 @@ func (m *Manager) Touch(ctx context.Context, id string) error {
 // This is typically called by the local worker to wire up direct agent access.
 func (m *Manager) SetLogsFn(fn func(string, int) ([]string, []string, error)) {
 	m.logsFn = fn
+}
+
+// SetDomainProxy sets the domain proxy for automatic route registration.
+// After setting the proxy, it registers routes for all currently running services.
+func (m *Manager) SetDomainProxy(p DomainRouteRegistrar) {
+	m.proxy = p
+	m.registerExistingRoutes()
+}
+
+// registerExistingRoutes scans running services and registers their routes
+// with the domain proxy. Called once when the proxy is first attached.
+func (m *Manager) registerExistingRoutes() {
+	if m.proxy == nil {
+		return
+	}
+	running := loka.ServiceStatusRunning
+	services, _, err := m.store.Services().List(m.ctx, store.ServiceFilter{Status: &running})
+	if err != nil {
+		m.logger.Error("failed to list running services for route registration", "error", err)
+		return
+	}
+	for _, svc := range services {
+		for _, route := range svc.Routes {
+			if route.Subdomain == "" {
+				continue
+			}
+			m.proxy.AddRoute(&loka.DomainRoute{
+				Subdomain:  route.Subdomain,
+				ServiceID:  svc.ID,
+				RemotePort: route.Port,
+				Type:       loka.DomainRouteService,
+			})
+		}
+	}
+	if len(services) > 0 {
+		m.logger.Info("registered existing service routes", "services", len(services))
+	}
 }
 
 // Logs retrieves recent log lines from the worker for a service.

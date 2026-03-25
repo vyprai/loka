@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vyprai/loka/internal/controlplane/image"
+	"github.com/vyprai/loka/pkg/slug"
 	"github.com/vyprai/loka/internal/controlplane/metrics"
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
 	"github.com/vyprai/loka/internal/controlplane/worker"
@@ -56,6 +57,9 @@ func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler,
 
 // Create creates a new session and schedules it to a worker.
 func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, error) {
+	if opts.Name == "" {
+		opts.Name = slug.Generate()
+	}
 	if opts.Mode == "" {
 		opts.Mode = loka.ModeExplore
 	}

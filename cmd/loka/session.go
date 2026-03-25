@@ -129,12 +129,13 @@ func newSessionCreateCmd() *cobra.Command {
 			if outputFmt == "json" {
 				return printJSON(sess)
 			}
-			fmt.Printf("Session created: %s\n", sess.ID)
+			if sess.Name != "" {
+				fmt.Printf("Session created: %s (%s)\n", sess.Name, shortID(sess.ID))
+			} else {
+				fmt.Printf("Session created: %s\n", sess.ID)
+			}
 			fmt.Printf("  Status:   %s\n", sess.Status)
 			fmt.Printf("  Mode:     %s\n", sess.Mode)
-			if sess.Name != "" {
-				fmt.Printf("  Name:     %s\n", sess.Name)
-			}
 			return nil
 		},
 	}
@@ -265,8 +266,8 @@ func newSessionListCmd() *cobra.Command {
 
 func newSessionGetCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "get <session-id>",
-		Short: "Get session details",
+		Use:   "get <session-id-or-name>",
+		Short: "Get session details (accepts UUID or name, e.g. brave-falcon-a3f2)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			client := newClient()
@@ -295,8 +296,8 @@ func newSessionDestroyCmd() *cobra.Command {
 	var purge bool
 
 	cmd := &cobra.Command{
-		Use:     "destroy <session-id>",
-		Short:   "Destroy a session",
+		Use:     "destroy <session-id-or-name>",
+		Short:   "Destroy a session (accepts UUID or name)",
 		Aliases: []string{"rm", "delete"},
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -521,7 +522,9 @@ func newDomainsCmd() *cobra.Command {
 				Routes []struct {
 					Subdomain  string `json:"subdomain"`
 					SessionID  string `json:"session_id"`
+					ServiceID  string `json:"service_id"`
 					RemotePort int    `json:"remote_port"`
+					Type       string `json:"type"`
 				} `json:"routes"`
 				BaseDomain string `json:"base_domain"`
 			}
@@ -536,11 +539,44 @@ func newDomainsCmd() *cobra.Command {
 				fmt.Println("Expose a session: loka session expose <id> my-app --port 5000")
 				return nil
 			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "SUBDOMAIN\tSESSION\tPORT\tURL")
+
+			// Build a name cache: look up session/service names for display.
+			nameCache := make(map[string]string)
 			for _, r := range resp.Routes {
+				targetID := r.SessionID
+				if r.ServiceID != "" {
+					targetID = r.ServiceID
+				}
+				if _, ok := nameCache[targetID]; ok || targetID == "" {
+					continue
+				}
+				// Try session first, then service.
+				if r.ServiceID != "" {
+					var svc struct{ Name string }
+					if err := client.Raw(cmd.Context(), "GET", "/api/v1/services/"+targetID, nil, &svc); err == nil && svc.Name != "" {
+						nameCache[targetID] = svc.Name
+						continue
+					}
+				}
+				sess, err := client.GetSession(cmd.Context(), targetID)
+				if err == nil && sess.Name != "" {
+					nameCache[targetID] = sess.Name
+				}
+			}
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "SUBDOMAIN\tTARGET\tPORT\tURL")
+			for _, r := range resp.Routes {
+				targetID := r.SessionID
+				if r.ServiceID != "" {
+					targetID = r.ServiceID
+				}
+				target := shortID(targetID)
+				if name, ok := nameCache[targetID]; ok {
+					target = name
+				}
 				fmt.Fprintf(w, "%s\t%s\t%d\t%s.%s\n",
-					r.Subdomain, shortID(r.SessionID), r.RemotePort, r.Subdomain, resp.BaseDomain)
+					r.Subdomain, target, r.RemotePort, r.Subdomain, resp.BaseDomain)
 			}
 			w.Flush()
 			return nil

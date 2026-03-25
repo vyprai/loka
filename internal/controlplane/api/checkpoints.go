@@ -15,7 +15,11 @@ type createCheckpointReq struct {
 }
 
 func (s *Server) createCheckpoint(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var req createCheckpointReq
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -70,7 +74,11 @@ func (s *Server) createCheckpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listCheckpoints(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	dag, err := s.store.Checkpoints().GetDAG(r.Context(), sessionID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -89,7 +97,11 @@ func (s *Server) listCheckpoints(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) restoreCheckpoint(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	cpID := chi.URLParam(r, "cpId")
 
 	cp, err := s.store.Checkpoints().Get(r.Context(), cpID)
@@ -119,7 +131,11 @@ func (s *Server) restoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteCheckpoint(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	cpID := chi.URLParam(r, "cpId")
 
 	cp, err := s.store.Checkpoints().Get(r.Context(), cpID)
@@ -140,7 +156,11 @@ func (s *Server) deleteCheckpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) diffCheckpoints(w http.ResponseWriter, r *http.Request) {
-	sessionID := chi.URLParam(r, "id")
+	sessionID, err := s.resolveSessionID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
 	cpA := r.URL.Query().Get("a")
 	cpB := r.URL.Query().Get("b")
 

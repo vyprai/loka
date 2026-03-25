@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -193,7 +194,7 @@ func TestSessionListLimitOffset(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {
-		createTestSession(t, s, "s", loka.SessionStatusRunning, "")
+		createTestSession(t, s, fmt.Sprintf("s-limit-%d", i), loka.SessionStatusRunning, "")
 	}
 
 	list, err := s.Sessions().List(ctx, store.SessionFilter{Limit: 2})

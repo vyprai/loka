@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_checkpoints_session ON checkpoints(session_id);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_name ON sessions(name) WHERE name != '';
+
 CREATE TABLE IF NOT EXISTS workers (
 	id            TEXT PRIMARY KEY,
 	hostname      TEXT NOT NULL DEFAULT '',
