@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -85,12 +86,17 @@ func NewManager(cfg FirecrackerConfig, logger *slog.Logger) (*Manager, error) {
 
 	os.MkdirAll(cfg.DataDir, 0o755)
 
-	return &Manager{
+	mgr := &Manager{
 		cfg:     cfg,
 		vms:     make(map[string]*MicroVM),
 		nextCID: 3, // CID 0=hypervisor, 1=loopback, 2=host, 3+=guests.
 		logger:  logger,
-	}, nil
+	}
+
+	// Clean up stale TAP interfaces from previous runs.
+	mgr.cleanupStaleTAPs()
+
+	return mgr, nil
 }
 
 // Launch starts a new Firecracker microVM.
@@ -327,9 +333,9 @@ func (m *Manager) CreateSnapshot(id, memPath, snapPath string) error {
 	return m.Resume(id)
 }
 
-// CreateDiffSnapshot pauses the VM, creates a diff snapshot (smaller than full),
-// and leaves the VM paused. The caller should Stop the VM afterwards.
-// Returns the paths to the memory and vmstate files written.
+// CreateDiffSnapshot pauses the VM, creates a full snapshot (gzip compression
+// makes it small enough), and leaves the VM paused. The caller should Stop
+// the VM afterwards. Returns the paths to the memory and vmstate files.
 func (m *Manager) CreateDiffSnapshot(id string) (memPath, statePath string, err error) {
 	vm, ok := m.Get(id)
 	if !ok {
@@ -342,16 +348,18 @@ func (m *Manager) CreateDiffSnapshot(id string) (memPath, statePath string, err 
 
 	// Pause the VM.
 	if err := m.Pause(id); err != nil {
-		return "", "", fmt.Errorf("pause for diff snapshot: %w", err)
+		return "", "", fmt.Errorf("pause for snapshot: %w", err)
 	}
 
-	// Create diff snapshot.
-	body := fmt.Sprintf(`{"snapshot_type":"Diff","snapshot_path":"%s","mem_file_path":"%s"}`, statePath, memPath)
+	// Create full snapshot. (Diff requires enable_diff_snapshots before boot
+	// which isn't supported in --config-file mode. Full snapshots compress
+	// well with gzip since most memory pages are zeros.)
+	body := fmt.Sprintf(`{"snapshot_type":"Full","snapshot_path":"%s","mem_file_path":"%s"}`, statePath, memPath)
 	if err := firecrackerAPIPut(vm.SocketPath, "/snapshot/create", body); err != nil {
-		return "", "", fmt.Errorf("create diff snapshot: %w", err)
+		return "", "", fmt.Errorf("create snapshot: %w", err)
 	}
 
-	m.logger.Info("diff snapshot created", "id", id, "mem", memPath, "state", statePath)
+	m.logger.Info("snapshot created", "id", id, "mem", memPath, "state", statePath)
 	return memPath, statePath, nil
 }
 
@@ -473,6 +481,25 @@ func firecrackerAPICall(socketPath, method, path, body string) error {
 		return fmt.Errorf("%s %s: %w (output: %s)", method, path, err, string(out))
 	}
 	return nil
+}
+
+// cleanupStaleTAPs removes TAP interfaces left over from previous lokad runs.
+func (m *Manager) cleanupStaleTAPs() {
+	out, err := exec.Command("ip", "-o", "link", "show", "type", "tun").Output()
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		name := strings.TrimSuffix(parts[1], ":")
+		if strings.HasPrefix(name, "tap") {
+			exec.Command("ip", "link", "del", name).Run()
+			m.logger.Debug("cleaned up stale TAP", "name", name)
+		}
+	}
 }
 
 // createTAP creates a TAP network device on the host and assigns it an IP.
