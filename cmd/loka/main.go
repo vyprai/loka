@@ -147,6 +147,7 @@ func main() {
 		newRecipeCmd(),
 		newAdminCmd(),
 		newSecretCmd(),
+		newImageCmd(),
 	)
 
 	rootCmd.AddCommand(&cobra.Command{

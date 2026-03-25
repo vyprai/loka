@@ -16,6 +16,7 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/objstore"
 	"github.com/vyprai/loka/internal/provider"
+	"github.com/vyprai/loka/internal/registry"
 	"github.com/vyprai/loka/internal/store"
 )
 
@@ -36,8 +37,9 @@ type Server struct {
 	retention        config.RetentionConfig
 	caCertPath       string // Path to CA certificate (served at /ca.crt).
 	domainProxy      *DomainProxy // Domain proxy for subdomain routing.
-	raftStatusFn     RaftStatusFn // Optional: returns Raft cluster status for debug endpoint.
-	dnsToggler       DNSToggler   // Optional: toggles the embedded DNS server at runtime.
+	registryStore    *registry.Store // OCI registry blob/manifest store.
+	raftStatusFn     RaftStatusFn    // Optional: returns Raft cluster status for debug endpoint.
+	dnsToggler       DNSToggler      // Optional: toggles the embedded DNS server at runtime.
 }
 
 // ServerOpts holds optional configuration for the API server.
@@ -57,6 +59,12 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 	if len(opts) > 0 {
 		o = opts[0]
 	}
+	// Initialize OCI registry store if object store is available.
+	var regStore *registry.Store
+	if o.ObjStore != nil {
+		regStore = registry.NewStore(o.ObjStore)
+	}
+
 	srv := &Server{
 		router:           chi.NewRouter(),
 		sessionManager:   sm,
@@ -67,6 +75,7 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		drainer:          drainer,
 		store:            s,
 		objStore:         o.ObjStore,
+		registryStore:    regStore,
 		logger:           logger,
 		apiKey:           o.APIKey,
 		gc:               o.GC,
@@ -82,6 +91,20 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 // Handler returns the http.Handler for this server.
 func (s *Server) Handler() http.Handler {
 	return s.router
+}
+
+// RegistryStore returns the OCI registry store, or nil if not configured.
+func (s *Server) RegistryStore() *registry.Store {
+	return s.registryStore
+}
+
+// NewRegistryAPI creates an OCI Distribution Spec registry server backed by
+// this server's registry store. Returns nil if no registry store is configured.
+func (s *Server) NewRegistryAPI() *RegistryServer {
+	if s.registryStore == nil {
+		return nil
+	}
+	return NewRegistryServer(s.registryStore, s.logger, s.apiKey)
 }
 
 // serveCACert serves the auto-generated CA certificate.
@@ -206,6 +229,9 @@ func (s *Server) routes() {
 		r.Post("/worker-tokens", s.createWorkerToken)
 		r.Get("/worker-tokens", s.listWorkerTokens)
 		r.Delete("/worker-tokens/{tokenId}", s.revokeWorkerToken)
+
+		// Image Registry Management
+		s.registerRegistryRoutes(r)
 
 		// Admin
 		s.registerAdminRoutes(r)

@@ -214,6 +214,7 @@ func (lw *LocalWorker) handleCommand(ctx context.Context, cmd cpworker.WorkerCom
 				VCPUs:                data.VCPUs,
 				MemoryMB:             data.MemoryMB,
 				RootfsPath:           data.RootfsPath,
+				LayerPackPath:        data.LayerPackPath,
 				Command:              data.Command,
 				Args:                 data.Args,
 				Env:                  data.Env,

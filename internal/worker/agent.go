@@ -44,6 +44,7 @@ type ServiceLaunchOpts struct {
 	VCPUs               int
 	MemoryMB            int
 	RootfsPath          string
+	LayerPackPath       string // Path to read-only layer-pack ext4 (empty = legacy flat rootfs).
 	Command             string
 	Args                []string
 	Env                 map[string]string
@@ -139,6 +140,7 @@ type LaunchOpts struct {
 	VCPU                int
 	MemoryMB            int
 	RootfsPath          string // Image rootfs path (if not using default).
+	LayerPackPath       string // Path to read-only layer-pack ext4 (empty = legacy flat rootfs).
 	SnapshotMemPath     string // Warm snapshot memory file for instant restore.
 	SnapshotVMStatePath string // Warm snapshot VM state file.
 }
@@ -168,6 +170,7 @@ func (a *Agent) LaunchSession(ctx context.Context, sessionID string, opts Launch
 		VCPU:                vcpu,
 		MemoryMB:            mem,
 		RootfsPath:          opts.RootfsPath,
+		LayerPackPath:       opts.LayerPackPath,
 		OverlayDir:          a.overlay.SessionDir(sessionID),
 		SnapshotMemPath:     opts.SnapshotMemPath,
 		SnapshotVMStatePath: opts.SnapshotVMStatePath,
@@ -448,6 +451,7 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 		VCPU:                vcpu,
 		MemoryMB:            mem,
 		RootfsPath:          opts.RootfsPath,
+		LayerPackPath:       opts.LayerPackPath,
 		OverlayDir:          a.overlay.SessionDir(serviceID),
 		SnapshotMemPath:     opts.SnapshotMemPath,
 		SnapshotVMStatePath: opts.SnapshotVMStatePath,

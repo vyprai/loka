@@ -575,6 +575,22 @@ func main() {
 		server: &dnsServer,
 	})
 
+	// ── Start OCI registry server ───────────────────────────
+	registryAPI := srv.NewRegistryAPI()
+	var registryServer *http.Server
+	if registryAPI != nil {
+		registryServer = &http.Server{
+			Addr:    ":6845",
+			Handler: registryAPI.Handler(),
+		}
+		go func() {
+			logger.Info("OCI registry listening", "addr", ":6845")
+			if err := registryServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				logger.Error("OCI registry server failed", "error", err)
+			}
+		}()
+	}
+
 	// ── Start gRPC server ───────────────────────────────────
 	var grpcOpts []grpc.ServerOption
 	if serverTLSCfg != nil {
@@ -605,6 +621,9 @@ func main() {
 		cancel()
 		if domainServer != nil {
 			domainServer.Shutdown(context.Background())
+		}
+		if registryServer != nil {
+			registryServer.Shutdown(context.Background())
 		}
 		grpcSrv.GracefulStop()
 		httpServer.Shutdown(context.Background())

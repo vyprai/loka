@@ -30,6 +30,14 @@ func main() {
 	// so no userspace tools are needed regardless of the Docker image.
 	_ = exec.Command("mount", "-t", "proc", "proc", "/proc").Run()
 
+	// Check if we're in layered mode (kernel boot arg: loka.layers=true).
+	// If so, mount the layer-pack drive and set up overlayfs before anything else.
+	if hasKernelParam("loka.layers") {
+		setupOverlayFS(logger)
+		// Re-mount /proc inside the new root after pivot_root.
+		_ = exec.Command("mount", "-t", "proc", "proc", "/proc").Run()
+	}
+
 	// Default policy — will be updated by the worker via set_policy RPC.
 	policy := loka.DefaultExecPolicy()
 	mode := loka.ModeExplore

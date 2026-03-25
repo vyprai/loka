@@ -47,6 +47,9 @@ type VMConfig struct {
 	OverlayDir string // Session overlay directory.
 	VsockCID   uint32 // Vsock guest CID (unique per VM).
 
+	// Layered image support: read-only layer-pack ext4 with overlayfs.
+	LayerPackPath string // Path to read-only layer-pack ext4 (empty = legacy flat rootfs).
+
 	// Warm snapshot restore (set both for ~28ms startup instead of cold boot).
 	SnapshotMemPath     string // Path to memory snapshot file.
 	SnapshotVMStatePath string // Path to VM state snapshot file.
@@ -421,17 +424,33 @@ func buildFirecrackerConfig(cfg VMConfig, socketPath, vsockPath string) fcConfig
 		guestIP, hostIP,
 	)
 
-	drives := []fcDrive{
-		{
-			DriveID:      "rootfs",
-			PathOnHost:   cfg.RootfsPath,
-			IsRootDevice: true,
-			IsReadOnly:   false, // Read-write for now. TODO: use overlay disk image.
-		},
-	}
+	var drives []fcDrive
 
-	// TODO: Add overlay as a separate ext4 disk image (not directory).
-	// The overlay FS is managed inside the VM by the supervisor.
+	if cfg.LayerPackPath != "" {
+		// Layered mode: writable overlay drive + read-only layer-pack.
+		// Create a sparse ext4 for the overlay writable layer (upper/work dirs).
+		overlayPath := filepath.Join(filepath.Dir(socketPath), "overlay.ext4")
+		exec.Command("truncate", "-s", "4G", overlayPath).Run()
+		exec.Command("mkfs.ext4", "-F", "-q", overlayPath).Run()
+
+		drives = []fcDrive{
+			{DriveID: "rootfs", PathOnHost: overlayPath, IsRootDevice: true, IsReadOnly: false},
+			{DriveID: "layers", PathOnHost: cfg.LayerPackPath, IsRootDevice: false, IsReadOnly: true},
+		}
+
+		// Tell the supervisor to set up overlayfs from the layer-pack.
+		bootArgs += " loka.layers=true"
+	} else {
+		// Legacy flat rootfs mode.
+		drives = []fcDrive{
+			{
+				DriveID:      "rootfs",
+				PathOnHost:   cfg.RootfsPath,
+				IsRootDevice: true,
+				IsReadOnly:   false,
+			},
+		}
+	}
 
 	// TAP network interface: each VM gets a dedicated TAP device.
 	tapName := fmt.Sprintf("tap%d", cfg.VsockCID)

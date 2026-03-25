@@ -267,12 +267,25 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 		}
 	}
 
+	// Resolve layer-pack path if the image has one.
+	var layerPackPath string
+	if svc.ImageID != "" && m.images != nil {
+		lp, lpErr := m.images.ResolveLayerPackPath(ctx, svc.ImageID)
+		if lpErr != nil {
+			m.logger.Debug("no layer-pack for image, using flat rootfs",
+				"service", serviceID, "error", lpErr)
+		} else {
+			layerPackPath = lp
+		}
+	}
+
 	launchData := worker.LaunchServiceData{
 		ServiceID:           serviceID,
 		ImageRef:            svc.ImageRef,
 		VCPUs:               svc.VCPUs,
 		MemoryMB:            svc.MemoryMB,
 		RootfsPath:          rootfsPath,
+		LayerPackPath:       layerPackPath,
 		Command:             svc.Command,
 		Args:                svc.Args,
 		Env:                 svc.Env,
@@ -612,12 +625,16 @@ func (m *Manager) Wake(ctx context.Context, id string) (*loka.Service, error) {
 		workdir = "/workspace"
 	}
 
-	// Resolve rootfs path if we have an image.
-	var rootfsPath string
+	// Resolve rootfs and layer-pack paths if we have an image.
+	var rootfsPath, wakeLayerPackPath string
 	if svc.ImageID != "" && m.images != nil {
 		rp, err := m.images.ResolveRootfsPath(m.ctx, svc.ImageID)
 		if err == nil {
 			rootfsPath = rp
+		}
+		lp, err := m.images.ResolveLayerPackPath(m.ctx, svc.ImageID)
+		if err == nil {
+			wakeLayerPackPath = lp
 		}
 	}
 
@@ -632,6 +649,7 @@ func (m *Manager) Wake(ctx context.Context, id string) (*loka.Service, error) {
 				VCPUs:                svc.VCPUs,
 				MemoryMB:             svc.MemoryMB,
 				RootfsPath:           rootfsPath,
+				LayerPackPath:        wakeLayerPackPath,
 				Command:              svc.Command,
 				Args:                 svc.Args,
 				Env:                  svc.Env,

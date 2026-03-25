@@ -67,6 +67,7 @@ type LaunchServiceData struct {
 	VCPUs               int
 	MemoryMB            int
 	RootfsPath          string
+	LayerPackPath       string // Path to read-only layer-pack ext4 (empty = legacy flat rootfs).
 	Command             string
 	Args                []string
 	Env                 map[string]string
