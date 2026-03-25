@@ -442,21 +442,22 @@ if [ "$FC_AVAILABLE" = true ]; then
   [ -n "$FSID" ] && pass "Create session" || { fail "FC create" "no ID"; }
 
   if [ -n "$FSID" ]; then
-    # Session should be running immediately (no image pull)
-    sleep 2
-    FS=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID" | jf Status)
+    # Wait for session to be running with worker (VM boot with TAP ~5-15s)
+    for _w in $(seq 1 30); do
+      FS=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID" | jf Status)
+      FR=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID" | jf Ready)
+      [ "$FS" = "running" ] && [ "$FR" = "true" ] && break
+      sleep 1
+    done
     FW=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID" | jf WorkerID)
     [ "$FS" = "running" ] && [ -n "$FW" ] && pass "Session running with worker ($FW)" || fail "Session" "status=$FS worker=$FW"
-
-      # Wait for VM to fully boot (cold boot takes ~2s)
-      sleep 5
 
     if [ "$FS" = "running" ] && [ -n "$FW" ]; then
       # echo
       EX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
         -d '{"command":"echo","args":["e2e-vm-test"]}')
       EID=$(echo "$EX" | jf ID)
-      sleep 5
+      sleep 8
       ER=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID/exec/$EID")
       EST=$(echo "$ER" | jf Status)
       EOUT=$(echo "$ER" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
@@ -471,7 +472,7 @@ if [ "$FC_AVAILABLE" = true ]; then
       LX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
         -d '{"command":"ls","args":["/"]}')
       LID=$(echo "$LX" | jf ID)
-      sleep 5
+      sleep 8
       LR=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID/exec/$LID")
       LST=$(echo "$LR" | jf Status)
       LOUT=$(echo "$LR" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
@@ -482,7 +483,7 @@ if [ "$FC_AVAILABLE" = true ]; then
       UX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
         -d '{"command":"uname","args":["-a"]}')
       UID2=$(echo "$UX" | jf ID)
-      sleep 5
+      sleep 8
       UR=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID/exec/$UID2")
       UOUT=$(echo "$UR" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
 
@@ -492,7 +493,7 @@ if [ "$FC_AVAILABLE" = true ]; then
       WFX=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions/$FSID/exec" -H 'Content-Type: application/json' \
         -d '{"command":"sh","args":["-c","echo hello > /tmp/test.txt && cat /tmp/test.txt"]}')
       WFID=$(echo "$WFX" | jf ID)
-      sleep 5
+      sleep 8
       if [ -n "$WFID" ]; then
         WFR=$(curl $CURL_OPTS "$ENDPOINT/api/v1/sessions/$FSID/exec/$WFID")
         WFOUT=$(echo "$WFR" | python3 -c "import sys,json;d=json.load(sys.stdin);r=d.get('Results') or [];print(r[0].get('Stdout','').strip() if r else '')" 2>/dev/null)
@@ -515,7 +516,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   CP_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d "{\"name\":\"cp-test-$RUN_ID\",\"mode\":\"execute\"}")
   CP_SID=$(echo "$CP_S" | jf ID)
-  sleep 5  # Wait for VM boot
+  sleep 8  # Wait for VM boot
 
   if [ -n "$CP_SID" ]; then
     # Write a file
@@ -553,7 +554,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   AC_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d "{\"name\":\"ac-test-$RUN_ID\",\"mode\":\"execute\",\"blocked_commands\":[\"rm\",\"dd\"]}")
   AC_SID=$(echo "$AC_S" | jf ID)
-  sleep 5
+  sleep 8
 
   if [ -n "$AC_SID" ]; then
     # Allowed command should work
@@ -597,7 +598,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   ME_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d "{\"name\":\"mode-test-$RUN_ID\",\"mode\":\"explore\"}")
   ME_SID=$(echo "$ME_S" | jf ID)
-  sleep 5
+  sleep 8
 
   if [ -n "$ME_SID" ]; then
     # Read commands should work in explore
@@ -643,7 +644,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   EX_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d "{\"name\":\"exec-mgmt-$RUN_ID\",\"mode\":\"execute\"}")
   EX_SID=$(echo "$EX_S" | jf ID)
-  sleep 5
+  sleep 8
 
   if [ -n "$EX_SID" ]; then
     # Run a command
@@ -696,7 +697,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   CA_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d "{\"name\":\"cp-adv-$RUN_ID\",\"mode\":\"execute\"}")
   CA_SID=$(echo "$CA_S" | jf ID)
-  sleep 5
+  sleep 8
 
   if [ -n "$CA_SID" ]; then
     # Create 2 checkpoints
@@ -736,7 +737,7 @@ if [ "$FC_AVAILABLE" = true ]; then
   AR_S=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" -H 'Content-Type: application/json' \
     -d "{\"name\":\"artifact-test-$RUN_ID\",\"mode\":\"execute\"}")
   AR_SID=$(echo "$AR_S" | jf ID)
-  sleep 5
+  sleep 8
 
   if [ -n "$AR_SID" ]; then
     # Create a file

@@ -224,7 +224,10 @@ func deployLocalMacOS(name string, foreground bool) error {
 		fi
 
 		# Rootfs: check pre-installed (ISO) or existing, else build from minirootfs.
-		if [ ! -f /tmp/loka-data/rootfs/rootfs.ext4 ]; then
+		# Rebuild if file is too small (< 50MB means blank ext4 without tools).
+		RF_SIZE=$(stat -c%s /tmp/loka-data/rootfs/rootfs.ext4 2>/dev/null || echo 0)
+		if [ ! -f /tmp/loka-data/rootfs/rootfs.ext4 ] || [ "$RF_SIZE" -lt 50000000 ]; then
+		rm -f /tmp/loka-data/rootfs/rootfs.ext4
 			if [ -f /usr/share/loka/rootfs.ext4 ]; then
 				cp /usr/share/loka/rootfs.ext4 /tmp/loka-data/rootfs/rootfs.ext4
 			else
