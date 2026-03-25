@@ -53,6 +53,8 @@ type ServiceLaunchOpts struct {
 	RestartPolicy       string
 	SnapshotMemPath     string // Warm snapshot memory file for instant restore.
 	SnapshotVMStatePath string // Warm snapshot VM state file.
+	IsAppSnapshotRestore bool  // If true, skip bundle extraction and service_start (app already running).
+	HealthPath          string // HTTP path for health check (empty = TCP only).
 }
 
 // SessionState tracks a running session backed by a Firecracker microVM.
@@ -68,6 +70,10 @@ type SessionState struct {
 	// Port forwarding: local TCP listener that tunnels to VM via vsock.
 	PortForwardListener net.Listener
 	ForwardedPort       int // Local port assigned to the port forward listener.
+
+	// App-level warm snapshot paths (per-service, includes running app).
+	AppSnapshotMem   string // Local path to app-level memory snapshot.
+	AppSnapshotState string // Local path to app-level vmstate snapshot.
 }
 
 // NewAgent creates a new worker agent with Firecracker VM management.
@@ -101,6 +107,9 @@ func (a *Agent) ID() string { return a.id }
 // VMManager returns the underlying VM manager, allowing callers to use it
 // for warm snapshot creation (e.g., the image manager in local mode).
 func (a *Agent) VMManager() *vm.Manager { return a.vmManager }
+
+// ObjStore returns the object store used by the agent.
+func (a *Agent) ObjStore() objstore.ObjectStore { return a.objStore }
 
 // SetID sets the agent ID (from registration response).
 func (a *Agent) SetID(id string) { a.id = id }
@@ -462,6 +471,42 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 		}
 	}
 
+	// If restoring from an app snapshot, the app is already running inside
+	// the VM. Skip bundle extraction and service_start — just set up port
+	// forwarding.
+	if opts.IsAppSnapshotRestore {
+		a.mu.Lock()
+		a.sessions[serviceID] = &SessionState{
+			ID:       serviceID,
+			VM:       microVM,
+			Vsock:    vsock,
+			GuestIP:  microVM.GuestIP,
+			LayerMap: make(map[string]string),
+		}
+		a.mu.Unlock()
+
+		if opts.Port > 0 {
+			localPort, err := a.StartPortForward(serviceID, opts.Port)
+			if err != nil {
+				a.logger.Warn("port forward failed after app snapshot restore",
+					"service", serviceID, "error", err)
+			} else {
+				a.logger.Info("service restored from app snapshot",
+					"service", serviceID,
+					"vm_pid", microVM.PID,
+					"forward_port", localPort,
+				)
+				return nil
+			}
+		}
+
+		a.logger.Info("service restored from app snapshot",
+			"service", serviceID,
+			"vm_pid", microVM.PID,
+		)
+		return nil
+	}
+
 	// Extract bundle into the VM if a BundleKey is provided.
 	if opts.BundleKey != "" && a.objStore != nil {
 		if err := a.extractBundle(ctx, vsock, opts.BundleKey, opts.Workdir); err != nil {
@@ -505,16 +550,77 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 				"command", opts.Command,
 				"forward_port", localPort,
 			)
-			return nil
 		}
+	} else {
+		a.logger.Info("service launched with Firecracker VM",
+			"service", serviceID,
+			"vm_pid", microVM.PID,
+			"command", opts.Command,
+		)
 	}
 
-	a.logger.Info("service launched with Firecracker VM",
-		"service", serviceID,
-		"vm_pid", microVM.PID,
-		"command", opts.Command,
-	)
+	// Poll health check and take app snapshot when healthy.
+	if opts.Port > 0 {
+		go a.waitHealthyAndSnapshot(serviceID, opts.Port, opts.HealthPath)
+	}
+
 	return nil
+}
+
+// waitHealthyAndSnapshot polls the health check inside the VM and takes an
+// app-level snapshot once the service is healthy. This snapshot can be used
+// for instant cold-start on idle->wake (~2ms instead of full boot + deploy).
+func (a *Agent) waitHealthyAndSnapshot(serviceID string, port int, healthPath string) {
+	a.mu.RLock()
+	sess, ok := a.sessions[serviceID]
+	a.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	for i := 0; i < 30; i++ {
+		if err := sess.Vsock.HealthCheck(port, healthPath); err == nil {
+			// App is ready — take app snapshot.
+			a.logger.Info("app healthy, creating app snapshot", "service", serviceID)
+			memPath, statePath, err := a.vmManager.CreateDiffSnapshot(serviceID)
+			if err != nil {
+				a.logger.Warn("failed to create app snapshot", "service", serviceID, "error", err)
+				return
+			}
+
+			// Resume VM after snapshot (CreateDiffSnapshot leaves it paused).
+			if err := a.vmManager.Resume(serviceID); err != nil {
+				a.logger.Warn("failed to resume VM after app snapshot", "service", serviceID, "error", err)
+			}
+
+			a.mu.Lock()
+			if s, ok := a.sessions[serviceID]; ok {
+				s.AppSnapshotMem = memPath
+				s.AppSnapshotState = statePath
+			}
+			a.mu.Unlock()
+
+			a.logger.Info("app snapshot created",
+				"service", serviceID,
+				"mem", memPath,
+				"state", statePath,
+			)
+			return
+		}
+		time.Sleep(2 * time.Second)
+	}
+	a.logger.Warn("app health check timed out, no app snapshot created", "service", serviceID)
+}
+
+// GetAppSnapshotPaths returns the local app snapshot paths for a service session.
+func (a *Agent) GetAppSnapshotPaths(serviceID string) (memPath, statePath string) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	sess, ok := a.sessions[serviceID]
+	if !ok {
+		return "", ""
+	}
+	return sess.AppSnapshotMem, sess.AppSnapshotState
 }
 
 // extractBundle downloads a bundle from the object store and streams it into

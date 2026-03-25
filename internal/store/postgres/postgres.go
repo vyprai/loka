@@ -50,6 +50,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 
 var migrations = []string{
 	`ALTER TABLE services ADD COLUMN IF NOT EXISTS forward_port INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE services ADD COLUMN IF NOT EXISTS app_snapshot_mem TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE services ADD COLUMN IF NOT EXISTS app_snapshot_state TEXT NOT NULL DEFAULT ''`,
 }
 
 func (s *Store) Close() error {

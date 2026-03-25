@@ -223,6 +223,9 @@ func (s *Server) handleRPC(req vm.RPCRequest) vm.RPCResponse {
 		result, _ := json.Marshal(log)
 		return vm.RPCResponse{ID: req.ID, Result: result}
 
+	case "health_check":
+		return s.handleHealthCheck(req)
+
 	case "service_start":
 		return s.handleServiceStart(req)
 
@@ -366,6 +369,120 @@ func rpcError(id string, err error) vm.RPCResponse {
 		ID:    id,
 		Error: &vm.RPCError{Code: -1, Message: err.Error()},
 	}
+}
+
+// ── Health Check RPC Handler ─────────────────────────────
+
+func (s *Server) handleHealthCheck(req vm.RPCRequest) vm.RPCResponse {
+	var params struct {
+		Port int    `json:"port"`
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(req.Params, &params); err != nil {
+		return rpcError(req.ID, fmt.Errorf("invalid params: %w", err))
+	}
+	if params.Port <= 0 || params.Port > 65535 {
+		return rpcError(req.ID, fmt.Errorf("invalid port: %d", params.Port))
+	}
+
+	// TCP connect check.
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", params.Port), 3*time.Second)
+	if err != nil {
+		return rpcError(req.ID, fmt.Errorf("port %d not listening: %w", params.Port, err))
+	}
+	conn.Close()
+
+	// If path provided, do HTTP GET.
+	if params.Path != "" {
+		resp, err := httpGet(fmt.Sprintf("http://127.0.0.1:%d%s", params.Port, params.Path), 3*time.Second)
+		if err != nil {
+			return rpcError(req.ID, fmt.Errorf("health check HTTP GET failed: %w", err))
+		}
+		if resp >= 400 {
+			return rpcError(req.ID, fmt.Errorf("health check HTTP GET returned status %d", resp))
+		}
+	}
+
+	return vm.RPCResponse{ID: req.ID, Result: jsonRaw(`"healthy"`)}
+}
+
+// httpGet performs an HTTP GET with a timeout and returns the status code.
+func httpGet(url string, timeout time.Duration) (int, error) {
+	client := &httpClient{timeout: timeout}
+	return client.get(url)
+}
+
+// httpClient is a minimal HTTP client for health checks inside the VM.
+// We avoid importing net/http to keep the supervisor binary small, but
+// for health checks we need it.
+type httpClient struct {
+	timeout time.Duration
+}
+
+func (c *httpClient) get(url string) (int, error) {
+	// Parse the URL to extract host and path.
+	// URL format: http://127.0.0.1:PORT/path
+	conn, err := net.DialTimeout("tcp", extractHost(url), c.timeout)
+	if err != nil {
+		return 0, err
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(c.timeout))
+
+	path := extractPath(url)
+	req := fmt.Sprintf("GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", path)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		return 0, err
+	}
+
+	// Read the response status line.
+	buf := make([]byte, 1024)
+	n, err := conn.Read(buf)
+	if err != nil {
+		return 0, err
+	}
+	// Parse "HTTP/1.x STATUS ..." from the response.
+	resp := string(buf[:n])
+	var statusCode int
+	if _, err := fmt.Sscanf(resp, "HTTP/%s %d", new(string), &statusCode); err != nil {
+		// Try alternate parse for HTTP/1.0 or HTTP/1.1
+		for i := 0; i < len(resp)-3; i++ {
+			if resp[i] == ' ' {
+				fmt.Sscanf(resp[i+1:], "%d", &statusCode)
+				break
+			}
+		}
+		if statusCode == 0 {
+			return 0, fmt.Errorf("could not parse HTTP response: %.80s", resp)
+		}
+	}
+	return statusCode, nil
+}
+
+// extractHost returns "host:port" from "http://host:port/path".
+func extractHost(url string) string {
+	// Strip scheme.
+	s := url
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+	// Strip path.
+	if idx := strings.Index(s, "/"); idx >= 0 {
+		s = s[:idx]
+	}
+	return s
+}
+
+// extractPath returns "/path" from "http://host:port/path".
+func extractPath(url string) string {
+	s := url
+	if idx := strings.Index(s, "://"); idx >= 0 {
+		s = s[idx+3:]
+	}
+	if idx := strings.Index(s, "/"); idx >= 0 {
+		return s[idx:]
+	}
+	return "/"
 }
 
 // ── Service RPC Handlers ────────────────────────────────

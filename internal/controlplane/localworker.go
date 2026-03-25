@@ -2,7 +2,9 @@ package controlplane
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/vyprai/loka/internal/controlplane/session"
@@ -208,19 +210,21 @@ func (lw *LocalWorker) handleCommand(ctx context.Context, cmd cpworker.WorkerCom
 		data := cmd.Data.(cpworker.LaunchServiceData)
 		go func() {
 			if err := lw.agent.LaunchService(ctx, data.ServiceID, worker.ServiceLaunchOpts{
-				ImageRef:            data.ImageRef,
-				VCPUs:               data.VCPUs,
-				MemoryMB:            data.MemoryMB,
-				RootfsPath:          data.RootfsPath,
-				Command:             data.Command,
-				Args:                data.Args,
-				Env:                 data.Env,
-				Workdir:             data.Workdir,
-				Port:                data.Port,
-				BundleKey:           data.BundleKey,
-				RestartPolicy:       data.RestartPolicy,
-				SnapshotMemPath:     data.SnapshotMemPath,
-				SnapshotVMStatePath: data.SnapshotVMStatePath,
+				ImageRef:             data.ImageRef,
+				VCPUs:                data.VCPUs,
+				MemoryMB:             data.MemoryMB,
+				RootfsPath:           data.RootfsPath,
+				Command:              data.Command,
+				Args:                 data.Args,
+				Env:                  data.Env,
+				Workdir:              data.Workdir,
+				Port:                 data.Port,
+				BundleKey:            data.BundleKey,
+				RestartPolicy:        data.RestartPolicy,
+				SnapshotMemPath:      data.SnapshotMemPath,
+				SnapshotVMStatePath:  data.SnapshotVMStatePath,
+				IsAppSnapshotRestore: data.IsAppSnapshotRestore,
+				HealthPath:           data.HealthPath,
 			}); err != nil {
 				lw.logger.Error("failed to launch service", "service", data.ServiceID, "error", err)
 				return
@@ -256,6 +260,12 @@ func (lw *LocalWorker) handleCommand(ctx context.Context, cmd cpworker.WorkerCom
 			}
 		}()
 
+	case "snapshot_service":
+		data := cmd.Data.(cpworker.SnapshotServiceData)
+		go func() {
+			lw.handleSnapshotService(ctx, data.ServiceID)
+		}()
+
 	case "stop_service":
 		data := cmd.Data.(cpworker.StopServiceData)
 		if err := lw.agent.StopService(data.ServiceID); err != nil {
@@ -289,4 +299,79 @@ func (lw *LocalWorker) handleCommand(ctx context.Context, cmd cpworker.WorkerCom
 	default:
 		lw.logger.Warn("unknown command type", "type", cmd.Type)
 	}
+}
+
+// handleSnapshotService takes an app-level snapshot of a running service,
+// compresses and uploads it to the object store, updates the service record,
+// and then stops the VM.
+func (lw *LocalWorker) handleSnapshotService(ctx context.Context, serviceID string) {
+	// Check if the agent already has an app snapshot from the initial deploy health check.
+	memPath, statePath := lw.agent.GetAppSnapshotPaths(serviceID)
+	if memPath == "" || statePath == "" {
+		// No existing snapshot — create one now.
+		var err error
+		memPath, statePath, err = lw.agent.VMManager().CreateDiffSnapshot(serviceID)
+		if err != nil {
+			lw.logger.Error("snapshot_service: failed to create snapshot",
+				"service", serviceID, "error", err)
+			// Still stop the service.
+			lw.agent.StopService(serviceID)
+			lw.agent.StopSession(serviceID)
+			return
+		}
+	}
+
+	// Compress and upload to objstore.
+	if lw.store != nil {
+		svc, err := lw.store.Services().Get(ctx, serviceID)
+		if err != nil {
+			lw.logger.Warn("snapshot_service: failed to get service record",
+				"service", serviceID, "error", err)
+		} else {
+			svc.AppSnapshotMem = fmt.Sprintf("services/%s/app_snapshot_mem", serviceID)
+			svc.AppSnapshotState = fmt.Sprintf("services/%s/app_snapshot_vmstate", serviceID)
+			// Upload raw snapshot files to objstore if available.
+			if lw.agent != nil && lw.agent.ObjStore() != nil {
+				if err := uploadFile(ctx, lw.agent.ObjStore(), "services", fmt.Sprintf("%s/app_snapshot_mem", serviceID), memPath); err != nil {
+					lw.logger.Warn("snapshot_service: failed to upload mem snapshot",
+						"service", serviceID, "error", err)
+					svc.AppSnapshotMem = ""
+				}
+				if err := uploadFile(ctx, lw.agent.ObjStore(), "services", fmt.Sprintf("%s/app_snapshot_vmstate", serviceID), statePath); err != nil {
+					lw.logger.Warn("snapshot_service: failed to upload vmstate snapshot",
+						"service", serviceID, "error", err)
+					svc.AppSnapshotState = ""
+				}
+			}
+			svc.UpdatedAt = time.Now()
+			if err := lw.store.Services().Update(ctx, svc); err != nil {
+				lw.logger.Warn("snapshot_service: failed to update service record",
+					"service", serviceID, "error", err)
+			} else {
+				lw.logger.Info("app snapshot persisted to service record",
+					"service", serviceID,
+					"mem_key", svc.AppSnapshotMem,
+					"state_key", svc.AppSnapshotState)
+			}
+		}
+	}
+
+	// Stop the VM.
+	lw.agent.StopService(serviceID)
+	lw.agent.StopSession(serviceID)
+	lw.logger.Info("service stopped after snapshot", "service", serviceID)
+}
+
+// uploadFile uploads a local file to the object store.
+func uploadFile(ctx context.Context, store objstore.ObjectStore, bucket, key, localPath string) error {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("open %s: %w", localPath, err)
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", localPath, err)
+	}
+	return store.Put(ctx, bucket, key, f, info.Size())
 }

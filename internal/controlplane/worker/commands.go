@@ -77,6 +77,13 @@ type LaunchServiceData struct {
 	Mounts              []loka.VolumeMount
 	SnapshotMemPath     string // Warm snapshot memory file for instant restore.
 	SnapshotVMStatePath string // Warm snapshot VM state file.
+	IsAppSnapshotRestore bool  // If true, skip bundle extraction and service_start.
+	HealthPath          string // HTTP path for health check (empty = TCP only).
+}
+
+// SnapshotServiceData is the payload for taking an app snapshot before idle.
+type SnapshotServiceData struct {
+	ServiceID string
 }
 
 // StopServiceData is the payload for stopping a service on a worker.

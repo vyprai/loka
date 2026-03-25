@@ -62,6 +62,8 @@ func (s *Store) Migrate(ctx context.Context) error {
 // if the column already exists, which we silently ignore.
 var migrations = []string{
 	`ALTER TABLE services ADD COLUMN forward_port INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE services ADD COLUMN app_snapshot_mem TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE services ADD COLUMN app_snapshot_state TEXT NOT NULL DEFAULT ''`,
 }
 
 // DB returns the underlying sql.DB for operations that need direct access
@@ -172,6 +174,8 @@ CREATE TABLE IF NOT EXISTS services (
 	mounts           TEXT NOT NULL DEFAULT '[]',
 	autoscale        TEXT NOT NULL DEFAULT 'null',
 	snapshot_id      TEXT NOT NULL DEFAULT '',
+	app_snapshot_mem   TEXT NOT NULL DEFAULT '',
+	app_snapshot_state TEXT NOT NULL DEFAULT '',
 	forward_port     INTEGER NOT NULL DEFAULT 0,
 	ready            INTEGER NOT NULL DEFAULT 0,
 	status_message   TEXT NOT NULL DEFAULT '',

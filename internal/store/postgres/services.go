@@ -23,15 +23,16 @@ func (r *serviceRepo) Create(ctx context.Context, svc *loka.Service) error {
 	mounts, _ := json.Marshal(svc.Mounts)
 	autoscale, _ := json.Marshal(svc.Autoscale)
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO services (id, name, status, worker_id, image_ref, image_id, recipe_name, command, args, env, workdir, port, vcpus, memory_mb, routes, bundle_key, idle_timeout, health_path, health_interval, health_timeout, health_retries, labels, mounts, autoscale, snapshot_id, forward_port, ready, status_message, last_activity, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31)`,
+		`INSERT INTO services (id, name, status, worker_id, image_ref, image_id, recipe_name, command, args, env, workdir, port, vcpus, memory_mb, routes, bundle_key, idle_timeout, health_path, health_interval, health_timeout, health_retries, labels, mounts, autoscale, snapshot_id, app_snapshot_mem, app_snapshot_state, forward_port, ready, status_message, last_activity, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33)`,
 		svc.ID, svc.Name, string(svc.Status), svc.WorkerID,
 		svc.ImageRef, svc.ImageID, svc.RecipeName, svc.Command,
 		string(args), string(env), svc.Workdir, svc.Port,
 		svc.VCPUs, svc.MemoryMB, string(routes), svc.BundleKey,
 		svc.IdleTimeout, svc.HealthPath, svc.HealthInterval, svc.HealthTimeout, svc.HealthRetries,
 		string(labels), string(mounts), string(autoscale),
-		svc.SnapshotID, svc.ForwardPort, svc.Ready, svc.StatusMessage,
+		svc.SnapshotID, svc.AppSnapshotMem, svc.AppSnapshotState,
+		svc.ForwardPort, svc.Ready, svc.StatusMessage,
 		svc.LastActivity, svc.CreatedAt, svc.UpdatedAt,
 	)
 	if err != nil {
@@ -54,15 +55,16 @@ func (r *serviceRepo) Update(ctx context.Context, svc *loka.Service) error {
 	autoscale, _ := json.Marshal(svc.Autoscale)
 	svc.UpdatedAt = time.Now()
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE services SET name=$1, status=$2, worker_id=$3, image_ref=$4, image_id=$5, recipe_name=$6, command=$7, args=$8, env=$9, workdir=$10, port=$11, vcpus=$12, memory_mb=$13, routes=$14, bundle_key=$15, idle_timeout=$16, health_path=$17, health_interval=$18, health_timeout=$19, health_retries=$20, labels=$21, mounts=$22, autoscale=$23, snapshot_id=$24, forward_port=$25, ready=$26, status_message=$27, last_activity=$28, updated_at=$29
-		 WHERE id=$30`,
+		`UPDATE services SET name=$1, status=$2, worker_id=$3, image_ref=$4, image_id=$5, recipe_name=$6, command=$7, args=$8, env=$9, workdir=$10, port=$11, vcpus=$12, memory_mb=$13, routes=$14, bundle_key=$15, idle_timeout=$16, health_path=$17, health_interval=$18, health_timeout=$19, health_retries=$20, labels=$21, mounts=$22, autoscale=$23, snapshot_id=$24, app_snapshot_mem=$25, app_snapshot_state=$26, forward_port=$27, ready=$28, status_message=$29, last_activity=$30, updated_at=$31
+		 WHERE id=$32`,
 		svc.Name, string(svc.Status), svc.WorkerID,
 		svc.ImageRef, svc.ImageID, svc.RecipeName, svc.Command,
 		string(args), string(env), svc.Workdir, svc.Port,
 		svc.VCPUs, svc.MemoryMB, string(routes), svc.BundleKey,
 		svc.IdleTimeout, svc.HealthPath, svc.HealthInterval, svc.HealthTimeout, svc.HealthRetries,
 		string(labels), string(mounts), string(autoscale),
-		svc.SnapshotID, svc.ForwardPort, svc.Ready, svc.StatusMessage,
+		svc.SnapshotID, svc.AppSnapshotMem, svc.AppSnapshotState,
+		svc.ForwardPort, svc.Ready, svc.StatusMessage,
 		svc.LastActivity, svc.UpdatedAt,
 		svc.ID,
 	)
@@ -133,7 +135,7 @@ func (r *serviceRepo) ListByWorker(ctx context.Context, workerID string) ([]*lok
 	return svcs, err
 }
 
-const serviceSelectSQL = `SELECT id, name, status, worker_id, image_ref, image_id, recipe_name, command, args, env, workdir, port, vcpus, memory_mb, routes, bundle_key, idle_timeout, health_path, health_interval, health_timeout, health_retries, labels, mounts, autoscale, snapshot_id, forward_port, ready, status_message, last_activity, created_at, updated_at FROM services`
+const serviceSelectSQL = `SELECT id, name, status, worker_id, image_ref, image_id, recipe_name, command, args, env, workdir, port, vcpus, memory_mb, routes, bundle_key, idle_timeout, health_path, health_interval, health_timeout, health_retries, labels, mounts, autoscale, snapshot_id, app_snapshot_mem, app_snapshot_state, forward_port, ready, status_message, last_activity, created_at, updated_at FROM services`
 
 func scanService(row *sql.Row) (*loka.Service, error) {
 	var svc loka.Service
@@ -146,7 +148,8 @@ func scanService(row *sql.Row) (*loka.Service, error) {
 		&svc.VCPUs, &svc.MemoryMB, &routesJSON, &svc.BundleKey,
 		&svc.IdleTimeout, &svc.HealthPath, &svc.HealthInterval, &svc.HealthTimeout, &svc.HealthRetries,
 		&labelsJSON, &mountsJSON, &autoscaleJSON,
-		&svc.SnapshotID, &svc.ForwardPort, &svc.Ready, &svc.StatusMessage,
+		&svc.SnapshotID, &svc.AppSnapshotMem, &svc.AppSnapshotState,
+		&svc.ForwardPort, &svc.Ready, &svc.StatusMessage,
 		&lastActivity, &createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -179,7 +182,8 @@ func scanServiceRows(rows *sql.Rows) (*loka.Service, error) {
 		&svc.VCPUs, &svc.MemoryMB, &routesJSON, &svc.BundleKey,
 		&svc.IdleTimeout, &svc.HealthPath, &svc.HealthInterval, &svc.HealthTimeout, &svc.HealthRetries,
 		&labelsJSON, &mountsJSON, &autoscaleJSON,
-		&svc.SnapshotID, &svc.ForwardPort, &svc.Ready, &svc.StatusMessage,
+		&svc.SnapshotID, &svc.AppSnapshotMem, &svc.AppSnapshotState,
+		&svc.ForwardPort, &svc.Ready, &svc.StatusMessage,
 		&lastActivity, &createdAt, &updatedAt,
 	)
 	if err != nil {

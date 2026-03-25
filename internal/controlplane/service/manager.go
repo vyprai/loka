@@ -3,7 +3,10 @@ package service
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -279,6 +282,7 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 		Mounts:              svc.Mounts,
 		SnapshotMemPath:     snapshotMemPath,
 		SnapshotVMStatePath: snapshotVMStatePath,
+		HealthPath:          svc.HealthPath,
 	}
 
 	m.registry.SendCommand(svc.WorkerID, worker.WorkerCommand{
@@ -565,22 +569,79 @@ func (m *Manager) Wake(ctx context.Context, id string) (*loka.Service, error) {
 		return nil, err
 	}
 
+	// Determine snapshot paths: prefer app snapshot (instant, app already running)
+	// over base image snapshot (requires bundle extract + service start).
+	var snapshotMemPath, snapshotVMStatePath string
+	isAppSnapshotRestore := false
+	if svc.AppSnapshotMem != "" && svc.AppSnapshotState != "" {
+		// Use app snapshot — instant restore with app already running.
+		// Download from objstore if needed (same pattern as base snapshot).
+		if m.objStore != nil {
+			memPath, err := m.downloadSnapshot(svc.AppSnapshotMem)
+			if err != nil {
+				m.logger.Warn("failed to download app snapshot mem, falling back",
+					"service", id, "error", err)
+			} else {
+				statePath, err := m.downloadSnapshot(svc.AppSnapshotState)
+				if err != nil {
+					m.logger.Warn("failed to download app snapshot state, falling back",
+						"service", id, "error", err)
+				} else {
+					snapshotMemPath = memPath
+					snapshotVMStatePath = statePath
+					isAppSnapshotRestore = true
+				}
+			}
+		}
+	}
+	if !isAppSnapshotRestore && svc.ImageID != "" && m.images != nil {
+		// Fall back to base image snapshot.
+		memPath, statePath, snapErr := m.images.ResolveSnapshotPaths(m.ctx, svc.ImageID)
+		if snapErr != nil {
+			m.logger.Warn("resolve snapshot paths failed for wake, will cold boot",
+				"service", id, "error", snapErr)
+		} else {
+			snapshotMemPath = memPath
+			snapshotVMStatePath = statePath
+		}
+	}
+
+	// Default workdir to /workspace when deploying a bundle.
+	workdir := svc.Workdir
+	if workdir == "" && svc.BundleKey != "" {
+		workdir = "/workspace"
+	}
+
+	// Resolve rootfs path if we have an image.
+	var rootfsPath string
+	if svc.ImageID != "" && m.images != nil {
+		rp, err := m.images.ResolveRootfsPath(m.ctx, svc.ImageID)
+		if err == nil {
+			rootfsPath = rp
+		}
+	}
+
 	// Send resume command to worker.
 	if svc.WorkerID != "" {
 		m.registry.SendCommand(svc.WorkerID, worker.WorkerCommand{
 			ID:   uuid.New().String(),
 			Type: "launch_service",
 			Data: worker.LaunchServiceData{
-				ServiceID: svc.ID,
-				ImageRef:  svc.ImageRef,
-				VCPUs:     svc.VCPUs,
-				MemoryMB:  svc.MemoryMB,
-				Command:   svc.Command,
-				Args:      svc.Args,
-				Env:       svc.Env,
-				Workdir:   svc.Workdir,
-				Port:      svc.Port,
-				BundleKey: svc.BundleKey,
+				ServiceID:            svc.ID,
+				ImageRef:             svc.ImageRef,
+				VCPUs:                svc.VCPUs,
+				MemoryMB:             svc.MemoryMB,
+				RootfsPath:           rootfsPath,
+				Command:              svc.Command,
+				Args:                 svc.Args,
+				Env:                  svc.Env,
+				Workdir:              workdir,
+				Port:                 svc.Port,
+				BundleKey:            svc.BundleKey,
+				SnapshotMemPath:      snapshotMemPath,
+				SnapshotVMStatePath:  snapshotVMStatePath,
+				IsAppSnapshotRestore: isAppSnapshotRestore,
+				HealthPath:           svc.HealthPath,
 			},
 		})
 	}
@@ -740,7 +801,7 @@ func (m *Manager) checkIdleServices() {
 		}
 		if time.Since(svc.LastActivity) > time.Duration(svc.IdleTimeout)*time.Second {
 			m.logger.Info("service idle, transitioning", "service_id", svc.ID, "name", svc.Name)
-			// Update store FIRST — only send stop command if store update succeeds.
+			// Update store FIRST — only send stop/snapshot command if store update succeeds.
 			svc.Status = loka.ServiceStatusIdle
 			svc.Ready = false
 			svc.UpdatedAt = time.Now()
@@ -748,11 +809,12 @@ func (m *Manager) checkIdleServices() {
 				m.logger.Error("idle monitor: failed to update service", "service_id", svc.ID, "error", err)
 				continue // Don't send stop command if store update failed.
 			}
-			// Store updated successfully, now stop the service process.
+			// Take an app snapshot before stopping so that wake is instant.
+			// The snapshot_service handler will snapshot + stop the VM.
 			if svc.WorkerID != "" {
 				m.registry.SendCommand(svc.WorkerID, worker.WorkerCommand{
-					Type: "stop_service",
-					Data: worker.StopServiceData{ServiceID: svc.ID},
+					Type: "snapshot_service",
+					Data: worker.SnapshotServiceData{ServiceID: svc.ID},
 				})
 			}
 		}
@@ -799,6 +861,35 @@ func (m *Manager) updateStatusMessage(ctx context.Context, serviceID, message st
 	if err := m.store.Services().Update(ctx, svc); err != nil {
 		m.logger.Error("failed to update service status message", "service_id", serviceID, "error", err)
 	}
+}
+
+// downloadSnapshot downloads a snapshot file from the object store and returns
+// the local path. The key format is "bucket/path" (e.g. "services/id/app_snapshot_mem").
+func (m *Manager) downloadSnapshot(key string) (string, error) {
+	parts := strings.SplitN(key, "/", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid snapshot key: %s", key)
+	}
+	bucket, objKey := parts[0], parts[1]
+
+	reader, err := m.objStore.Get(m.ctx, bucket, objKey)
+	if err != nil {
+		return "", fmt.Errorf("download snapshot %s: %w", key, err)
+	}
+	defer reader.Close()
+
+	tmpFile, err := os.CreateTemp("", "loka-snap-*")
+	if err != nil {
+		return "", fmt.Errorf("create temp for snapshot: %w", err)
+	}
+
+	if _, err := io.Copy(tmpFile, reader); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return "", fmt.Errorf("write snapshot to temp: %w", err)
+	}
+	tmpFile.Close()
+	return tmpFile.Name(), nil
 }
 
 // setError marks a service as errored.

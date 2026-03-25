@@ -225,6 +225,17 @@ func (c *VsockClient) ServiceLogs(lines int) (*ServiceLogsResult, error) {
 	return &result, nil
 }
 
+// HealthCheck checks if a port is listening inside the VM, optionally doing an
+// HTTP GET if path is non-empty. Uses the supervisor's health_check RPC.
+func (c *VsockClient) HealthCheck(port int, path string) error {
+	params, _ := json.Marshal(map[string]any{
+		"port": port,
+		"path": path,
+	})
+	_, err := c.call("health_check", params)
+	return err
+}
+
 // ── Low-Level Transport ─────────────────────────────────
 
 // TODO: Each RPC call creates a new vsock connection, which adds latency.
