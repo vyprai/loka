@@ -148,7 +148,9 @@ func deployLocalMacOS(name string, foreground bool) error {
 
 	home, _ := os.UserHomeDir()
 	dataDir := filepath.Join(home, ".loka")
-	os.MkdirAll(dataDir, 0755)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		return fmt.Errorf("create data dir: %w", err)
+	}
 
 	if foreground {
 		cmd := exec.Command(lokadPath, "--data-dir", dataDir)

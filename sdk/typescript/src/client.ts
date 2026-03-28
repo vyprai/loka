@@ -335,14 +335,14 @@ export class LokaClient {
     return this.get('/api/v1/domains');
   }
 
-  /** Expose a session port on a public subdomain. */
-  async exposeSession(sessionId: string, subdomain: string, remotePort: number): Promise<{ subdomain: string; url: string; port: number }> {
-    return this.post(`/api/v1/sessions/${sessionId}/expose`, { subdomain, remote_port: remotePort });
+  /** Expose a session port on a public domain. */
+  async exposeSession(sessionId: string, domain: string, remotePort: number): Promise<{ domain: string; url: string; port: number }> {
+    return this.post(`/api/v1/sessions/${sessionId}/expose`, { domain, remote_port: remotePort });
   }
 
-  /** Remove a previously exposed subdomain from a session. */
-  async unexposeSession(sessionId: string, subdomain: string): Promise<void> {
-    await this.del(`/api/v1/sessions/${sessionId}/expose/${subdomain}`);
+  /** Remove a previously exposed domain from a session. */
+  async unexposeSession(sessionId: string, domain: string): Promise<void> {
+    await this.del(`/api/v1/sessions/${sessionId}/expose/${domain}`);
   }
 
   // ── Images ──────────────────────────────────────────
@@ -424,12 +424,12 @@ export class LokaClient {
     return data.logs || '';
   }
 
-  async addServiceRoute(id: string, subdomain: string, opts?: { port?: number; protocol?: string }): Promise<ServiceRoute> {
-    return this.post(`/api/v1/services/${id}/routes`, { subdomain, ...opts });
+  async addServiceRoute(id: string, domain: string, opts?: { port?: number; protocol?: string }): Promise<ServiceRoute> {
+    return this.post(`/api/v1/services/${id}/routes`, { domain, ...opts });
   }
 
-  async removeServiceRoute(id: string, subdomain: string): Promise<void> {
-    await this.del(`/api/v1/services/${id}/routes/${subdomain}`);
+  async removeServiceRoute(id: string, domain: string): Promise<void> {
+    await this.del(`/api/v1/services/${id}/routes/${domain}`);
   }
 
   async listServiceRoutes(id: string): Promise<{ routes: ServiceRoute[] }> {

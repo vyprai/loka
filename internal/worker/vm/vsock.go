@@ -11,15 +11,12 @@ import (
 	"github.com/vyprai/loka/internal/loka"
 )
 
-// VsockClient communicates with the supervisor inside a VM.
-// It supports two connection modes:
-//   - Firecracker: connects via vsock UDS with CONNECT handshake
-//   - lokavm: connects via DialVsock function (direct net.Conn)
-//
-// Protocol: JSON-RPC. The supervisor listens on vsock port 52 inside the guest.
+// VsockClient communicates with the supervisor inside a VM via JSON-RPC.
+// Uses lokavm's DialVsock function for direct vsock connections.
+// The supervisor listens on vsock port 52 inside the guest.
 type VsockClient struct {
-	socketPath string                         // Firecracker vsock UDS path.
-	dialFn     func(port uint32) (net.Conn, error) // lokavm vsock dialer (nil = use Firecracker UDS).
+	socketPath string                              // Legacy UDS path (unused with lokavm).
+	dialFn     func(port uint32) (net.Conn, error) // Vsock dialer from VM.DialVsock.
 	timeout    time.Duration
 
 	// Connection pool: reuse a persistent connection for lower latency.
@@ -28,16 +25,7 @@ type VsockClient struct {
 	connGood bool
 }
 
-// NewVsockClient creates a client for a Firecracker VM's vsock socket.
-func NewVsockClient(vsockPath string) *VsockClient {
-	return &VsockClient{
-		socketPath: vsockPath,
-		timeout:    30 * time.Second,
-	}
-}
-
 // NewVsockClientFromDialer creates a client using a direct vsock dial function.
-// Used with lokavm where VM.DialVsock provides net.Conn directly.
 func NewVsockClientFromDialer(dialFn func(port uint32) (net.Conn, error)) *VsockClient {
 	return &VsockClient{
 		dialFn:  dialFn,

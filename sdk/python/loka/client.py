@@ -155,14 +155,14 @@ class LokaClient:
     def set_mode(self, session_id: str, mode: str) -> Session:
         return self._as(Session, self._post(f"/api/v1/sessions/{session_id}/mode", {"mode": mode}))
 
-    def expose_session(self, session_id: str, subdomain: str, remote_port: int) -> dict:
+    def expose_session(self, session_id: str, domain: str, remote_port: int) -> dict:
         return self._post(f"/api/v1/sessions/{session_id}/expose", {
-            "subdomain": subdomain,
+            "domain": domain,
             "remote_port": remote_port,
         })
 
-    def unexpose_session(self, session_id: str, subdomain: str) -> None:
-        self._delete(f"/api/v1/sessions/{session_id}/expose/{subdomain}")
+    def unexpose_session(self, session_id: str, domain: str) -> None:
+        self._delete(f"/api/v1/sessions/{session_id}/expose/{domain}")
 
     def wait_until_ready(self, session_id: str, timeout: float = 120) -> Session:
         """Poll until session is ready or errors out.
@@ -506,14 +506,14 @@ class LokaClient:
         data = self._get(f"/api/v1/services/{service_id}/logs?lines={lines}")
         return data.get("logs", "")
 
-    def add_service_route(self, service_id: str, subdomain: str, port: int = 0, protocol: str = "http") -> ServiceRoute:
-        body: dict[str, Any] = {"subdomain": subdomain}
+    def add_service_route(self, service_id: str, domain: str, port: int = 0, protocol: str = "http") -> ServiceRoute:
+        body: dict[str, Any] = {"domain": domain}
         if port: body["port"] = port
         if protocol != "http": body["protocol"] = protocol
         return self._as(ServiceRoute, self._post(f"/api/v1/services/{service_id}/routes", body))
 
-    def remove_service_route(self, service_id: str, subdomain: str) -> None:
-        self._delete(f"/api/v1/services/{service_id}/routes/{subdomain}")
+    def remove_service_route(self, service_id: str, domain: str) -> None:
+        self._delete(f"/api/v1/services/{service_id}/routes/{domain}")
 
     def list_service_routes(self, service_id: str) -> list[ServiceRoute]:
         data = self._get(f"/api/v1/services/{service_id}/routes")

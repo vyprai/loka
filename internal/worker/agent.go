@@ -368,7 +368,9 @@ func (a *Agent) LaunchSession(ctx context.Context, sessionID string, opts Launch
 // cloneDir creates a copy of src directory at dst.
 // On macOS APFS, uses `cp -c` for instant copy-on-write clones.
 func cloneDir(src, dst string) error {
-	os.MkdirAll(filepath.Dir(dst), 0o755)
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("create clone dir: %w", err)
+	}
 	// Try APFS clone first (instant, zero disk until writes).
 	if err := exec.Command("cp", "-ac", src, dst).Run(); err == nil {
 		return nil
