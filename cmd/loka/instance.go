@@ -109,6 +109,43 @@ func newInstanceListCmd() *cobra.Command {
 				}
 			}
 
+			// Fetch tasks.
+			var taskResp struct {
+				Tasks []struct {
+					ID        string    `json:"ID"`
+					Name      string    `json:"Name"`
+					Status    string    `json:"Status"`
+					ExitCode  int       `json:"ExitCode"`
+					ImageRef  string    `json:"ImageRef"`
+					CreatedAt time.Time `json:"CreatedAt"`
+				} `json:"tasks"`
+			}
+			if err := client.Raw(cmd.Context(), "GET", "/api/v1/tasks", nil, &taskResp); err == nil {
+				for _, t := range taskResp.Tasks {
+					name := t.Name
+					if name == "" {
+						name = shortID(t.ID)
+					}
+					status := t.Status
+					if status == "failed" {
+						status = fmt.Sprintf("failed (exit %d)", t.ExitCode)
+					}
+					img := t.ImageRef
+					if len(img) > 30 {
+						img = img[:30]
+					}
+					rows = append(rows, instanceRow{
+						Type:    "task",
+						Name:    name,
+						ID:      t.ID,
+						Status:  status,
+						Image:   img,
+						Port:    "-",
+						Created: t.CreatedAt,
+					})
+				}
+			}
+
 			if outputFmt == "json" {
 				return printJSON(rows)
 			}

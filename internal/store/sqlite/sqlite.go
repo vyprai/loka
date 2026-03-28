@@ -116,6 +116,7 @@ func (s *Store) Workers() store.WorkerRepository         { return &workerRepo{db
 func (s *Store) Tokens() store.TokenRepository           { return &tokenRepo{db: s.db, readDB: s.readDB} }
 func (s *Store) Services() store.ServiceRepository       { return &serviceRepo{db: s.db, readDB: s.readDB} }
 func (s *Store) Volumes() store.VolumeRepository         { return &volumeRepo{db: s.db, readDB: s.readDB} }
+func (s *Store) Tasks() store.TaskRepository             { return &taskRepo{db: s.db, readDB: s.readDB} }
 
 var _ store.Store = (*Store)(nil)
 
@@ -253,4 +254,29 @@ CREATE TABLE IF NOT EXISTS volumes (
 	created_at  TEXT NOT NULL DEFAULT (datetime('now')),
 	updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS tasks (
+	id             TEXT PRIMARY KEY,
+	name           TEXT NOT NULL DEFAULT '',
+	status         TEXT NOT NULL DEFAULT 'pending',
+	exit_code      INTEGER NOT NULL DEFAULT 0,
+	worker_id      TEXT NOT NULL DEFAULT '',
+	image_ref      TEXT NOT NULL DEFAULT '',
+	command        TEXT NOT NULL DEFAULT '',
+	args           TEXT NOT NULL DEFAULT '[]',
+	env            TEXT NOT NULL DEFAULT '{}',
+	workdir        TEXT NOT NULL DEFAULT '',
+	bundle_key     TEXT NOT NULL DEFAULT '',
+	vcpus          INTEGER NOT NULL DEFAULT 1,
+	memory_mb      INTEGER NOT NULL DEFAULT 512,
+	mounts         TEXT NOT NULL DEFAULT '[]',
+	timeout        INTEGER NOT NULL DEFAULT 0,
+	status_message TEXT NOT NULL DEFAULT '',
+	started_at     TEXT NOT NULL DEFAULT '',
+	completed_at   TEXT NOT NULL DEFAULT '',
+	created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+	updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_name ON tasks(name);
 `

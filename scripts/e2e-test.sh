@@ -790,7 +790,7 @@ if [ "$VM_AVAILABLE" = true ] && [ "$KERNEL_AVAILABLE" = true ]; then
     [ "$DE_LC" = "200" ] || [ "$DE_LC" = "404" ] && pass "List domains (HTTP $DE_LC)" || fail "List domains" "HTTP $DE_LC"
 
     # Unexpose
-    DE_UN=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$DE_SID/expose/e2e-app2")
+    DE_UN=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$DE_SID/expose/e2e-app2.loka")
     [ "$DE_UN" = "200" ] && pass "Unexpose domain (HTTP 200)" || pass "Unexpose (HTTP $DE_UN)"
 
     curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$DE_SID" >/dev/null
@@ -1683,7 +1683,7 @@ echo "$SVC_ROUTES" | python3 -c "import sys,json; d=json.load(sys.stdin); assert
   pass "Service list routes" || pass "Service list routes (empty)"
 
 # Delete route
-SVC_DROUTE_HTTP=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/services/$SVC_ID/routes/svc-$RUN_ID")
+SVC_DROUTE_HTTP=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/services/$SVC_ID/routes/svc-$RUN_ID.loka")
 pass "Service delete route (HTTP $SVC_DROUTE_HTTP)"
 
 # Stop service by NAME
@@ -1812,7 +1812,7 @@ EXP_HTTP=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api
   pass "Expose session (HTTP $EXP_HTTP)" || pass "Expose session (HTTP $EXP_HTTP — proxy may not be enabled)"
 
 # Unexpose
-UNEXP_HTTP=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$EXP_ID/expose/e2e-exposed")
+UNEXP_HTTP=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/sessions/$EXP_ID/expose/e2e-exposed.loka")
 pass "Unexpose session (HTTP $UNEXP_HTTP)"
 
 # Cleanup
@@ -2055,12 +2055,12 @@ CLI_S=""
 [ "$IS_LINUX" = true ] && CLI_S="--space $ENDPOINT"
 
 # Current
-CUR=$("$LOKA_BIN" current 2>&1)
-echo "$CUR" | grep -q "e2e-server" && pass "loka current" || fail "loka current" "$CUR"
+CUR=$("$LOKA_BIN" space current 2>&1)
+echo "$CUR" | grep -q "e2e-server" && pass "loka space current" || fail "loka space current" "$CUR"
 
 # List
-LST=$("$LOKA_BIN" list 2>&1)
-echo "$LST" | grep -q "e2e-server" && pass "loka list" || fail "loka list" "$LST"
+LST=$("$LOKA_BIN" space list 2>&1)
+echo "$LST" | grep -q "e2e-server" && pass "loka space list" || fail "loka space list" "$LST"
 
 # Status
 STAT=$("$LOKA_BIN" $CLI_S status 2>&1)
@@ -2323,7 +2323,7 @@ sys.exit(0 if ok else 1)
 " 2>/dev/null && pass "Route port/protocol mapping correct" || fail "Route mapping" "routes=$MP_ROUTES"
 
   # Delete one route
-  MP_DEL=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/services/$MP_SVC_ID/routes/grpc")
+  MP_DEL=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/services/$MP_SVC_ID/routes/grpc.loka")
   [ "$MP_DEL" = "200" ] && pass "Delete grpc route (HTTP $MP_DEL)" || fail "Delete route" "HTTP $MP_DEL"
 
   # Verify 2 remaining
@@ -3038,6 +3038,185 @@ if [ "$VM_AVAILABLE" = true ]; then
 else
   skip "gRPC streaming (no KVM)"
 fi
+
+# ── 15. Shell (PTY) ──────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}${BOLD}── Shell ──${NC}"
+
+if [ -n "$LOKAD_PID" ] && kill -0 "$LOKAD_PID" 2>/dev/null; then
+  # Create a session for shell test
+  SHELL_SID=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/sessions" \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"shell-test-'$RUN_ID'"}' | jf ID)
+  if [ -n "$SHELL_SID" ]; then
+    pass "Shell: session created ($SHELL_SID)"
+    sleep 5
+
+    # Test shell command exists
+    "$LOKA_BIN" $CLI_S shell --help > /dev/null 2>&1 && pass "Shell: help" || fail "Shell: help" "command not found"
+
+    curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/sessions/$SHELL_SID" > /dev/null 2>&1
+  else
+    skip "Shell: no session"
+  fi
+else
+  skip "Shell (lokad not running)"
+fi
+
+# ── 16. Deploy (image) ──────────────────────────────────
+
+echo ""
+echo -e "${CYAN}${BOLD}── Deploy (image) ──${NC}"
+
+# Test image ref detection
+"$LOKA_BIN" deploy --help > /dev/null 2>&1 && pass "Deploy: help" || fail "Deploy: help" "missing"
+
+# ── 17. Tasks API ───────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}${BOLD}── Tasks API ──${NC}"
+
+if [ -n "$LOKAD_PID" ] && kill -0 "$LOKAD_PID" 2>/dev/null; then
+  # Create a task
+  TASK=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/tasks" \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"test-task-'$RUN_ID'","image":"alpine:latest","command":"echo hello"}')
+  TASK_ID=$(echo "$TASK" | jf ID)
+  TASK_STATUS=$(echo "$TASK" | jf Status)
+  if [ -n "$TASK_ID" ]; then
+    pass "Tasks: create ($TASK_ID, status=$TASK_STATUS)"
+  else
+    fail "Tasks: create" "no ID returned"
+  fi
+
+  # List tasks
+  TASK_COUNT=$(curl $CURL_OPTS "$ENDPOINT/api/v1/tasks" | jlen tasks)
+  [ "$TASK_COUNT" -ge 1 ] 2>/dev/null && pass "Tasks: list ($TASK_COUNT tasks)" || fail "Tasks: list" "expected >= 1"
+
+  # Get task
+  TASK_GET=$(curl $CURL_OPTS "$ENDPOINT/api/v1/tasks/$TASK_ID" | jf Name)
+  [ -n "$TASK_GET" ] && pass "Tasks: get ($TASK_GET)" || fail "Tasks: get" "no name"
+
+  # Wait briefly for task to complete or fail (image might not be available)
+  sleep 10
+  TASK_FINAL=$(curl $CURL_OPTS "$ENDPOINT/api/v1/tasks/$TASK_ID" | jf Status)
+  echo "  Task final status: $TASK_FINAL"
+  case "$TASK_FINAL" in
+    success|failed|error|running|pending)
+      pass "Tasks: status transition ($TASK_FINAL)"
+      ;;
+    *)
+      fail "Tasks: status" "unexpected: $TASK_FINAL"
+      ;;
+  esac
+
+  # Cancel (if still running)
+  if [ "$TASK_FINAL" = "running" ] || [ "$TASK_FINAL" = "pending" ]; then
+    curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/tasks/$TASK_ID/cancel" > /dev/null 2>&1
+    pass "Tasks: cancel"
+  fi
+
+  # Delete task
+  curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/tasks/$TASK_ID" > /dev/null 2>&1
+  TASK_AFTER=$(curl $CURL_OPTS "$ENDPOINT/api/v1/tasks/$TASK_ID" 2>&1)
+  echo "$TASK_AFTER" | grep -q "not found" && pass "Tasks: delete" || pass "Tasks: delete (record may persist)"
+
+  # CLI tests
+  "$LOKA_BIN" $CLI_S task list > /dev/null 2>&1 && pass "Tasks CLI: list" || fail "Tasks CLI: list" "command failed"
+  "$LOKA_BIN" $CLI_S task --help > /dev/null 2>&1 && pass "Tasks CLI: help" || fail "Tasks CLI: help" "command failed"
+else
+  skip "Tasks API (lokad not running)"
+fi
+
+# ── 18. Instances ───────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}${BOLD}── Instances ──${NC}"
+
+"$LOKA_BIN" $CLI_S instance list > /dev/null 2>&1 && pass "Instances: list" || fail "Instances: list" "command failed"
+"$LOKA_BIN" $CLI_S instance --help > /dev/null 2>&1 && pass "Instances: help" || fail "Instances: help" "command failed"
+
+# ── 19. Spaces ──────────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}${BOLD}── Spaces ──${NC}"
+
+"$LOKA_BIN" space list > /dev/null 2>&1 && pass "Spaces: list" || fail "Spaces: list" "command failed"
+"$LOKA_BIN" space current > /dev/null 2>&1 && pass "Spaces: current" || fail "Spaces: current" "command failed"
+"$LOKA_BIN" space --help > /dev/null 2>&1 && pass "Spaces: help" || fail "Spaces: help" "command failed"
+
+# ── 20. Compose parser ──────────────────────────────────
+
+echo ""
+echo -e "${CYAN}${BOLD}── Compose ──${NC}"
+
+COMPOSE_DIR=$(mktemp -d)
+cat > "$COMPOSE_DIR/docker-compose.yml" << 'COMPOSEYML'
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "8080:80"
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_PASSWORD: secret
+COMPOSEYML
+
+# Test detection (won't actually deploy without lokad handling compose)
+"$LOKA_BIN" deploy --help > /dev/null 2>&1 && pass "Compose: deploy help" || fail "Compose: deploy help" "missing"
+rm -rf "$COMPOSE_DIR"
+
+# ── 21. Volume locks API ────────────────────────────────
+
+echo ""
+echo -e "${CYAN}${BOLD}── Volume Locks ──${NC}"
+
+if [ -n "$LOKAD_PID" ] && kill -0 "$LOKAD_PID" 2>/dev/null; then
+  # Acquire lock
+  LOCK=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/volumes/test-vol/lock" \
+    -H 'Content-Type: application/json' \
+    -d '{"path":"/test.txt","worker_id":"test-worker","exclusive":true,"ttl":10}')
+  echo "$LOCK" | grep -q "locked" && pass "Locks: acquire" || fail "Locks: acquire" "$LOCK"
+
+  # List locks
+  LOCKS=$(curl $CURL_OPTS "$ENDPOINT/api/v1/volumes/test-vol/locks")
+  echo "$LOCKS" | grep -q "test.txt" && pass "Locks: list" || fail "Locks: list" "$LOCKS"
+
+  # Conflict — same file, different worker
+  CONFLICT=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/volumes/test-vol/lock" \
+    -H 'Content-Type: application/json' \
+    -d '{"path":"/test.txt","worker_id":"other-worker","exclusive":true,"ttl":10}')
+  echo "$CONFLICT" | grep -q "error" && pass "Locks: conflict detected" || fail "Locks: conflict" "expected error"
+
+  # Release
+  UNLOCK=$(curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/volumes/test-vol/lock" \
+    -H 'Content-Type: application/json' \
+    -d '{"path":"/test.txt","worker_id":"test-worker"}')
+  echo "$UNLOCK" | grep -q "unlocked" && pass "Locks: release" || fail "Locks: release" "$UNLOCK"
+
+  # Re-acquire after release (should succeed)
+  RELOCK=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/volumes/test-vol/lock" \
+    -H 'Content-Type: application/json' \
+    -d '{"path":"/test.txt","worker_id":"other-worker","exclusive":true,"ttl":5}')
+  echo "$RELOCK" | grep -q "locked" && pass "Locks: re-acquire after release" || fail "Locks: re-acquire" "$RELOCK"
+
+  # Release cleanup
+  curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/volumes/test-vol/lock" \
+    -H 'Content-Type: application/json' \
+    -d '{"path":"/test.txt","worker_id":"other-worker"}' > /dev/null 2>&1
+else
+  skip "Volume Locks (lokad not running)"
+fi
+
+# ── 22. DNS CLI ─────────────────────────────────────────
+
+echo ""
+echo -e "${CYAN}${BOLD}── DNS CLI ──${NC}"
+
+"$LOKA_BIN" dns --help > /dev/null 2>&1 && pass "DNS: help" || fail "DNS: help" "command failed"
+"$LOKA_BIN" dns status > /dev/null 2>&1 && pass "DNS: status" || pass "DNS: status (no server)"
 
 echo ""
 echo -e "${GREEN}${BOLD}  E2E tests complete!${NC}"

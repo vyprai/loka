@@ -65,6 +65,7 @@ func (s *Store) Workers() store.WorkerRepository         { return &workerRepo{db
 func (s *Store) Tokens() store.TokenRepository           { return &tokenRepo{db: s.db} }
 func (s *Store) Services() store.ServiceRepository       { return &serviceRepo{db: s.db} }
 func (s *Store) Volumes() store.VolumeRepository         { return &volumeRepo{db: s.db} }
+func (s *Store) Tasks() store.TaskRepository             { return &taskRepo{db: s.db} }
 
 var _ store.Store = (*Store)(nil)
 

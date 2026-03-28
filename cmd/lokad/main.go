@@ -36,6 +36,7 @@ import (
 	leaderobjstore "github.com/vyprai/loka/internal/objstore/leader"
 	localobjstore "github.com/vyprai/loka/internal/objstore/local"
 	s3objstore "github.com/vyprai/loka/internal/objstore/s3"
+	lokatask "github.com/vyprai/loka/internal/controlplane/task"
 	lokadns "github.com/vyprai/loka/internal/dns"
 	"github.com/vyprai/loka/internal/provider"
 	"github.com/vyprai/loka/pkg/lokavm"
@@ -577,6 +578,9 @@ func main() {
 		})
 	}
 
+	// ── Initialize task manager ────────────────────────────
+	taskMgr := lokatask.NewManager(db, registry, sched, imgMgr, logger)
+
 	// ── Initialize API server ───────────────────────────────
 	srv := api.NewServer(sm, registry, providerRegistry, imgMgr, drainer, db, logger, api.ServerOpts{
 		APIKey:         cfg.Auth.APIKey,
@@ -585,6 +589,7 @@ func main() {
 		ObjStore:       objStore,
 		DataDir:        cfg.DataDir,
 		ServiceManager: svcMgr,
+		TaskManager:    taskMgr,
 		DomainProxy:    domainProxy,
 	})
 

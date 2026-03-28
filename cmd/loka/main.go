@@ -132,6 +132,7 @@ func main() {
 		newSetupCmd(),
 		newDeployCmd(),
 		newInstanceCmd(),
+		newTaskCmd(),
 		newSessionCmd(),
 		newServiceCmd(),
 		newExecCmd(),

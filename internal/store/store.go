@@ -17,6 +17,7 @@ type Store interface {
 	Tokens() TokenRepository
 	Services() ServiceRepository
 	Volumes() VolumeRepository
+	Tasks() TaskRepository
 	Migrate(ctx context.Context) error
 	Close() error
 }
@@ -127,4 +128,21 @@ type VolumeRepository interface {
 	Update(ctx context.Context, vol *loka.VolumeRecord) error
 	Delete(ctx context.Context, name string) error
 	List(ctx context.Context) ([]*loka.VolumeRecord, error)
+}
+
+// TaskFilter controls task list queries.
+type TaskFilter struct {
+	Status *loka.TaskStatus
+	Name   *string
+	Limit  int
+	Offset int
+}
+
+// TaskRepository manages task persistence.
+type TaskRepository interface {
+	Create(ctx context.Context, task *loka.Task) error
+	Get(ctx context.Context, id string) (*loka.Task, error)
+	Update(ctx context.Context, task *loka.Task) error
+	Delete(ctx context.Context, id string) error
+	List(ctx context.Context, filter TaskFilter) ([]*loka.Task, error)
 }

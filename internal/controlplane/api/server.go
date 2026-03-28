@@ -14,6 +14,7 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/service"
 	"github.com/vyprai/loka/internal/controlplane/session"
 	"github.com/vyprai/loka/internal/controlplane/lock"
+	"github.com/vyprai/loka/internal/controlplane/task"
 	"github.com/vyprai/loka/internal/controlplane/volume"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/objstore"
@@ -40,6 +41,7 @@ type Server struct {
 	caCertPath       string // Path to CA certificate (served at /ca.crt).
 	volumeManager    *volume.Manager // Named volume lifecycle manager.
 	lockManager      *lock.Manager  // Distributed file lock manager.
+	taskManager      *task.Manager  // One-time task manager.
 	domainProxy      *DomainProxy // Domain proxy for domain routing.
 	registryStore    *registry.Store // OCI registry blob/manifest store.
 	raftStatusFn     RaftStatusFn    // Optional: returns Raft cluster status for debug endpoint.
@@ -55,6 +57,7 @@ type ServerOpts struct {
 	ObjStore       objstore.ObjectStore    // Object store (exposed to workers/HA nodes).
 	DataDir        string                  // Data directory for volume storage.
 	ServiceManager *service.Manager        // Service manager (optional).
+	TaskManager    *task.Manager           // Task manager (optional).
 	DomainProxy    *DomainProxy            // Domain proxy for domain-based routing (optional).
 }
 
@@ -82,6 +85,7 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		serviceManager:   o.ServiceManager,
 		volumeManager:    volMgr,
 		lockManager:      lock.NewManager(),
+		taskManager:      o.TaskManager,
 		workerRegistry:   reg,
 		providerRegistry: provReg,
 		imageManager:     imgMgr,
@@ -261,6 +265,9 @@ func (s *Server) routes() {
 		r.Post("/volumes/{name}/lock", s.acquireVolumeLock)
 		r.Delete("/volumes/{name}/lock", s.releaseVolumeLock)
 		r.Get("/volumes/{name}/locks", s.listVolumeLocks)
+
+		// Tasks
+		s.registerTaskRoutes(r)
 
 		// Image Registry Management
 		s.registerRegistryRoutes(r)
