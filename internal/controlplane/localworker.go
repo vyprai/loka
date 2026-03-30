@@ -323,6 +323,15 @@ func (lw *LocalWorker) handleCommand(ctx context.Context, cmd cpworker.WorkerCom
 			lw.logger.Error("failed to stop service", "service", data.ServiceID, "error", err)
 		}
 
+	case "service_exec":
+		data := cmd.Data.(cpworker.ServiceExecData)
+		result := lw.agent.ExecCommands(ctx, data.ServiceID, fmt.Sprintf("svc-exec-%d", time.Now().UnixNano()), data.Commands, false)
+		if result.Error != "" {
+			lw.logger.Error("service exec failed", "service", data.ServiceID, "error", result.Error)
+		} else {
+			lw.logger.Info("service exec completed", "service", data.ServiceID, "status", result.Status)
+		}
+
 	case "service_status":
 		data := cmd.Data.(map[string]string)
 		serviceID := data["service_id"]

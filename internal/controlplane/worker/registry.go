@@ -27,6 +27,12 @@ type WorkerCommand struct {
 	Data any
 }
 
+// ServiceExecData is the payload for executing a command inside a running service VM.
+type ServiceExecData struct {
+	ServiceID string
+	Commands  []loka.Command
+}
+
 // UpdateRoutesData is the payload for pushing the service route table to a worker.
 type UpdateRoutesData struct {
 	Version  int64          `json:"version"`  // Route table version for staleness detection.

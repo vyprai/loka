@@ -746,3 +746,57 @@ func TestSetDatabaseCredentials_ShortPassword(t *testing.T) {
 		t.Fatalf("expected 400 for short password, got %d", rec.Code)
 	}
 }
+
+// --- Data integrity tests ---
+
+func TestRotateDatabaseCredentials_ReturnsWarningAndSQL(t *testing.T) {
+	ts := setupDatabaseTestServer(t)
+	createTestDatabase(t, ts, "warn-rotate", "postgres", loka.DatabaseRolePrimary, "")
+
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/databases/warn-rotate/credentials/rotate", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	decodeBody(t, rec, &resp)
+
+	if resp["warning"] == nil || resp["warning"] == "" {
+		t.Error("expected warning field about SQL execution")
+	}
+	if resp["pending_sql"] == nil || resp["pending_sql"] == "" {
+		t.Error("expected pending_sql field with SQL commands")
+	}
+	if resp["create_login_sql"] == nil {
+		t.Error("expected create_login_sql field")
+	}
+}
+
+func TestDestroyDatabase_CascadeFailSafe(t *testing.T) {
+	ts := setupDatabaseTestServer(t)
+
+	// Create primary + replica. The replica is a real DB record.
+	primary := createTestDatabase(t, ts, "cascade-primary", "postgres", loka.DatabaseRolePrimary, "")
+	createTestDatabase(t, ts, "cascade-replica", "postgres", loka.DatabaseRoleReplica, primary.ID)
+
+	// Destroy primary — should succeed since replicas can be destroyed (they're just records).
+	rec := ts.doRequest(t, http.MethodDelete, "/api/v1/databases/"+primary.ID, nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDestroyService_ChildBlocked(t *testing.T) {
+	ts := setupServiceTestServer(t)
+
+	// Create parent + child.
+	parent := createTestService(t, ts, "parent-svc", loka.ServiceStatusRunning)
+	child := createTestService(t, ts, "child-svc", loka.ServiceStatusRunning)
+	child.ParentServiceID = parent.ID
+	ts.store.Services().Update(context.Background(), child)
+
+	// Try to delete child directly — should be blocked.
+	rec := ts.doRequest(t, http.MethodDelete, "/api/v1/services/"+child.ID, nil, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for child deletion, got %d: %s", rec.Code, rec.Body.String())
+	}
+}

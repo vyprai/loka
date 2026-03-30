@@ -73,7 +73,8 @@ type Manager struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	deploySem chan struct{} // semaphore limiting concurrent deploys
+	deploySem chan struct{}  // semaphore limiting concurrent deploys
+	scaleMu   sync.Map      // serviceID → *sync.Mutex for scale operations
 
 	logsFn func(serviceID string, lines int) ([]string, []string, error) // set by localworker
 	proxy  DomainRouteRegistrar // domain proxy for route registration
@@ -102,6 +103,7 @@ func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler,
 	// Recover services stuck in "deploying" from a previous crash.
 	m.recoverStuckDeploys()
 	m.recoverStuckDatabases()
+	m.reRegisterRoutes()
 
 	return m
 }
@@ -176,6 +178,56 @@ func (m *Manager) recoverStuckDatabases() {
 			db.UpdatedAt = now
 			m.store.Services().Update(ctx, db)
 		}
+	}
+
+	// Clean up orphaned replicas/children whose parent no longer exists.
+	allServices, _, _ := m.store.Services().List(ctx, store.ServiceFilter{Limit: 1000})
+	for _, svc := range allServices {
+		if svc.ParentServiceID == "" {
+			continue
+		}
+		// Check if parent exists.
+		if _, err := m.store.Services().Get(ctx, svc.ParentServiceID); err != nil {
+			m.logger.Info("recovered orphaned child service",
+				"service", svc.Name, "parent", svc.ParentServiceID)
+			svc.Status = loka.ServiceStatusError
+			svc.StatusMessage = "orphaned: parent service no longer exists"
+			svc.UpdatedAt = now
+			m.store.Services().Update(ctx, svc)
+		}
+	}
+}
+
+// reRegisterRoutes scans running services and re-registers their domain routes.
+// This closes the window where a crash between service deploy and route registration
+// leaves the service running but unreachable via domain.
+func (m *Manager) reRegisterRoutes() {
+	if m.proxy == nil {
+		return
+	}
+	ctx := context.Background()
+	running := loka.ServiceStatusRunning
+	services, _, err := m.store.Services().List(ctx, store.ServiceFilter{Status: &running, Limit: 1000})
+	if err != nil {
+		m.logger.Warn("failed to re-register routes on startup", "error", err)
+		return
+	}
+	count := 0
+	for _, svc := range services {
+		for _, route := range svc.Routes {
+			if route.Domain != "" {
+				m.proxy.AddRoute(&loka.DomainRoute{
+					Domain:     route.Domain,
+					ServiceID:  svc.ID,
+					RemotePort: route.Port,
+					Type:       loka.DomainRouteService,
+				})
+				count++
+			}
+		}
+	}
+	if count > 0 {
+		m.logger.Info("re-registered domain routes on startup", "count", count)
 	}
 }
 
@@ -376,6 +428,11 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 
 // Scale adjusts the number of replicas for a service.
 func (m *Manager) Scale(ctx context.Context, id string, replicas int) error {
+	// Per-service lock prevents concurrent scale operations from creating duplicates.
+	mu := m.getScaleLock(id)
+	mu.Lock()
+	defer mu.Unlock()
+
 	svc, err := m.store.Services().Get(ctx, id)
 	if err != nil {
 		return err
@@ -440,6 +497,37 @@ func (m *Manager) Scale(ctx context.Context, id string, replicas int) error {
 	svc.Replicas = replicas
 	svc.UpdatedAt = time.Now()
 	return m.store.Services().Update(ctx, svc)
+}
+
+// getScaleLock returns a per-service mutex for scale operations.
+func (m *Manager) getScaleLock(serviceID string) *sync.Mutex {
+	v, _ := m.scaleMu.LoadOrStore(serviceID, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// ExecInService sends a command to execute inside a running service's VM.
+// Uses the same vsock exec mechanism as session commands.
+func (m *Manager) ExecInService(ctx context.Context, serviceID string, commands []loka.Command) error {
+	svc, err := m.store.Services().Get(ctx, serviceID)
+	if err != nil {
+		return fmt.Errorf("service not found: %w", err)
+	}
+	if svc.WorkerID == "" {
+		return fmt.Errorf("service %s has no assigned worker", serviceID)
+	}
+	if svc.Status != loka.ServiceStatusRunning {
+		return fmt.Errorf("service %s is not running (status: %s)", serviceID, svc.Status)
+	}
+
+	m.registry.SendCommand(svc.WorkerID, worker.WorkerCommand{
+		ID:   uuid.New().String(),
+		Type: "service_exec",
+		Data: worker.ServiceExecData{
+			ServiceID: serviceID,
+			Commands:  commands,
+		},
+	})
+	return nil
 }
 
 // BroadcastRoutes pushes the current service route table to all workers.

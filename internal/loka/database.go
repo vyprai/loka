@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -65,6 +66,10 @@ func DecryptPassword(encrypted string) string {
 	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
+		// Decryption failed — key may have changed since this password was encrypted.
+		// Return the encrypted blob as-is. The credential endpoint will show it.
+		slog.Warn("failed to decrypt database password — encryption key may have changed",
+			"error", err)
 		return encrypted
 	}
 	return string(plaintext)
@@ -414,6 +419,55 @@ func GenerateLoginRole(dbName string) string {
 	b := make([]byte, 4)
 	rand.Read(b)
 	return fmt.Sprintf("%s_login_%s", SanitizeIdentifier(dbName), hex.EncodeToString(b))
+}
+
+// ExecCreateLoginCommand returns the shell command to execute the CreateLoginRoleSQL
+// inside the database VM using the engine's native client.
+func ExecCreateLoginCommand(cfg *DatabaseConfig, newLogin, newPassword string) Command {
+	sql := CreateLoginRoleSQL(cfg, newLogin, newPassword)
+	switch cfg.Engine {
+	case "postgres":
+		return Command{
+			Command: "sh",
+			Args: []string{"-c", fmt.Sprintf("psql -U %s -d %s -c %q", SanitizeIdentifier(cfg.LoginRole), SanitizeIdentifier(cfg.DBName), sql)},
+		}
+	case "mysql":
+		return Command{
+			Command: "sh",
+			Args: []string{"-c", fmt.Sprintf("mysql -u root -p\"$MYSQL_ROOT_PASSWORD\" -e %q", sql)},
+		}
+	case "redis":
+		return Command{
+			Command: "sh",
+			Args: []string{"-c", fmt.Sprintf("redis-cli %s", sql)},
+		}
+	default:
+		return Command{Command: "echo", Args: []string{"unsupported engine: " + cfg.Engine}}
+	}
+}
+
+// ExecRevokeLoginCommand returns the shell command to execute the RevokeLoginRoleSQL.
+func ExecRevokeLoginCommand(cfg *DatabaseConfig, oldLogin string) Command {
+	sql := RevokeLoginRoleSQL(cfg, oldLogin)
+	switch cfg.Engine {
+	case "postgres":
+		return Command{
+			Command: "sh",
+			Args: []string{"-c", fmt.Sprintf("psql -U %s -d %s -c %q", SanitizeIdentifier(cfg.LoginRole), SanitizeIdentifier(cfg.DBName), sql)},
+		}
+	case "mysql":
+		return Command{
+			Command: "sh",
+			Args: []string{"-c", fmt.Sprintf("mysql -u root -p\"$MYSQL_ROOT_PASSWORD\" -e %q", sql)},
+		}
+	case "redis":
+		return Command{
+			Command: "sh",
+			Args: []string{"-c", fmt.Sprintf("redis-cli %s", sql)},
+		}
+	default:
+		return Command{Command: "echo", Args: []string{"unsupported engine"}}
+	}
 }
 
 // ConnectionString returns a connection URL for the database.

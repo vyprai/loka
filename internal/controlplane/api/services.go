@@ -190,6 +190,23 @@ func (s *Server) destroyService(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+
+	// Check if this is a database — redirect to cascade destroy logic.
+	svc, err := s.store.Services().Get(r.Context(), id)
+	if err == nil {
+		if svc.DatabaseConfig != nil {
+			// Delegate to destroyDatabase which handles replica cascade.
+			chi.RouteContext(r.Context()).URLParams.Add("id", id)
+			s.destroyDatabase(w, r)
+			return
+		}
+		if svc.ParentServiceID != "" {
+			writeError(w, http.StatusBadRequest,
+				"cannot delete a child service directly — delete the parent service instead")
+			return
+		}
+	}
+
 	if err := s.serviceManager.Destroy(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return

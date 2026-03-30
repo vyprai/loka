@@ -222,15 +222,24 @@ func (m *BackupManager) CreateBackup(ctx context.Context, db *loka.Service) (str
 	})
 	catalog.LastFull = time.Now()
 
-	// Enforce retention.
+	// Save catalog BEFORE retention — ensures new backup is recorded even if retention fails.
+	if err := m.saveCatalog(ctx, db.Name, catalog); err != nil {
+		// Rollback: delete the orphaned backup data from objstore.
+		m.objStore.Delete(ctx, backupBucket, baseKey)
+		return "", fmt.Errorf("save catalog: %w (backup rolled back)", err)
+	}
+
+	// Enforce retention AFTER catalog is safely persisted.
 	retentionDays := 7
 	if cfg.Backup != nil {
 		retentionDays = cfg.Backup.Retention
 	}
 	m.enforceRetention(ctx, db.Name, catalog, retentionDays)
 
+	// Save catalog again after retention cleanup.
 	if err := m.saveCatalog(ctx, db.Name, catalog); err != nil {
-		return "", fmt.Errorf("save catalog: %w", err)
+		m.logger.Warn("backup: failed to save catalog after retention", "database", db.Name, "error", err)
+		// Non-fatal: catalog has the new backup but may have stale old entries.
 	}
 
 	metrics.DatabaseBackups.WithLabelValues(cfg.Engine, "success").Inc()

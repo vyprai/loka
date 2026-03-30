@@ -248,25 +248,28 @@ func (s *Server) destroyDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Destroy replicas and sentinels first using PrimaryID filter.
-	var warnings []string
+	// If ANY replica fails to destroy, do NOT destroy the primary — return error.
+	var failed []string
 	if svc.DatabaseConfig != nil && svc.DatabaseConfig.Role == loka.DatabaseRolePrimary {
 		replicas, _, _ := s.store.Services().List(r.Context(), store.ServiceFilter{PrimaryID: &svc.ID})
 		for _, replica := range replicas {
 			if err := s.serviceManager.Destroy(r.Context(), replica.ID); err != nil {
-				warnings = append(warnings, fmt.Sprintf("destroy %s: %v", replica.Name, err))
+				failed = append(failed, fmt.Sprintf("%s: %v", replica.Name, err))
 			}
 		}
+	}
+
+	if len(failed) > 0 {
+		writeError(w, http.StatusInternalServerError,
+			fmt.Sprintf("cannot destroy primary: %d replica(s) failed to destroy: %s", len(failed), strings.Join(failed, "; ")))
+		return
 	}
 
 	if err := s.serviceManager.Destroy(r.Context(), svc.ID); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	resp := map[string]any{"status": "destroyed"}
-	if len(warnings) > 0 {
-		resp["warnings"] = warnings
-	}
-	writeJSON(w, http.StatusOK, resp)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "destroyed"})
 }
 
 func (s *Server) stopDatabase(w http.ResponseWriter, r *http.Request) {
@@ -419,8 +422,15 @@ func (s *Server) rotateCredentials(r *http.Request, w http.ResponseWriter, svc *
 	// Step 2: For postgres, also set VALID UNTIL on the old login as a hard expiry safety net.
 	expireSQL := loka.ExpireLoginRoleSQL(cfg, oldLogin, time.Now().Add(graceDuration))
 
-	// TODO: Execute createSQL + expireSQL via worker exec (supervisor exec in VM).
-	// The SQL runs inside the DB's VM using psql/mysql/redis-cli.
+	// Execute the SQL inside the running database VM via service exec.
+	execCmd := loka.ExecCreateLoginCommand(cfg, newLogin, newPassword)
+	if err := s.serviceManager.ExecInService(r.Context(), svc.ID, []loka.Command{execCmd}); err != nil {
+		s.logger.Warn("credential rotation: exec failed, SQL may need manual execution",
+			"database", svc.Name, "error", err)
+		// Continue — the SQL is included in the response for manual execution.
+	} else {
+		s.logger.Info("credential rotation: SQL executed in VM", "database", svc.Name)
+	}
 
 	// Step 3: Update the service record — new login is now the active credential.
 	cfg.PreviousLoginRole = oldLogin
@@ -455,7 +465,8 @@ func (s *Server) rotateCredentials(r *http.Request, w http.ResponseWriter, svc *
 		"grace_deadline":       cfg.GraceDeadline.Format(time.RFC3339),
 		"create_login_sql":     createSQL,
 		"expire_old_login_sql": expireSQL,
-		"note":                 fmt.Sprintf("New login %q created with group role %q. Old login %q valid until grace deadline. No restart.", newLogin, cfg.GroupRole, oldLogin),
+		"pending_sql":          createSQL + "\n" + expireSQL,
+		"warning":              "SQL not yet auto-executed if service is not running. Run the provided pending_sql inside your database to complete rotation.",
 	})
 }
 
@@ -949,11 +960,14 @@ func (s *Server) reapExpiredCredentials() {
 			continue // Grace period not yet expired.
 		}
 
-		// Revoke the old login role.
-		revokeSQL := loka.RevokeLoginRoleSQL(cfg, cfg.PreviousLoginRole)
-		_ = revokeSQL // TODO: Execute via worker exec.
-
+		// Revoke the old login role by executing SQL inside the VM.
 		oldLogin := cfg.PreviousLoginRole
+		revokeCmd := loka.ExecRevokeLoginCommand(cfg, oldLogin)
+		if s.serviceManager != nil {
+			if err := s.serviceManager.ExecInService(context.Background(), db.ID, []loka.Command{revokeCmd}); err != nil {
+				s.logger.Warn("credential reaper: revoke exec failed", "database", db.Name, "error", err)
+			}
+		}
 		cfg.PreviousLoginRole = ""
 		cfg.GraceDeadline = time.Time{}
 

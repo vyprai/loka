@@ -595,6 +595,49 @@ func TestSupportedEngines(t *testing.T) {
 	}
 }
 
+func TestDecryptPassword_WrongKey(t *testing.T) {
+	oldKey := EncryptionKey
+	defer func() { EncryptionKey = oldKey }()
+
+	EncryptionKey = "key-one"
+	encrypted := EncryptPassword("my-secret-password")
+
+	EncryptionKey = "key-two"
+	decrypted := DecryptPassword(encrypted)
+
+	// Wrong key can't decrypt — returns encrypted blob as-is.
+	if decrypted == "my-secret-password" {
+		t.Error("decrypted with wrong key should NOT return plaintext")
+	}
+	if decrypted != encrypted {
+		t.Error("expected encrypted blob returned as-is on wrong key")
+	}
+}
+
+func TestDecryptPassword_MixedState(t *testing.T) {
+	oldKey := EncryptionKey
+	defer func() { EncryptionKey = oldKey }()
+
+	// Plaintext (no encryption key set).
+	EncryptionKey = ""
+	plain := EncryptPassword("plain-password")
+	if plain != "plain-password" {
+		t.Error("no encryption key: password should be plaintext")
+	}
+
+	// Now enable encryption.
+	EncryptionKey = "my-key"
+	encrypted := EncryptPassword("encrypted-password")
+
+	// Both should be readable.
+	if DecryptPassword(plain) != "plain-password" {
+		t.Error("plaintext password should be readable even with key set")
+	}
+	if DecryptPassword(encrypted) != "encrypted-password" {
+		t.Error("encrypted password should be decryptable")
+	}
+}
+
 func TestDefaultVersions(t *testing.T) {
 	for _, engine := range SupportedEngines {
 		if DefaultVersions[engine] == "" {

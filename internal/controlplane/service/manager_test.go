@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"os"
 	"testing"
 	"time"
@@ -795,5 +796,61 @@ func TestScale_NoChange(t *testing.T) {
 	}
 	if count != 1 { // 2 total - 1 primary = 1 replica
 		t.Errorf("expected 1 replica after no-change scale, got %d", count)
+	}
+}
+
+func TestScale_Concurrent(t *testing.T) {
+	s := setupTestStore(t)
+	m := newManagerFromStore(t, s)
+
+	svc, _ := m.Deploy(context.Background(), DeployOpts{
+		Name: "concurrent-scale", ImageRef: "alpine:latest",
+	})
+
+	// 10 goroutines all scale to 3 simultaneously.
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m.Scale(context.Background(), svc.ID, 3)
+		}()
+	}
+	wg.Wait()
+
+	// Verify exactly 2 replicas (not duplicates).
+	replicas, _, _ := s.Services().List(context.Background(), store.ServiceFilter{ParentServiceID: &svc.ID})
+	count := 0
+	for _, r := range replicas {
+		if r.RelationType == "replica" {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Errorf("expected 2 replicas after concurrent scale to 3, got %d", count)
+	}
+}
+
+func TestRecoverOrphanedReplicas(t *testing.T) {
+	s := setupTestStore(t)
+
+	// Create an orphan: ParentServiceID points to non-existent service.
+	orphan := &loka.Service{
+		ID: "orphan-child", Name: "orphan-child", Status: loka.ServiceStatusDeploying,
+		ImageRef: "alpine:latest", Port: 8080, VCPUs: 1, MemoryMB: 256,
+		ParentServiceID: "non-existent-parent",
+		RelationType:    "replica",
+		CreatedAt: time.Now().Add(-20 * time.Minute), UpdatedAt: time.Now().Add(-20 * time.Minute),
+	}
+	s.Services().Create(context.Background(), orphan)
+
+	_ = newManagerFromStore(t, s) // Triggers recovery.
+
+	got, _ := s.Services().Get(context.Background(), orphan.ID)
+	if got.Status != loka.ServiceStatusError {
+		t.Errorf("orphan status = %q, want error", got.Status)
+	}
+	if got.StatusMessage == "" {
+		t.Error("expected orphan status message")
 	}
 }
