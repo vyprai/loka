@@ -312,6 +312,22 @@ func (p *DomainProxy) findRunningInstances(ctx context.Context, svc *loka.Servic
 	return instances
 }
 
+// pickInstance selects a service instance using sticky session cookie or round-robin.
+func (p *DomainProxy) pickInstance(r *http.Request, instances []*loka.Service) *loka.Service {
+	// Check sticky session cookie.
+	if cookie, err := r.Cookie("X-Loka-Instance"); err == nil && cookie.Value != "" {
+		for _, inst := range instances {
+			if inst.ID == cookie.Value {
+				return inst // Sticky: route to same instance.
+			}
+		}
+		// Instance gone — fall through to round-robin.
+	}
+	// Round-robin.
+	idx := atomic.AddUint64(&p.rrCounter, 1) % uint64(len(instances))
+	return instances[idx]
+}
+
 // handleServiceRoute proxies a request to a deployed service, with cold-start
 // wake-on-request support. If the service is idle, it wakes it and waits for
 // readiness before proxying.
@@ -376,11 +392,10 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Round-robin: select an instance if replicas exist.
+	// Load balance: select an instance (sticky session or round-robin).
 	instances := p.findRunningInstances(ctx, svc)
 	if len(instances) > 1 {
-		idx := atomic.AddUint64(&p.rrCounter, 1) % uint64(len(instances))
-		svc = instances[idx]
+		svc = p.pickInstance(r, instances)
 	}
 
 	// Find the worker.
@@ -419,6 +434,15 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 	} else {
 		targetAddr = fmt.Sprintf("%s:%d", wc.Worker.IPAddress, route.RemotePort)
 	}
+	// Set sticky session cookie so subsequent requests route to same instance.
+	http.SetCookie(w, &http.Cookie{
+		Name:     "X-Loka-Instance",
+		Value:    svc.ID,
+		Path:     "/",
+		HttpOnly: true,
+		MaxAge:   3600,
+	})
+
 	p.proxyHTTP(w, r, targetAddr, route, coldStart)
 }
 

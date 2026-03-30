@@ -96,6 +96,8 @@ func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler,
 	}
 	m.wg.Add(1)
 	go m.idleMonitor()
+	m.wg.Add(1)
+	go m.autoscaleMonitor()
 
 	// Recover services stuck in "deploying" from a previous crash.
 	m.recoverStuckDeploys()
@@ -1324,4 +1326,77 @@ func (m *Manager) setError(ctx context.Context, serviceID, message string) {
 	svc.Ready = false
 	svc.UpdatedAt = time.Now()
 	m.store.Services().Update(ctx, svc)
+}
+
+// autoscaleMonitor periodically checks services with autoscale config and adjusts replicas.
+func (m *Manager) autoscaleMonitor() {
+	defer m.wg.Done()
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	// Track last scale action time per service for cooldown.
+	lastScale := make(map[string]time.Time)
+
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-ticker.C:
+			m.checkAutoscale(lastScale)
+		}
+	}
+}
+
+func (m *Manager) checkAutoscale(lastScale map[string]time.Time) {
+	ctx := context.Background()
+	running := loka.ServiceStatusRunning
+	services, _, err := m.store.Services().List(ctx, store.ServiceFilter{Status: &running, Limit: 500})
+	if err != nil {
+		return
+	}
+
+	for _, svc := range services {
+		if svc.Autoscale == nil || svc.ParentServiceID != "" {
+			continue // Skip replicas and services without autoscale.
+		}
+
+		cfg := svc.Autoscale
+
+		// Check cooldown.
+		if last, ok := lastScale[svc.ID]; ok {
+			if time.Since(last) < time.Duration(cfg.Cooldown)*time.Second {
+				continue
+			}
+		}
+
+		// Count current instances.
+		replicas, _, _ := m.store.Services().List(ctx, store.ServiceFilter{PrimaryID: &svc.ID})
+		var runningReplicas int
+		for _, r := range replicas {
+			if r.Status == loka.ServiceStatusRunning && r.RelationType == "replica" {
+				runningReplicas++
+			}
+		}
+		currentInstances := runningReplicas + 1 // +1 for primary
+
+		// TODO: Get actual concurrency from proxy metrics.
+		// For now, use a placeholder: scale based on instance count vs desired.
+		desiredInstances := currentInstances
+		if currentInstances < cfg.Min {
+			desiredInstances = cfg.Min
+		}
+		if currentInstances > cfg.Max {
+			desiredInstances = cfg.Max
+		}
+
+		if desiredInstances != currentInstances {
+			if err := m.Scale(ctx, svc.ID, desiredInstances); err != nil {
+				m.logger.Warn("autoscale failed", "service", svc.Name, "error", err)
+			} else {
+				lastScale[svc.ID] = time.Now()
+				m.logger.Info("autoscale adjusted", "service", svc.Name,
+					"from", currentInstances, "to", desiredInstances)
+			}
+		}
+	}
 }

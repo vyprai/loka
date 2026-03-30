@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,10 @@ type Agent struct {
 	objStore      objstore.ObjectStore
 	gitCache      *gitcache.Cache
 	syncAgent     *volsync.Agent
+
+	// Route table: service name → route (pushed by CP via update_routes command).
+	routeTable   sync.Map // string → worker.ServiceRoute
+	routeVersion int64    // Atomic: version from last CP push.
 
 	// Warm boot cache: image ref → snapshot for instant VM restore.
 	warmMu    sync.RWMutex
@@ -143,6 +148,39 @@ func NewAgent(provider string, labels map[string]string, dataDir string, objStor
 // When remote, port forwarding binds to 0.0.0.0 instead of localhost.
 func (a *Agent) SetRemoteMode(remote bool) {
 	a.remoteMode = remote
+}
+
+// HandleUpdateRoutes processes a route table update from the control plane.
+func (a *Agent) HandleUpdateRoutes(version int64, services []ServiceRouteEntry) {
+	atomic.StoreInt64(&a.routeVersion, version)
+	for _, svc := range services {
+		a.routeTable.Store(svc.Name, svc)
+	}
+	a.logger.Info("route table updated", "version", version, "services", len(services))
+}
+
+// LookupRoute finds a service route by name from the local cache.
+func (a *Agent) LookupRoute(name string) (ServiceRouteEntry, bool) {
+	v, ok := a.routeTable.Load(name)
+	if !ok {
+		return ServiceRouteEntry{}, false
+	}
+	return v.(ServiceRouteEntry), true
+}
+
+// RouteVersion returns the current route table version.
+func (a *Agent) RouteVersion() int64 {
+	return atomic.LoadInt64(&a.routeVersion)
+}
+
+// ServiceRouteEntry is the worker-side view of a service route.
+type ServiceRouteEntry struct {
+	ID       string
+	Name     string
+	WorkerIP string
+	Port     int
+	Engine   string
+	Role     string
 }
 
 // sessionReaper periodically removes stale session entries where the VM is gone.

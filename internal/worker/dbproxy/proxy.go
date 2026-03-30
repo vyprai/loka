@@ -165,9 +165,23 @@ func (p *Proxy) acceptLoop(route *Route, listener net.Listener) {
 func (p *Proxy) handleConnection(route *Route, clientConn net.Conn) {
 	defer clientConn.Close()
 
-	// For the initial implementation, route all traffic to primary.
-	// Protocol-aware read/write split is added per-engine below.
-	backend := route.PickBackend(false) // Default: write (goes to primary).
+	// Dispatch to engine-specific protocol handler for read/write split.
+	switch route.Engine {
+	case "postgres":
+		newPostgresProxy(route).HandleConnection(clientConn)
+	case "mysql":
+		newMySQLProxy(route).HandleConnection(clientConn)
+	case "redis":
+		newRedisProxy(route).HandleConnection(clientConn)
+	default:
+		// Fallback: simple TCP tunnel to primary (no read/write split).
+		p.simpleTCPProxy(route, clientConn)
+	}
+}
+
+// simpleTCPProxy is a dumb bidirectional TCP tunnel to the primary backend.
+func (p *Proxy) simpleTCPProxy(route *Route, clientConn net.Conn) {
+	backend := route.PickBackend(false)
 	if backend == nil {
 		p.logger.Error("db proxy: no backend available", "database", route.Name)
 		return
@@ -181,9 +195,6 @@ func (p *Proxy) handleConnection(route *Route, clientConn net.Conn) {
 	}
 	defer backendConn.Close()
 
-	// Bidirectional copy — simple TCP proxy for now.
-	// Protocol-aware routing would inspect the first bytes to determine
-	// read vs write before choosing a backend. That's Phase 7b.
 	done := make(chan struct{})
 	go func() {
 		io.Copy(backendConn, clientConn)
