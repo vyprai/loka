@@ -513,6 +513,76 @@ func TestConnectionString_RedisEmptyLoginRole(t *testing.T) {
 	}
 }
 
+// --- Sanitize/Validate edge cases ---
+
+func TestSanitizeIdentifier_Empty(t *testing.T) {
+	if got := SanitizeIdentifier(""); got != "" {
+		t.Errorf("SanitizeIdentifier('') = %q, want empty", got)
+	}
+}
+
+func TestSanitizeIdentifier_OnlySpecialChars(t *testing.T) {
+	if got := SanitizeIdentifier("!@#$%^&*()"); got != "" {
+		t.Errorf("SanitizeIdentifier('!@#$%%') = %q, want empty", got)
+	}
+}
+
+func TestSanitizeIdentifier_MixedChars(t *testing.T) {
+	if got := SanitizeIdentifier("my-role_123!"); got != "myrole_123" {
+		t.Errorf("SanitizeIdentifier = %q, want 'myrole_123'", got)
+	}
+}
+
+func TestSanitizePassword_NoQuotes(t *testing.T) {
+	if got := SanitizePassword("password123"); got != "password123" {
+		t.Errorf("SanitizePassword no quotes = %q, want unchanged", got)
+	}
+}
+
+func TestSanitizePassword_MultipleQuotes(t *testing.T) {
+	if got := SanitizePassword("a'b'c"); got != "a''b''c" {
+		t.Errorf("SanitizePassword = %q, want a''b''c", got)
+	}
+}
+
+func TestValidateDBName_ExactlyMaxLength(t *testing.T) {
+	name := "a" + string(make([]byte, 62)) // would be 63 bytes but may contain nulls
+	// Use a proper 63-char string.
+	name = "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0" // 63 chars
+	if err := ValidateDBName(name); err != nil {
+		t.Errorf("63-char name should pass: %v", err)
+	}
+}
+
+func TestValidateDBName_OverMaxLength(t *testing.T) {
+	name := "abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz01" // 64 chars
+	if err := ValidateDBName(name); err == nil {
+		t.Error("64-char name should fail")
+	}
+}
+
+func TestValidateVersion_Empty(t *testing.T) {
+	if err := ValidateVersion(""); err != nil {
+		t.Errorf("empty version should pass: %v", err)
+	}
+}
+
+func TestValidateVersion_ValidFormats(t *testing.T) {
+	for _, v := range []string{"16", "8.0", "5.7", "7", "16-alpine", "3.12-slim"} {
+		if err := ValidateVersion(v); err != nil {
+			t.Errorf("ValidateVersion(%q) = %v, want nil", v, err)
+		}
+	}
+}
+
+func TestValidateVersion_InvalidFormats(t *testing.T) {
+	for _, v := range []string{"abc", "../etc", "16 && malicious"} {
+		if err := ValidateVersion(v); err == nil {
+			t.Errorf("ValidateVersion(%q) should fail", v)
+		}
+	}
+}
+
 func TestSupportedEngines(t *testing.T) {
 	if len(SupportedEngines) != 3 {
 		t.Errorf("expected 3 supported engines, got %d", len(SupportedEngines))

@@ -1,6 +1,7 @@
 package loka
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -188,5 +189,37 @@ func TestCanAccess_EmptyUses(t *testing.T) {
 	}
 	if CanAccess(map[string]string{}, "anything") {
 		t.Error("expected no access with empty uses")
+	}
+}
+
+func TestNormalizeUses_InvalidAliasChars(t *testing.T) {
+	raw := map[string]interface{}{
+		"valid_alias":   "target1",
+		"invalid!alias": "target2", // ! not allowed
+		"also/bad":      "target3", // / not allowed
+	}
+	got := NormalizeUses(raw)
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	if got["valid_alias"] != "target1" {
+		t.Error("valid alias should be kept")
+	}
+	if _, ok := got["invalid!alias"]; ok {
+		t.Error("invalid alias should be filtered out")
+	}
+	if _, ok := got["also/bad"]; ok {
+		t.Error("alias with / should be filtered out")
+	}
+}
+
+func TestDependencyEnvVars_VeryLongAlias(t *testing.T) {
+	longAlias := "a_very_long_service_name_that_goes_on_and_on_and_on_for_many_characters"
+	dep := ResolvedDependency{Alias: longAlias, WorkerIP: "10.0.0.1", Port: 80}
+	env := DependencyEnvVars(dep)
+	// Should produce very long env var key but not crash.
+	key := strings.ToUpper(strings.ReplaceAll(longAlias, "-", "_")) + "_HOST"
+	if env[key] != "10.0.0.1" {
+		t.Errorf("expected %s=10.0.0.1, got %q", key, env[key])
 	}
 }

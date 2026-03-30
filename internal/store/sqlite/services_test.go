@@ -584,6 +584,51 @@ func TestServiceReplicaFieldsRoundtrip(t *testing.T) {
 	require.Equal(t, "replica", got.RelationType)
 }
 
+func TestUpdateService_ChangeParentServiceID(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	svc := newTestService("change-parent", loka.ServiceStatusRunning, "worker-1")
+	svc.ParentServiceID = "old-parent"
+	require.NoError(t, s.Services().Create(ctx, svc))
+
+	svc.ParentServiceID = "new-parent"
+	require.NoError(t, s.Services().Update(ctx, svc))
+
+	got, err := s.Services().Get(ctx, svc.ID)
+	require.NoError(t, err)
+	require.Equal(t, "new-parent", got.ParentServiceID)
+}
+
+func TestListServices_ParentIDWithMultipleFilters(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	parent := newTestService("multi-filter-parent", loka.ServiceStatusRunning, "worker-1")
+	require.NoError(t, s.Services().Create(ctx, parent))
+
+	child1 := newTestService("child-running", loka.ServiceStatusRunning, "worker-1")
+	child1.ParentServiceID = parent.ID
+	child1.RelationType = "replica"
+	require.NoError(t, s.Services().Create(ctx, child1))
+
+	child2 := newTestService("child-stopped", loka.ServiceStatusStopped, "worker-1")
+	child2.ParentServiceID = parent.ID
+	child2.RelationType = "replica"
+	require.NoError(t, s.Services().Create(ctx, child2))
+
+	// Filter: ParentServiceID + Status=running
+	running := loka.ServiceStatusRunning
+	svcs, total, err := s.Services().List(ctx, store.ServiceFilter{
+		ParentServiceID: &parent.ID,
+		Status:          &running,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, svcs, 1)
+	require.Equal(t, "child-running", svcs[0].Name)
+}
+
 func TestServiceJSONFields(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()

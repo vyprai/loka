@@ -692,3 +692,57 @@ func TestRollbackDatabaseUpgrade_NoPrevious(t *testing.T) {
 		t.Fatalf("expected 400 (no previous version), got %d", rec.Code)
 	}
 }
+
+// --- Edge case tests ---
+
+func TestListDatabases_OffsetBeyondTotal(t *testing.T) {
+	ts := setupDatabaseTestServer(t)
+	createTestDatabase(t, ts, "offset-db", "postgres", loka.DatabaseRolePrimary, "")
+
+	rec := ts.doRequest(t, http.MethodGet, "/api/v1/databases?offset=999999", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var resp struct {
+		Databases []*loka.Service `json:"databases"`
+		Total     int             `json:"total"`
+	}
+	decodeBody(t, rec, &resp)
+	if len(resp.Databases) != 0 {
+		t.Errorf("expected 0 results with high offset, got %d", len(resp.Databases))
+	}
+}
+
+func TestForceStopDatabase_AlreadyStopped(t *testing.T) {
+	ts := setupDatabaseTestServer(t)
+	db := createTestDatabase(t, ts, "already-stopped", "postgres", loka.DatabaseRolePrimary, "")
+	// Stop it first.
+	ts.doRequest(t, http.MethodPost, "/api/v1/databases/"+db.ID+"/stop", nil, nil)
+	// Force-stop again — should be idempotent.
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/databases/"+db.ID+"/force-stop", nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("force-stop on stopped DB: expected 200, got %d", rec.Code)
+	}
+}
+
+func TestUpgradeDatabase_EmptyTargetVersion(t *testing.T) {
+	ts := setupDatabaseTestServer(t)
+	db := createTestDatabase(t, ts, "empty-ver-upg", "postgres", loka.DatabaseRolePrimary, "")
+
+	rec := ts.doRequest(t, http.MethodPost, "/api/v1/databases/"+db.ID+"/upgrade",
+		map[string]any{"target_version": ""}, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty target_version, got %d", rec.Code)
+	}
+}
+
+func TestSetDatabaseCredentials_ShortPassword(t *testing.T) {
+	ts := setupDatabaseTestServer(t)
+	db := createTestDatabase(t, ts, "short-pw", "postgres", loka.DatabaseRolePrimary, "")
+
+	rec := ts.doRequest(t, http.MethodPut, "/api/v1/databases/"+db.ID+"/credentials",
+		map[string]any{"password": "short"}, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for short password, got %d", rec.Code)
+	}
+}

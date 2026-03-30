@@ -759,3 +759,41 @@ func TestRecoverStuckDatabases_ExpiredGraceWithoutPreviousRole(t *testing.T) {
 		t.Log("expired deadline without previous role: left as-is (expected)")
 	}
 }
+
+func TestDeploy_Replicas_ExactlyOne(t *testing.T) {
+	s := setupTestStore(t)
+	m := newManagerFromStore(t, s)
+	svc, err := m.Deploy(context.Background(), DeployOpts{
+		Name: "one-replica", ImageRef: "alpine:latest", Replicas: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Replicas=1 means just the primary, no extra records.
+	replicas, _, _ := s.Services().List(context.Background(), store.ServiceFilter{ParentServiceID: &svc.ID})
+	if len(replicas) != 0 {
+		t.Errorf("expected 0 replicas for replicas=1, got %d", len(replicas))
+	}
+}
+
+func TestScale_NoChange(t *testing.T) {
+	s := setupTestStore(t)
+	m := newManagerFromStore(t, s)
+	svc, _ := m.Deploy(context.Background(), DeployOpts{
+		Name: "no-change", ImageRef: "alpine:latest", Replicas: 2,
+	})
+	// Scale to same count — should be a no-op.
+	if err := m.Scale(context.Background(), svc.ID, 2); err != nil {
+		t.Fatalf("Scale no-change: %v", err)
+	}
+	replicas, _, _ := s.Services().List(context.Background(), store.ServiceFilter{ParentServiceID: &svc.ID})
+	count := 0
+	for _, r := range replicas {
+		if r.RelationType == "replica" {
+			count++
+		}
+	}
+	if count != 1 { // 2 total - 1 primary = 1 replica
+		t.Errorf("expected 1 replica after no-change scale, got %d", count)
+	}
+}
