@@ -38,10 +38,9 @@ func TestSyncMount_MissingMountPath(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var errBody map[string]string
-	decodeBody(t, rec, &errBody)
-	if errBody["error"] != "mount_path is required" {
-		t.Errorf("unexpected error message: %q", errBody["error"])
+	errMsg := decodeErrorMsg(t, rec)
+	if errMsg != "mount_path is required" {
+		t.Errorf("unexpected error message: %q", errMsg)
 	}
 }
 
@@ -56,10 +55,9 @@ func TestSyncMount_MissingDirection(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var errBody map[string]string
-	decodeBody(t, rec, &errBody)
-	if errBody["error"] != "direction is required (push or pull)" {
-		t.Errorf("unexpected error message: %q", errBody["error"])
+	errMsg := decodeErrorMsg(t, rec)
+	if errMsg != "direction is required (push or pull)" {
+		t.Errorf("unexpected error message: %q", errMsg)
 	}
 }
 
@@ -75,10 +73,9 @@ func TestSyncMount_InvalidDirection(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var errBody map[string]string
-	decodeBody(t, rec, &errBody)
-	if errBody["error"] != "direction must be 'push' or 'pull'" {
-		t.Errorf("unexpected error message: %q", errBody["error"])
+	errMsg := decodeErrorMsg(t, rec)
+	if errMsg != "direction must be 'push' or 'pull'" {
+		t.Errorf("unexpected error message: %q", errMsg)
 	}
 }
 
@@ -142,11 +139,10 @@ func TestSyncMount_MountNotFound(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404 for missing mount, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var errBody map[string]string
-	decodeBody(t, rec, &errBody)
+	errMsg := decodeErrorMsg(t, rec)
 	expected := `no mount at path "/nonexistent-mount"`
-	if errBody["error"] != expected {
-		t.Errorf("expected error %q, got %q", expected, errBody["error"])
+	if errMsg != expected {
+		t.Errorf("expected error %q, got %q", expected, errMsg)
 	}
 }
 
@@ -177,9 +173,8 @@ func TestSyncMount_ValidationOrder(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var errBody map[string]string
-	decodeBody(t, rec, &errBody)
-	if errBody["error"] != "mount_path is required" {
-		t.Errorf("expected mount_path error first, got %q", errBody["error"])
+	errMsg := decodeErrorMsg(t, rec)
+	if errMsg != "mount_path is required" {
+		t.Errorf("expected mount_path error first, got %q", errMsg)
 	}
 }

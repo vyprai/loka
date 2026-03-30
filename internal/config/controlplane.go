@@ -44,7 +44,9 @@ type DomainConfig struct {
 
 // AuthConfig configures API authentication.
 type AuthConfig struct {
-	APIKey string `yaml:"api_key"` // If set, all API requests must include this key.
+	APIKey        string `yaml:"api_key"`        // If set, all API requests must include this key.
+	AdminKey      string `yaml:"admin_key"`       // Separate key for admin endpoints (optional).
+	EncryptionKey string `yaml:"encryption_key"`  // Key for encrypting credentials at rest (optional).
 }
 
 // LoggingConfig configures logging output.

@@ -31,7 +31,7 @@ Examples:
 			store, _ := loadDeployments()
 			d := store.GetActive()
 			if d == nil {
-				return fmt.Errorf("no active server. Run 'loka setup' or 'loka connect' first")
+				return fmt.Errorf("no active server. Run 'loka space create' or 'loka space connect' first")
 			}
 
 			if sshUser == "" {

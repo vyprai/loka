@@ -43,6 +43,8 @@ type DeployOpts struct {
 	Labels         map[string]string
 	Mounts         []loka.Volume
 	Autoscale      *loka.AutoscaleConfig
+	DatabaseConfig *loka.DatabaseConfig // If set, deploy as a managed database instance.
+	Uses           map[string]string   // Network ACL: alias→target service/db name.
 }
 
 // DomainRouteRegistrar is an interface for registering/removing domain routes.
@@ -91,6 +93,11 @@ func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler,
 	}
 	m.wg.Add(1)
 	go m.idleMonitor()
+
+	// Recover services stuck in "deploying" from a previous crash.
+	m.recoverStuckDeploys()
+	m.recoverStuckDatabases()
+
 	return m
 }
 
@@ -98,6 +105,73 @@ func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler,
 func (m *Manager) Close() {
 	m.cancel()
 	m.wg.Wait()
+}
+
+// recoverStuckDeploys marks services stuck in "deploying" as errors.
+// This handles the case where the CP crashed during an async deploy.
+func (m *Manager) recoverStuckDeploys() {
+	ctx := context.Background()
+	deploying := loka.ServiceStatusDeploying
+	services, _, err := m.store.Services().List(ctx, store.ServiceFilter{Status: &deploying})
+	if err != nil {
+		m.logger.Warn("failed to check stuck deploys", "error", err)
+		return
+	}
+	staleThreshold := time.Now().Add(-10 * time.Minute)
+	for _, svc := range services {
+		if svc.CreatedAt.Before(staleThreshold) {
+			svc.Status = loka.ServiceStatusError
+			svc.StatusMessage = "deploy interrupted by restart"
+			svc.UpdatedAt = time.Now()
+			if err := m.store.Services().Update(ctx, svc); err != nil {
+				m.logger.Warn("failed to mark stuck service", "id", svc.ID, "error", err)
+			} else {
+				m.logger.Info("recovered stuck deploy", "id", svc.ID, "name", svc.Name)
+			}
+		}
+	}
+}
+
+// recoverStuckDatabases handles database-specific stuck states after a crash.
+func (m *Manager) recoverStuckDatabases() {
+	ctx := context.Background()
+	isDB := true
+	dbs, _, err := m.store.Services().List(ctx, store.ServiceFilter{IsDatabase: &isDB, Limit: 500})
+	if err != nil {
+		m.logger.Warn("failed to check stuck databases", "error", err)
+		return
+	}
+	now := time.Now()
+	for _, db := range dbs {
+		if db.DatabaseConfig == nil {
+			continue
+		}
+		cfg := db.DatabaseConfig
+		changed := false
+
+		// Clean up expired credential grace periods.
+		if cfg.PreviousLoginRole != "" && !cfg.GraceDeadline.IsZero() && now.After(cfg.GraceDeadline) {
+			m.logger.Info("recovered expired credential grace period",
+				"database", db.Name, "revoked", cfg.PreviousLoginRole)
+			cfg.PreviousLoginRole = ""
+			cfg.GraceDeadline = time.Time{}
+			changed = true
+		}
+
+		// Clean up stuck upgrades (PreviousVersion set but service in error state).
+		if cfg.PreviousVersion != "" && db.Status == loka.ServiceStatusError {
+			m.logger.Info("recovered stuck upgrade",
+				"database", db.Name, "previous_version", cfg.PreviousVersion)
+			// Keep PreviousVersion so operator can rollback.
+			db.StatusMessage = "upgrade interrupted by restart — use rollback to revert"
+			changed = true
+		}
+
+		if changed {
+			db.UpdatedAt = now
+			m.store.Services().Update(ctx, db)
+		}
+	}
 }
 
 // Deploy creates a new service record and schedules it to a worker.
@@ -139,6 +213,82 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 		opts.HealthRetries = 3
 	}
 
+	// Apply database engine defaults when deploying a managed database.
+	if opts.DatabaseConfig != nil {
+		defaults, err := loka.GetEngineDefaults(opts.DatabaseConfig.Engine, opts.DatabaseConfig.Version)
+		if err != nil {
+			return nil, err
+		}
+		if opts.ImageRef == "" {
+			opts.ImageRef = defaults.Image
+		}
+		if opts.Port == 8080 { // override the generic default
+			opts.Port = defaults.Port
+		}
+		// Merge database env vars.
+		for k, v := range loka.DatabaseEnv(opts.DatabaseConfig) {
+			if _, exists := opts.Env[k]; !exists {
+				opts.Env[k] = v
+			}
+		}
+		// Add database command args (e.g., redis --requirepass).
+		if dbArgs := loka.DatabaseArgs(opts.DatabaseConfig); len(dbArgs) > 0 && len(opts.Args) == 0 {
+			opts.Args = dbArgs
+		}
+		// Auto-create persistent volume for database data directory.
+		volName := "db-" + opts.Name
+		if m.volumeManager != nil {
+			if _, err := m.volumeManager.Get(ctx, volName); err != nil {
+				if _, err := m.volumeManager.Create(ctx, volName); err != nil {
+					return nil, fmt.Errorf("create database volume %s: %w", volName, err)
+				}
+			}
+		}
+		opts.Mounts = append(opts.Mounts, loka.Volume{
+			Name:     volName,
+			Path:     defaults.DataDir,
+			Provider: "volume",
+			Access:   "readwrite",
+		})
+		// No domain routes for databases (internal only).
+		opts.Routes = nil
+		// Use TCP health check (empty path = port check).
+		opts.HealthPath = ""
+	}
+
+	// Resolve `uses` dependencies: inject env vars for each target service/db.
+	if len(opts.Uses) > 0 {
+		for alias, targetName := range opts.Uses {
+			targetSvc, _, _ := m.store.Services().List(ctx, store.ServiceFilter{Name: &targetName, Limit: 1})
+			if len(targetSvc) == 0 {
+				m.logger.Warn("dependency not found, skipping env injection", "alias", alias, "target", targetName)
+				continue
+			}
+			target := targetSvc[0]
+			dep := loka.ResolvedDependency{
+				Alias:      alias,
+				TargetName: target.Name,
+				TargetID:   target.ID,
+				Port:       target.Port,
+				WorkerIP:   target.Name + ".loka.internal",
+			}
+			if target.ForwardPort > 0 {
+				dep.WorkerIP = "127.0.0.1"
+				dep.Port = target.ForwardPort
+			}
+			if target.DatabaseConfig != nil {
+				dep.IsDatabase = true
+				dep.Engine = target.DatabaseConfig.Engine
+				dep.LoginRole = target.DatabaseConfig.LoginRole
+				dep.Password = target.DatabaseConfig.Password
+				dep.DBName = target.DatabaseConfig.DBName
+			}
+			for k, v := range loka.DependencyEnvVars(dep) {
+				opts.Env[k] = v
+			}
+		}
+	}
+
 	now := time.Now()
 	svc := &loka.Service{
 		ID:             uuid.New().String(),
@@ -163,6 +313,8 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 		Labels:         opts.Labels,
 		Mounts:         opts.Mounts,
 		Autoscale:      opts.Autoscale,
+		DatabaseConfig: opts.DatabaseConfig,
+		Uses:           opts.Uses,
 		LastActivity:   now,
 		CreatedAt:      now,
 		UpdatedAt:      now,

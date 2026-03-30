@@ -54,8 +54,8 @@ func newDeployFileCmd() *cobra.Command {
 LOKA compares the file with the current state and adds/removes workers as needed.
 
 Examples:
-  loka setup apply deployment.yml
-  loka setup apply prod.yml
+  loka space apply deployment.yml
+  loka space apply prod.yml
 
 Example YAML (VM provider):
   name: production
@@ -136,7 +136,7 @@ func applyUpdate(cmd *cobra.Command, store *DeploymentStore, existing *Deploymen
 	}
 
 	fmt.Printf("Cloud provider %q update not yet implemented.\n", spec.Provider)
-	fmt.Println("Use 'loka setup add-worker' and 'loka setup remove-worker' to manage workers.")
+	fmt.Println("Use 'loka worker add' and 'loka worker remove' to manage workers.")
 	return nil
 }
 
@@ -432,10 +432,10 @@ Without arguments, prints the active server's config to stdout.
 With a name, exports that server. With a file path, writes to file.
 
 Examples:
-  loka setup export                    # Print active server YAML to stdout
-  loka setup export prod               # Print "prod" server YAML
-  loka setup export prod prod.yml      # Save to file
-  loka setup export > cluster.yml      # Redirect to file`,
+  loka space export                    # Print active server YAML to stdout
+  loka space export prod               # Print "prod" server YAML
+  loka space export prod prod.yml      # Save to file
+  loka space export > cluster.yml      # Redirect to file`,
 		Args: cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, _ := loadDeployments()

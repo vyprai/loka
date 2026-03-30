@@ -184,7 +184,7 @@ func LoadServerTLS(certPath, keyPath, caCertPath string) (*tls.Config, error) {
 
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{cert},
-		MinVersion:   tls.VersionTLS12,
+		MinVersion:   tls.VersionTLS13,
 	}
 
 	if caCertPath != "" {
@@ -199,7 +199,8 @@ func LoadServerTLS(certPath, keyPath, caCertPath string) (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
-// certStillValid checks whether a PEM certificate file exists and is not expired.
+// certStillValid checks whether a PEM certificate file exists, is not expired,
+// and won't expire within the next 30 days (triggers auto-regeneration).
 func certStillValid(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -213,7 +214,26 @@ func certStillValid(path string) bool {
 	if err != nil {
 		return false
 	}
-	return time.Now().Before(cert.NotAfter)
+	// Regenerate if cert expires within 30 days.
+	return time.Now().Add(30 * 24 * time.Hour).Before(cert.NotAfter)
+}
+
+// CertExpiry returns the expiry time of a PEM certificate file.
+// Returns zero time if the file can't be parsed.
+func CertExpiry(path string) time.Time {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return time.Time{}
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return time.Time{}
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}
+	}
+	return cert.NotAfter
 }
 
 // writePEM writes DER-encoded data as a PEM file with the given permissions.

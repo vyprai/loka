@@ -65,19 +65,22 @@ func newInstanceListCmd() *cobra.Command {
 				}
 			}
 
-			// Fetch services.
+			// Fetch services (including databases via type=all).
 			var svcResp struct {
 				Services []struct {
-					ID        string    `json:"ID"`
-					Name      string    `json:"Name"`
-					Status    string    `json:"Status"`
-					ImageRef  string    `json:"ImageRef"`
-					Port      int       `json:"Port"`
-					Ready     bool      `json:"Ready"`
+					ID             string `json:"ID"`
+					Name           string `json:"Name"`
+					Status         string `json:"Status"`
+					ImageRef       string `json:"ImageRef"`
+					Port           int    `json:"Port"`
+					Ready          bool   `json:"Ready"`
+					DatabaseConfig *struct {
+						Engine string `json:"engine"`
+					} `json:"DatabaseConfig"`
 					CreatedAt time.Time `json:"CreatedAt"`
 				} `json:"services"`
 			}
-			if err := client.Raw(cmd.Context(), "GET", "/api/v1/services", nil, &svcResp); err == nil {
+			if err := client.Raw(cmd.Context(), "GET", "/api/v1/services?type=all", nil, &svcResp); err == nil {
 				for _, s := range svcResp.Services {
 					name := s.Name
 					if name == "" {
@@ -97,8 +100,12 @@ func newInstanceListCmd() *cobra.Command {
 					if s.Port > 0 {
 						portStr = fmt.Sprintf("%d", s.Port)
 					}
+					rowType := "service"
+					if s.DatabaseConfig != nil {
+						rowType = "database"
+					}
 					rows = append(rows, instanceRow{
-						Type:    "service",
+						Type:    rowType,
 						Name:    name,
 						ID:      s.ID,
 						Status:  status,

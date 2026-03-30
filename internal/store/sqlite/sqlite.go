@@ -86,6 +86,17 @@ var migrations = []string{
 	`ALTER TABLE services ADD COLUMN forward_port INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE services ADD COLUMN app_snapshot_mem TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE services ADD COLUMN app_snapshot_state TEXT NOT NULL DEFAULT ''`,
+	`CREATE TABLE IF NOT EXISTS file_locks (
+		lock_key    TEXT PRIMARY KEY,
+		volume      TEXT NOT NULL,
+		path        TEXT NOT NULL,
+		worker_id   TEXT NOT NULL,
+		exclusive   INTEGER NOT NULL DEFAULT 1,
+		acquired_at TEXT NOT NULL,
+		expires_at  TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_file_locks_volume ON file_locks(volume)`,
+	`CREATE INDEX IF NOT EXISTS idx_file_locks_expires ON file_locks(expires_at)`,
 }
 
 // DB returns the underlying sql.DB for operations that need direct access
@@ -214,6 +225,8 @@ CREATE TABLE IF NOT EXISTS services (
 	forward_port     INTEGER NOT NULL DEFAULT 0,
 	ready            INTEGER NOT NULL DEFAULT 0,
 	status_message   TEXT NOT NULL DEFAULT '',
+	database_config  TEXT NOT NULL DEFAULT '',
+	uses             TEXT NOT NULL DEFAULT '{}',
 	last_activity    TEXT NOT NULL DEFAULT (datetime('now')),
 	created_at       TEXT NOT NULL DEFAULT (datetime('now')),
 	updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
@@ -221,6 +234,8 @@ CREATE TABLE IF NOT EXISTS services (
 CREATE INDEX IF NOT EXISTS idx_services_worker ON services(worker_id);
 CREATE INDEX IF NOT EXISTS idx_services_status ON services(status);
 CREATE INDEX IF NOT EXISTS idx_services_status_updated ON services(status, updated_at);
+CREATE INDEX IF NOT EXISTS idx_services_database ON services(database_config) WHERE database_config != '';
+CREATE INDEX IF NOT EXISTS idx_services_name ON services(name) WHERE name != '';
 
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_worker ON sessions(worker_id);

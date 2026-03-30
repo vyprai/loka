@@ -85,4 +85,30 @@ var (
 		Help:      "API request latency.",
 		Buckets:   prometheus.DefBuckets,
 	}, []string{"method", "path"})
+
+	// Databases
+	DatabaseBackups = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "loka",
+		Name:      "database_backups_total",
+		Help:      "Total database backup operations by engine and status.",
+	}, []string{"engine", "status"})
+
+	DatabaseBackupDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: "loka",
+		Name:      "database_backup_duration_seconds",
+		Help:      "Database backup duration.",
+		Buckets:   []float64{1, 5, 15, 30, 60, 120, 300, 600},
+	}, []string{"engine"})
+
+	DatabaseCredentialRotations = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "loka",
+		Name:      "database_credential_rotations_total",
+		Help:      "Total credential rotation operations by engine.",
+	}, []string{"engine"})
+
+	DatabaseUpgrades = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "loka",
+		Name:      "database_upgrades_total",
+		Help:      "Total database version upgrades.",
+	}, []string{"engine", "from_version", "to_version"})
 )

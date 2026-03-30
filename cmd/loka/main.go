@@ -36,7 +36,7 @@ func resolveServer() (endpoint, tok, caCert string, insecureTLS bool) {
 		}
 	}
 	// TLS is determined by the deployment store metadata (ca_cert, insecure).
-	// No auto-detection — use loka connect or loka setup to configure TLS.
+	// No auto-detection — use loka space connect or loka space create to configure TLS.
 	return
 }
 
@@ -128,8 +128,6 @@ func main() {
 	rootCmd.AddCommand(
 		newVersionCmd(),
 		newSpaceCmd(),
-		newConnectCmd(),
-		newSetupCmd(),
 		newDeployCmd(),
 		newInstanceCmd(),
 		newTaskCmd(),
@@ -138,8 +136,8 @@ func main() {
 		newExecCmd(),
 		newShellCmd(),
 		newCheckpointCmd(),
+		newDBCmd(),
 		newWorkerCmd(),
-		newProviderCmd(),
 		newTokenCmd(),
 		newStatusCmd(),
 		newDomainsCmd(),

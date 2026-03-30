@@ -23,7 +23,8 @@ type Deployment struct {
 
 // DeploymentStore manages the deployment state file.
 type DeploymentStore struct {
-	Active      string       `json:"active"` // Name of the active deployment.
+	Active      string       `json:"active"`    // Name of the active deployment.
+	ActiveDB    string       `json:"active_db"` // Name of the active database.
 	Deployments []Deployment `json:"deployments"`
 }
 

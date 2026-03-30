@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +39,12 @@ func fetchCACert(endpoint string) (string, error) {
 		return "", fmt.Errorf("empty response")
 	}
 
+	// Print fingerprint warning for TOFU (Trust On First Use) verification.
+	hash := sha256.Sum256(data)
+	fingerprint := formatFingerprint(hex.EncodeToString(hash[:]))
+	fmt.Fprintf(os.Stderr, "  %s⚠ Insecure bootstrap — verify CA certificate fingerprint:%s\n", dim, reset)
+	fmt.Fprintf(os.Stderr, "  SHA256: %s\n", fingerprint)
+
 	// Save to ~/.loka/tls/
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".loka", "tls")
@@ -46,6 +54,19 @@ func fetchCACert(endpoint string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// formatFingerprint inserts colons into a hex string: "abcd" → "ab:cd".
+func formatFingerprint(hex string) string {
+	var parts []string
+	for i := 0; i < len(hex); i += 2 {
+		end := i + 2
+		if end > len(hex) {
+			end = len(hex)
+		}
+		parts = append(parts, hex[i:end])
+	}
+	return strings.Join(parts, ":")
 }
 
 func newConnectCmd() *cobra.Command {
@@ -62,10 +83,10 @@ func newConnectCmd() *cobra.Command {
 		Long: `Connect to a LOKA control plane that's already running — anywhere.
 
 Examples:
-  loka connect http://10.0.0.1:6840 --name prod
-  loka connect https://loka.mycompany.com --name staging --token loka_abc123
-  loka connect https://10.0.0.1:8443 --name secure --ca-cert ./server.crt
-  loka connect https://10.0.0.1:8443 --name dev --insecure`,
+  loka space connect http://10.0.0.1:6840 --name prod
+  loka space connect https://loka.mycompany.com --name staging --token loka_abc123
+  loka space connect https://10.0.0.1:8443 --name secure --ca-cert ./server.crt
+  loka space connect https://10.0.0.1:8443 --name dev --insecure`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			endpoint := args[0]

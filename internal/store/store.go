@@ -93,11 +93,21 @@ type WorkerRepository interface {
 
 // ServiceFilter controls service list queries.
 type ServiceFilter struct {
-	Status   *loka.ServiceStatus
-	WorkerID *string
-	Name     *string
-	Limit    int
-	Offset   int
+	Status     *loka.ServiceStatus
+	WorkerID   *string
+	Name       *string
+	IsDatabase *bool   // If non-nil, filter by database_config presence.
+	PrimaryID  *string // If non-nil, filter replicas by primary_id in database_config.
+	Limit      int
+	Offset     int
+}
+
+// IdleCandidate is a lightweight view of a service for idle monitoring.
+type IdleCandidate struct {
+	ID           string
+	Name         string
+	IdleTimeout  int
+	LastActivity time.Time
 }
 
 // ServiceRepository manages service persistence.
@@ -108,6 +118,7 @@ type ServiceRepository interface {
 	Delete(ctx context.Context, id string) error
 	List(ctx context.Context, filter ServiceFilter) ([]*loka.Service, int, error)
 	ListByWorker(ctx context.Context, workerID string) ([]*loka.Service, error)
+	ListIdleCandidates(ctx context.Context) ([]IdleCandidate, error)
 }
 
 // TokenRepository manages worker registration tokens.

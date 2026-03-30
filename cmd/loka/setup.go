@@ -16,36 +16,6 @@ import (
 	"github.com/vyprai/loka/pkg/lokaapi"
 )
 
-func newSetupCmd() *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "setup",
-		Short: "Set up LOKA infrastructure",
-		Long: `Set up LOKA on local or cloud infrastructure.
-
-  loka setup local --name dev
-  loka setup aws --name prod --region us-east-1 --workers 3
-  loka setup vm --name staging --cp 10.0.0.1
-  loka setup apply prod.yml         # Deploy from YAML file
-  loka worker add 10.0.0.5          # Add a worker
-  loka worker remove 10.0.0.5       # Remove a worker
-  loka list                         # List all servers
-  loka use prod                     # Switch active server`,
-	}
-	cmd.AddCommand(
-		newDeployFileCmd(),
-		newDeployExportCmd(),
-		newDeployCloudCmd("aws", "Deploy to AWS (EC2)", deployAWS),
-		newDeployCloudCmd("gcp", "Deploy to Google Cloud", deployGCP),
-		newDeployCloudCmd("azure", "Deploy to Azure", deployAzure),
-		newDeployCloudCmd("do", "Deploy to DigitalOcean", deployDigitalOcean),
-		newDeployCloudCmd("ovh", "Deploy to OVH", deployOVH),
-		newDeployVMCmd(),
-		newDeployLocalCmd(),
-		newDeployRenameCmd(),
-	)
-	return cmd
-}
-
 type deployFunc func(opts deployOpts) error
 type deployOpts struct {
 	Name, Provider, Region, Zone, Project, InstanceType, SSHKey string

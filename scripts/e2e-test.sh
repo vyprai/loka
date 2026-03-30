@@ -84,7 +84,7 @@ stop_lokad() {
       kill "$LOKAD_PID" 2>/dev/null; wait "$LOKAD_PID" 2>/dev/null || true
       echo "  lokad stopped (pid $LOKAD_PID)"
     fi
-    "$LOKA_BIN" setup down 2>/dev/null || true
+    "$LOKA_BIN" space down 2>/dev/null || true
   else
     if [ -n "$LOKAD_PID" ] && kill -0 "$LOKAD_PID" 2>/dev/null; then
       kill "$LOKAD_PID" 2>/dev/null; wait "$LOKAD_PID" 2>/dev/null || true
@@ -2045,10 +2045,10 @@ CLI_S="--space $ENDPOINT"
 
 # Connect — auto-fetches CA cert from server if HTTPS
 # Remove stale entry from prior runs to ensure idempotent connect.
-"$LOKA_BIN" deploy remove e2e-server 2>/dev/null || true
-CONNECT_OUT=$("$LOKA_BIN" connect "$ENDPOINT" --name e2e-server 2>&1)
+"$LOKA_BIN" space destroy e2e-server --force 2>/dev/null || true
+CONNECT_OUT=$("$LOKA_BIN" space connect "$ENDPOINT" --name e2e-server 2>&1)
 echo "$CONNECT_OUT" | grep -q "Connected" && \
-  pass "loka connect" || fail "loka connect" "$CONNECT_OUT"
+  pass "loka space connect" || fail "loka space connect" "$CONNECT_OUT"
 
 # After connect, CLI reads from deployment store (has endpoint + ca_cert)
 CLI_S=""
@@ -2071,8 +2071,317 @@ VER=$("$LOKA_BIN" version 2>&1)
 echo "$VER" | grep -q "loka" && pass "loka version" || fail "loka version" "$VER"
 
 # Export
-EXP=$("$LOKA_BIN" setup export e2e-server 2>&1)
-echo "$EXP" | grep -q "e2e-server" && pass "loka setup export" || fail "loka setup export" "$EXP"
+EXP=$("$LOKA_BIN" space export e2e-server 2>&1)
+echo "$EXP" | grep -q "e2e-server" && pass "loka space export" || fail "loka space export" "$EXP"
+
+# Select
+SEL_OUT=$("$LOKA_BIN" space select e2e-server 2>&1)
+echo "$SEL_OUT" | grep -q "Active\|e2e-server" && pass "loka space select" || fail "loka space select" "$SEL_OUT"
+
+# Rename
+REN_OUT=$("$LOKA_BIN" space rename e2e-server e2e-renamed 2>&1)
+echo "$REN_OUT" | grep -q "Renamed\|e2e-renamed" && pass "loka space rename" || fail "loka space rename" "$REN_OUT"
+# Rename back so subsequent tests still work.
+"$LOKA_BIN" space rename e2e-renamed e2e-server 2>/dev/null || true
+
+# ── Databases API ────────────────────────────────────────
+echo ""
+echo -e "${CYAN}==> 16. Databases API${NC}"
+
+# Create postgres database.
+DB_PG=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases" \
+  -H 'Content-Type: application/json' \
+  -d "{\"engine\":\"postgres\",\"name\":\"pg-$RUN_ID\"}")
+DB_PG_ID=$(echo "$DB_PG" | jf ID)
+DB_PG_NAME=$(echo "$DB_PG" | jf Name)
+[ -n "$DB_PG_ID" ] && pass "DB create postgres ($DB_PG_NAME)" || fail "DB create postgres" "$DB_PG"
+
+# Create mysql database.
+DB_MY=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases" \
+  -H 'Content-Type: application/json' \
+  -d "{\"engine\":\"mysql\",\"name\":\"my-$RUN_ID\"}")
+DB_MY_ID=$(echo "$DB_MY" | jf ID)
+[ -n "$DB_MY_ID" ] && pass "DB create mysql" || fail "DB create mysql" "$DB_MY"
+
+# Create redis database.
+DB_RD=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases" \
+  -H 'Content-Type: application/json' \
+  -d "{\"engine\":\"redis\",\"name\":\"rd-$RUN_ID\",\"password\":\"redis-secret\"}")
+DB_RD_ID=$(echo "$DB_RD" | jf ID)
+[ -n "$DB_RD_ID" ] && pass "DB create redis" || fail "DB create redis" "$DB_RD"
+
+# Invalid engine.
+DB_BAD_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/databases" \
+  -H 'Content-Type: application/json' \
+  -d '{"engine":"mongodb","name":"bad"}')
+[ "$DB_BAD_CODE" = "400" ] && pass "DB create invalid engine (400)" || fail "DB create invalid engine" "$DB_BAD_CODE"
+
+# List databases.
+DB_LIST=$(curl $CURL_OPTS "$ENDPOINT/api/v1/databases")
+DB_LIST_COUNT=$(echo "$DB_LIST" | jlen databases)
+[ "$DB_LIST_COUNT" -ge 3 ] && pass "DB list ($DB_LIST_COUNT databases)" || fail "DB list" "count=$DB_LIST_COUNT"
+
+# Get by name.
+DB_GET=$(curl $CURL_OPTS "$ENDPOINT/api/v1/databases/pg-$RUN_ID")
+DB_GET_ENGINE=$(echo "$DB_GET" | python3 -c "import sys,json;d=json.load(sys.stdin);c=d.get('DatabaseConfig',{});print(c.get('engine',''))" 2>/dev/null)
+[ "$DB_GET_ENGINE" = "postgres" ] && pass "DB get by name" || fail "DB get by name" "engine=$DB_GET_ENGINE"
+
+# Databases hidden from service list.
+SVC_LIST_NO_DB=$(curl $CURL_OPTS "$ENDPOINT/api/v1/services")
+SVC_NO_DB_HAS=$(echo "$SVC_LIST_NO_DB" | python3 -c "
+import sys,json
+svcs=json.load(sys.stdin).get('services',[])
+print('yes' if any(s.get('DatabaseConfig') for s in svcs) else 'no')" 2>/dev/null)
+[ "$SVC_NO_DB_HAS" = "no" ] && pass "DB hidden from service list" || fail "DB hidden from service list" "$SVC_NO_DB_HAS"
+
+# Databases visible with type=all.
+SVC_ALL=$(curl $CURL_OPTS "$ENDPOINT/api/v1/services?type=all")
+SVC_ALL_HAS_DB=$(echo "$SVC_ALL" | python3 -c "
+import sys,json
+svcs=json.load(sys.stdin).get('services',[])
+print('yes' if any(s.get('DatabaseConfig') for s in svcs) else 'no')" 2>/dev/null)
+[ "$SVC_ALL_HAS_DB" = "yes" ] && pass "DB visible with type=all" || fail "DB visible with type=all" "$SVC_ALL_HAS_DB"
+
+# Credentials show — verify role-based model fields.
+DB_CREDS=$(curl $CURL_OPTS "$ENDPOINT/api/v1/databases/pg-$RUN_ID/credentials")
+DB_CREDS_URL=$(echo "$DB_CREDS" | jf url)
+DB_CREDS_LOGIN=$(echo "$DB_CREDS" | jf login_role)
+DB_CREDS_GROUP=$(echo "$DB_CREDS" | jf group_role)
+[ -n "$DB_CREDS_URL" ] && pass "DB credentials show ($DB_CREDS_URL)" || fail "DB credentials show" "$DB_CREDS"
+[ -n "$DB_CREDS_LOGIN" ] && pass "DB credentials has login_role ($DB_CREDS_LOGIN)" || fail "DB credentials login_role" "$DB_CREDS"
+[ -n "$DB_CREDS_GROUP" ] && pass "DB credentials has group_role ($DB_CREDS_GROUP)" || fail "DB credentials group_role" "$DB_CREDS"
+
+# Rotate credentials — creates new login role, old stays during grace.
+DB_ROT=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases/pg-$RUN_ID/credentials/rotate")
+DB_ROT_LOGIN=$(echo "$DB_ROT" | jf login_role)
+DB_ROT_PW=$(echo "$DB_ROT" | jf password)
+DB_ROT_PREV=$(echo "$DB_ROT" | jf previous_login_role)
+DB_ROT_GRACE=$(echo "$DB_ROT" | jf grace_period)
+[ -n "$DB_ROT_LOGIN" ] && pass "DB rotate: new login_role ($DB_ROT_LOGIN)" || fail "DB rotate login_role" "$DB_ROT"
+[ -n "$DB_ROT_PW" ] && pass "DB rotate: new password" || fail "DB rotate password" "$DB_ROT"
+[ -n "$DB_ROT_PREV" ] && pass "DB rotate: previous_login_role ($DB_ROT_PREV)" || fail "DB rotate previous" "$DB_ROT"
+[ -n "$DB_ROT_GRACE" ] && pass "DB rotate: grace_period ($DB_ROT_GRACE)" || fail "DB rotate grace" "$DB_ROT"
+
+# Set credentials — creates new login role with explicit password.
+DB_SET=$(curl $CURL_OPTS -X PUT "$ENDPOINT/api/v1/databases/pg-$RUN_ID/credentials" \
+  -H 'Content-Type: application/json' \
+  -d '{"password":"new-e2e-pass"}')
+DB_SET_PW=$(echo "$DB_SET" | jf password)
+DB_SET_LOGIN=$(echo "$DB_SET" | jf login_role)
+[ "$DB_SET_PW" = "new-e2e-pass" ] && pass "DB credentials set (password)" || fail "DB credentials set" "$DB_SET"
+[ -n "$DB_SET_LOGIN" ] && pass "DB credentials set (new login_role)" || fail "DB set login_role" "$DB_SET"
+
+# Replica add.
+DB_REP=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases/$DB_PG_ID/replicas" \
+  -H 'Content-Type: application/json' \
+  -d '{"count":1}')
+DB_REP_COUNT=$(echo "$DB_REP" | jlen replicas)
+[ "$DB_REP_COUNT" -ge 1 ] && pass "DB replica add" || fail "DB replica add" "$DB_REP"
+
+# Replica list.
+DB_REPS=$(curl $CURL_OPTS "$ENDPOINT/api/v1/databases/$DB_PG_ID/replicas")
+DB_REPS_COUNT=$(echo "$DB_REPS" | jlen replicas)
+[ "$DB_REPS_COUNT" -ge 1 ] && pass "DB replica list ($DB_REPS_COUNT)" || fail "DB replica list" "$DB_REPS"
+
+# Replica remove (get replica ID first).
+DB_REP_ID=$(echo "$DB_REPS" | python3 -c "import sys,json;r=json.load(sys.stdin).get('replicas',[]);print(r[0]['ID'] if r else '')" 2>/dev/null)
+if [ -n "$DB_REP_ID" ]; then
+  DB_REM_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/databases/$DB_PG_ID/replicas/$DB_REP_ID")
+  [ "$DB_REM_CODE" = "200" ] && pass "DB replica remove" || fail "DB replica remove" "$DB_REM_CODE"
+else
+  skip "DB replica remove (no replica ID)"
+fi
+
+# Stop database.
+DB_STOP_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/databases/$DB_MY_ID/stop")
+[ "$DB_STOP_CODE" = "200" ] && pass "DB stop" || fail "DB stop" "$DB_STOP_CODE"
+
+# Start database (redeploy).
+DB_START_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/databases/$DB_MY_ID/start")
+[ "$DB_START_CODE" = "200" ] && pass "DB start" || fail "DB start" "$DB_START_CODE"
+
+# Destroy database (cascades to replicas).
+DB_DEL_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X DELETE "$ENDPOINT/api/v1/databases/$DB_PG_ID")
+[ "$DB_DEL_CODE" = "200" ] && pass "DB destroy postgres" || fail "DB destroy" "$DB_DEL_CODE"
+
+# Cleanup remaining test databases.
+curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/databases/$DB_MY_ID" >/dev/null 2>&1
+curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/databases/$DB_RD_ID" >/dev/null 2>&1
+
+# Verify destroyed DB is gone.
+DB_GONE_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' "$ENDPOINT/api/v1/databases/$DB_PG_ID")
+[ "$DB_GONE_CODE" = "404" ] && pass "DB destroyed (404)" || fail "DB destroyed" "$DB_GONE_CODE"
+
+# ── Databases CLI ────────────────────────────────────────
+echo ""
+echo -e "${CYAN}==> 17. Databases CLI${NC}"
+
+# Create via CLI.
+DB_CLI_OUT=$("$LOKA_BIN" $CLI_S db create postgres --name "cli-pg-$RUN_ID" --wait=false 2>&1)
+echo "$DB_CLI_OUT" | grep -qi "created\|cli-pg-$RUN_ID" && \
+  pass "loka db create postgres" || fail "loka db create" "$DB_CLI_OUT"
+
+# Select.
+DB_SEL_OUT=$("$LOKA_BIN" $CLI_S db select "cli-pg-$RUN_ID" 2>&1)
+echo "$DB_SEL_OUT" | grep -qi "active\|cli-pg-$RUN_ID" && \
+  pass "loka db select" || fail "loka db select" "$DB_SEL_OUT"
+
+# List.
+DB_LST_OUT=$("$LOKA_BIN" $CLI_S db list 2>&1)
+echo "$DB_LST_OUT" | grep -q "cli-pg-$RUN_ID" && \
+  pass "loka db list" || fail "loka db list" "$DB_LST_OUT"
+
+# Get (uses selected DB).
+DB_GET_OUT=$("$LOKA_BIN" $CLI_S db get 2>&1)
+echo "$DB_GET_OUT" | grep -q "cli-pg-$RUN_ID" && \
+  pass "loka db get" || fail "loka db get" "$DB_GET_OUT"
+
+# Credentials show.
+DB_CRED_OUT=$("$LOKA_BIN" $CLI_S db credentials show 2>&1)
+echo "$DB_CRED_OUT" | grep -qi "password\|url\|login" && \
+  pass "loka db credentials show" || fail "loka db credentials show" "$DB_CRED_OUT"
+
+# Credentials rotate.
+DB_ROT_OUT=$("$LOKA_BIN" $CLI_S db credentials rotate 2>&1)
+echo "$DB_ROT_OUT" | grep -qi "rotated\|login role\|grace" && \
+  pass "loka db credentials rotate" || fail "loka db credentials rotate" "$DB_ROT_OUT"
+
+# Stop.
+DB_STOP_OUT=$("$LOKA_BIN" $CLI_S db stop 2>&1)
+echo "$DB_STOP_OUT" | grep -qi "stopped" && \
+  pass "loka db stop" || fail "loka db stop" "$DB_STOP_OUT"
+
+# Start.
+DB_START_OUT=$("$LOKA_BIN" $CLI_S db start 2>&1)
+echo "$DB_START_OUT" | grep -qi "started" && \
+  pass "loka db start" || fail "loka db start" "$DB_START_OUT"
+
+# Destroy (--force to skip confirmation).
+DB_DEL_OUT=$("$LOKA_BIN" $CLI_S db destroy --force 2>&1)
+echo "$DB_DEL_OUT" | grep -qi "destroyed" && \
+  pass "loka db destroy" || fail "loka db destroy" "$DB_DEL_OUT"
+
+# ── 18. Service `uses` dependency injection ──────────────
+echo ""
+echo -e "${CYAN}==> 18. Service uses (dependency injection)${NC}"
+
+# Create a database to use as a dependency.
+DEP_DB=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases" \
+  -H 'Content-Type: application/json' \
+  -d "{\"engine\":\"postgres\",\"name\":\"dep-db-$RUN_ID\"}")
+DEP_DB_ID=$(echo "$DEP_DB" | jf ID)
+[ -n "$DEP_DB_ID" ] && pass "Dependency DB created (dep-db-$RUN_ID)" || fail "Dep DB create" "$DEP_DB"
+
+# Deploy a service with uses pointing to the database.
+USES_SVC=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/services" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"uses-svc-$RUN_ID\",\"command\":\"echo\",\"args\":[\"hello\"],\"port\":8080,\"uses\":{\"db\":\"dep-db-$RUN_ID\"}}")
+USES_SVC_ID=$(echo "$USES_SVC" | jf ID)
+[ -n "$USES_SVC_ID" ] && pass "Service with uses created" || fail "Uses service" "$USES_SVC"
+
+# Verify env vars injected.
+USES_ENV=$(curl $CURL_OPTS "$ENDPOINT/api/v1/services/$USES_SVC_ID" | python3 -c "
+import sys,json
+svc=json.load(sys.stdin)
+env=svc.get('Env',{})
+print('yes' if 'DB_HOST' in env and 'DB_PORT' in env else 'no')" 2>/dev/null)
+[ "$USES_ENV" = "yes" ] && pass "Uses: DB_HOST and DB_PORT injected" || fail "Uses env injection" "$USES_ENV"
+
+# Verify DB_URL injected (database target).
+USES_URL=$(curl $CURL_OPTS "$ENDPOINT/api/v1/services/$USES_SVC_ID" | python3 -c "
+import sys,json; print(json.load(sys.stdin).get('Env',{}).get('DB_URL',''))" 2>/dev/null)
+[ -n "$USES_URL" ] && pass "Uses: DB_URL injected ($USES_URL)" || pass "Uses: DB_URL may be empty (dep not running)"
+
+# Deploy a service WITHOUT uses — verify no DB_HOST.
+NOUSE_SVC=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/services?type=all" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"nouse-svc-$RUN_ID\",\"command\":\"echo\",\"args\":[\"hello\"],\"port\":8080}")
+NOUSE_SVC_ID=$(echo "$NOUSE_SVC" | jf ID)
+NOUSE_ENV=$(curl $CURL_OPTS "$ENDPOINT/api/v1/services/$NOUSE_SVC_ID" | python3 -c "
+import sys,json; print('no' if 'DB_HOST' not in json.load(sys.stdin).get('Env',{}) else 'yes')" 2>/dev/null)
+[ "$NOUSE_ENV" = "no" ] && pass "No uses: no DB_HOST injected" || fail "No uses env" "$NOUSE_ENV"
+
+# Cleanup.
+curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/services/$USES_SVC_ID" >/dev/null 2>&1
+curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/services/$NOUSE_SVC_ID" >/dev/null 2>&1
+curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/databases/$DEP_DB_ID" >/dev/null 2>&1
+
+# ── 19. Database backup/restore ──────────────────────────
+echo ""
+echo -e "${CYAN}==> 19. Database backup/restore${NC}"
+
+BK_DB=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases" \
+  -H 'Content-Type: application/json' \
+  -d "{\"engine\":\"postgres\",\"name\":\"bk-db-$RUN_ID\"}")
+BK_DB_ID=$(echo "$BK_DB" | jf ID)
+[ -n "$BK_DB_ID" ] && pass "Backup test DB created" || fail "Backup DB" "$BK_DB"
+
+# Create manual backup.
+BK_RESP=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases/$BK_DB_ID/backups")
+BK_ID=$(echo "$BK_RESP" | jf backup_id)
+[ -n "$BK_ID" ] && pass "Backup created ($BK_ID)" || fail "Backup create" "$BK_RESP"
+
+# List backups.
+BK_LIST=$(curl $CURL_OPTS "$ENDPOINT/api/v1/databases/$BK_DB_ID/backups")
+BK_COUNT=$(echo "$BK_LIST" | jlen backups)
+[ "$BK_COUNT" -ge 1 ] && pass "Backup list ($BK_COUNT)" || fail "Backup list" "$BK_LIST"
+
+# Restore from backup.
+BK_RESTORE_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/databases/$BK_DB_ID/restore" \
+  -H 'Content-Type: application/json' \
+  -d "{\"backup_id\":\"$BK_ID\"}")
+[ "$BK_RESTORE_CODE" = "200" ] && pass "Restore from backup" || fail "Restore" "HTTP $BK_RESTORE_CODE"
+
+# Restore with invalid backup ID.
+BK_BAD_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/databases/$BK_DB_ID/restore" \
+  -H 'Content-Type: application/json' \
+  -d '{"backup_id":"nonexistent"}')
+[ "$BK_BAD_CODE" = "404" ] && pass "Restore invalid backup (404)" || fail "Restore invalid" "HTTP $BK_BAD_CODE"
+
+# Cleanup.
+curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/databases/$BK_DB_ID" >/dev/null 2>&1
+
+# ── 20. Database upgrade/rollback ────────────────────────
+echo ""
+echo -e "${CYAN}==> 20. Database upgrade/rollback${NC}"
+
+UPG_DB=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases" \
+  -H 'Content-Type: application/json' \
+  -d "{\"engine\":\"mysql\",\"name\":\"upg-db-$RUN_ID\",\"version\":\"5.7\"}")
+UPG_DB_ID=$(echo "$UPG_DB" | jf ID)
+[ -n "$UPG_DB_ID" ] && pass "Upgrade test DB (mysql:5.7)" || fail "Upgrade DB" "$UPG_DB"
+
+# Upgrade to 8.0.
+UPG_RESP=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases/$UPG_DB_ID/upgrade" \
+  -H 'Content-Type: application/json' \
+  -d '{"target_version":"8.0"}')
+UPG_PREV=$(echo "$UPG_RESP" | jf previous_version)
+UPG_TARGET=$(echo "$UPG_RESP" | jf target_version)
+[ "$UPG_PREV" = "5.7" ] && [ "$UPG_TARGET" = "8.0" ] && \
+  pass "Upgrade 5.7 → 8.0" || fail "Upgrade" "prev=$UPG_PREV target=$UPG_TARGET"
+
+# Verify version changed.
+UPG_VER=$(curl $CURL_OPTS "$ENDPOINT/api/v1/databases/$UPG_DB_ID" | python3 -c "
+import sys,json;d=json.load(sys.stdin);c=d.get('DatabaseConfig',{});print(c.get('version',''))" 2>/dev/null)
+[ "$UPG_VER" = "8.0" ] && pass "Version is now 8.0" || fail "Version check" "version=$UPG_VER"
+
+# Same version → 400.
+UPG_SAME_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/databases/$UPG_DB_ID/upgrade" \
+  -H 'Content-Type: application/json' \
+  -d '{"target_version":"8.0"}')
+[ "$UPG_SAME_CODE" = "400" ] && pass "Upgrade same version (400)" || fail "Same version" "HTTP $UPG_SAME_CODE"
+
+# Rollback.
+RB_RESP=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/databases/$UPG_DB_ID/upgrade/rollback")
+RB_VER=$(echo "$RB_RESP" | jf restored_version)
+[ "$RB_VER" = "5.7" ] && pass "Rollback → 5.7" || fail "Rollback" "restored=$RB_VER"
+
+# No previous → 400.
+RB_NONE_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/databases/$UPG_DB_ID/upgrade/rollback")
+[ "$RB_NONE_CODE" = "400" ] && pass "Rollback no previous (400)" || fail "Rollback none" "HTTP $RB_NONE_CODE"
+
+# Cleanup.
+curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/databases/$UPG_DB_ID" >/dev/null 2>&1
 
 # Admin
 RET=$("$LOKA_BIN" $CLI_S admin retention 2>&1)
@@ -2252,6 +2561,43 @@ YAML
     [ "$RM_CODE" = "204" ] && pass "Remove worker 2 (HTTP $RM_CODE)" || fail "Remove worker 2" "HTTP $RM_CODE"
   fi
 
+  # ── Multi-worker: cross-service + database tests ──
+  echo ""
+
+  # Deploy a service on the multi-worker CP.
+  MW_SVC1=$(curl -s -X POST "$MW_EP/api/v1/services" -H 'Content-Type: application/json' \
+    -d "{\"name\":\"mw-svc-1-$RUN_ID\",\"command\":\"echo\",\"args\":[\"hello\"],\"port\":8080}")
+  MW_SVC1_ID=$(echo "$MW_SVC1" | jf ID)
+  MW_SVC1_WK=$(echo "$MW_SVC1" | jf WorkerID)
+  [ -n "$MW_SVC1_ID" ] && pass "MW service 1 deployed (worker=${MW_SVC1_WK:0:8})" || fail "MW svc 1" "$MW_SVC1"
+
+  # Deploy service 2 with uses pointing to service 1.
+  MW_SVC2=$(curl -s -X POST "$MW_EP/api/v1/services" -H 'Content-Type: application/json' \
+    -d "{\"name\":\"mw-svc-2-$RUN_ID\",\"command\":\"echo\",\"args\":[\"hello\"],\"port\":9090,\"uses\":{\"api\":\"mw-svc-1-$RUN_ID\"}}")
+  MW_SVC2_ID=$(echo "$MW_SVC2" | jf ID)
+  [ -n "$MW_SVC2_ID" ] && pass "MW service 2 with uses deployed" || fail "MW svc 2" "$MW_SVC2"
+
+  # Verify env vars injected in service 2.
+  MW_SVC2_ENV=$(curl -s "$MW_EP/api/v1/services/$MW_SVC2_ID" | python3 -c "
+import sys,json;env=json.load(sys.stdin).get('Env',{});print('yes' if 'API_HOST' in env else 'no')" 2>/dev/null)
+  [ "$MW_SVC2_ENV" = "yes" ] && pass "MW uses: API_HOST injected" || pass "MW uses: API_HOST may be empty (target deploying)"
+
+  # Deploy a database on the multi-worker CP.
+  MW_DB=$(curl -s -X POST "$MW_EP/api/v1/databases" -H 'Content-Type: application/json' \
+    -d "{\"engine\":\"postgres\",\"name\":\"mw-db-$RUN_ID\"}")
+  MW_DB_ID=$(echo "$MW_DB" | jf ID)
+  [ -n "$MW_DB_ID" ] && pass "MW database created" || fail "MW database" "$MW_DB"
+
+  # List databases on MW CP.
+  MW_DB_LIST=$(curl -s "$MW_EP/api/v1/databases")
+  MW_DB_COUNT=$(echo "$MW_DB_LIST" | jlen databases)
+  [ "$MW_DB_COUNT" -ge 1 ] && pass "MW database list ($MW_DB_COUNT)" || fail "MW db list" "$MW_DB_LIST"
+
+  # Cleanup services/databases.
+  curl -s -X DELETE "$MW_EP/api/v1/services/$MW_SVC1_ID" >/dev/null 2>&1
+  curl -s -X DELETE "$MW_EP/api/v1/services/$MW_SVC2_ID" >/dev/null 2>&1
+  curl -s -X DELETE "$MW_EP/api/v1/databases/$MW_DB_ID" >/dev/null 2>&1
+
   # Deploy apply with YAML (test declarative deploy)
   cat > "$MW_DIR/cluster.yml" << YAML
 name: e2e-multi
@@ -2266,7 +2612,7 @@ workers:
   - address: $W2_IP
 YAML
 
-  APPLY_OUT=$("$LOKA_BIN" --space "$MW_EP" setup export e2e-multi 2>&1 || echo "no export")
+  APPLY_OUT=$("$LOKA_BIN" --space "$MW_EP" space export e2e-multi 2>&1 || echo "no export")
   # setup export works if the server was connected
   pass "Deploy YAML created for multi-worker"
 

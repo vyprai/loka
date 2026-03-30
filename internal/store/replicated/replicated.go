@@ -14,6 +14,7 @@ package replicated
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -305,6 +306,16 @@ func (s *Store) Tasks() store.TaskRepository             { return s.local.Tasks(
 func (s *Store) Migrate(ctx context.Context) error     { return s.local.Migrate(ctx) }
 func (s *Store) Close() error                          { return s.local.Close() }
 
+// DB delegates to the underlying local store's DB() method if available.
+// This allows components like the lock manager to access the raw database.
+func (s *Store) DB() *sql.DB {
+	type dbProvider interface{ DB() *sql.DB }
+	if p, ok := s.local.(dbProvider); ok {
+		return p.DB()
+	}
+	return nil
+}
+
 // ── Replicated SessionRepository ───────────────────────
 
 type replicatedSessionRepo struct{ s *Store }
@@ -493,6 +504,9 @@ func (r *replicatedServiceRepo) List(ctx context.Context, filter store.ServiceFi
 }
 func (r *replicatedServiceRepo) ListByWorker(ctx context.Context, workerID string) ([]*loka.Service, error) {
 	return r.s.local.Services().ListByWorker(ctx, workerID)
+}
+func (r *replicatedServiceRepo) ListIdleCandidates(ctx context.Context) ([]store.IdleCandidate, error) {
+	return r.s.local.Services().ListIdleCandidates(ctx)
 }
 
 var _ store.Store = (*Store)(nil)

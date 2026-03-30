@@ -18,6 +18,15 @@ func extractBucketKey(r *http.Request) (string, string) {
 	key := chi.URLParam(r, "*")
 	key, _ = url.PathUnescape(key)
 	key = strings.TrimPrefix(key, "/")
+
+	// Reject path traversal attempts.
+	if strings.Contains(bucket, "..") || strings.Contains(key, "..") {
+		return "", ""
+	}
+	if strings.ContainsRune(bucket, 0) || strings.ContainsRune(key, 0) {
+		return "", ""
+	}
+
 	return bucket, key
 }
 

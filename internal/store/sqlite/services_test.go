@@ -32,7 +32,7 @@ func newTestService(name string, status loka.ServiceStatus, workerID string) *lo
 		Port:           8080,
 		VCPUs:          2,
 		MemoryMB:       512,
-		Routes:         []loka.ServiceRoute{{Subdomain: "api", Port: 8080, Protocol: "http"}},
+		Routes:         []loka.ServiceRoute{{Domain: "api", Port: 8080, Protocol: "http"}},
 		BundleKey:      "bundle-123",
 		IdleTimeout:    300,
 		HealthPath:     "/healthz",
@@ -294,6 +294,278 @@ func TestServiceListByWorkerMethod(t *testing.T) {
 	require.Equal(t, "worker-1", svcs[0].WorkerID)
 }
 
+func TestServiceDatabaseConfigRoundtrip(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	svc := newTestService("db-svc", loka.ServiceStatusRunning, "worker-1")
+	svc.DatabaseConfig = &loka.DatabaseConfig{
+		Engine:    "postgres",
+		Version:   "16",
+		LoginRole:  "pguser",
+		Password:  "pgpass",
+		DBName:    "mydb",
+		Role:      loka.DatabaseRolePrimary,
+		PrimaryID: "",
+		Backup: &loka.BackupConfig{
+			Enabled:   true,
+			Schedule:  "0 */6 * * *",
+			Retention: 7,
+			WAL:       true,
+		},
+	}
+
+	require.NoError(t, s.Services().Create(ctx, svc))
+
+	got, err := s.Services().Get(ctx, svc.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.DatabaseConfig)
+	require.Equal(t, "postgres", got.DatabaseConfig.Engine)
+	require.Equal(t, "16", got.DatabaseConfig.Version)
+	require.Equal(t, "pguser", got.DatabaseConfig.LoginRole)
+	require.Equal(t, "pgpass", got.DatabaseConfig.Password)
+	require.Equal(t, "mydb", got.DatabaseConfig.DBName)
+	require.Equal(t, loka.DatabaseRolePrimary, got.DatabaseConfig.Role)
+	require.NotNil(t, got.DatabaseConfig.Backup)
+	require.True(t, got.DatabaseConfig.Backup.Enabled)
+	require.Equal(t, "0 */6 * * *", got.DatabaseConfig.Backup.Schedule)
+	require.Equal(t, 7, got.DatabaseConfig.Backup.Retention)
+	require.True(t, got.DatabaseConfig.Backup.WAL)
+}
+
+func TestServiceDatabaseConfigNil(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	svc := newTestService("no-db-svc", loka.ServiceStatusRunning, "worker-1")
+	// DatabaseConfig is nil by default.
+	require.Nil(t, svc.DatabaseConfig)
+
+	require.NoError(t, s.Services().Create(ctx, svc))
+
+	got, err := s.Services().Get(ctx, svc.ID)
+	require.NoError(t, err)
+	require.Nil(t, got.DatabaseConfig)
+}
+
+func TestServiceDatabaseConfigReplicaRoundtrip(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	svc := newTestService("db-replica", loka.ServiceStatusRunning, "worker-1")
+	svc.DatabaseConfig = &loka.DatabaseConfig{
+		Engine:    "mysql",
+		Version:   "8.0",
+		LoginRole:  "repl",
+		Password:  "replpass",
+		DBName:    "appdb",
+		Role:      loka.DatabaseRoleReplica,
+		PrimaryID: "primary-svc-id-123",
+	}
+
+	require.NoError(t, s.Services().Create(ctx, svc))
+
+	got, err := s.Services().Get(ctx, svc.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.DatabaseConfig)
+	require.Equal(t, loka.DatabaseRoleReplica, got.DatabaseConfig.Role)
+	require.Equal(t, "primary-svc-id-123", got.DatabaseConfig.PrimaryID)
+}
+
+func TestServiceDatabaseConfigUpdate(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	svc := newTestService("update-db-svc", loka.ServiceStatusRunning, "worker-1")
+	svc.DatabaseConfig = &loka.DatabaseConfig{
+		Engine:   "redis",
+		Version:  "7",
+		Password: "oldpass",
+		Role:     loka.DatabaseRolePrimary,
+	}
+	require.NoError(t, s.Services().Create(ctx, svc))
+
+	// Update the password.
+	svc.DatabaseConfig.Password = "newpass"
+	require.NoError(t, s.Services().Update(ctx, svc))
+
+	got, err := s.Services().Get(ctx, svc.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.DatabaseConfig)
+	require.Equal(t, "newpass", got.DatabaseConfig.Password)
+}
+
+func TestServiceListByIsDatabase(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	// Create 2 regular services and 2 database services.
+	svc1 := newTestService("regular-1", loka.ServiceStatusRunning, "worker-1")
+	svc2 := newTestService("regular-2", loka.ServiceStatusRunning, "worker-1")
+	db1 := newTestService("db-postgres", loka.ServiceStatusRunning, "worker-1")
+	db1.DatabaseConfig = &loka.DatabaseConfig{Engine: "postgres", Version: "16", Role: loka.DatabaseRolePrimary}
+	db2 := newTestService("db-redis", loka.ServiceStatusRunning, "worker-1")
+	db2.DatabaseConfig = &loka.DatabaseConfig{Engine: "redis", Version: "7", Role: loka.DatabaseRolePrimary}
+
+	require.NoError(t, s.Services().Create(ctx, svc1))
+	require.NoError(t, s.Services().Create(ctx, svc2))
+	require.NoError(t, s.Services().Create(ctx, db1))
+	require.NoError(t, s.Services().Create(ctx, db2))
+
+	// Filter: only databases.
+	isDB := true
+	dbs, total, err := s.Services().List(ctx, store.ServiceFilter{IsDatabase: &isDB})
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	require.Len(t, dbs, 2)
+	for _, svc := range dbs {
+		require.NotNil(t, svc.DatabaseConfig, "expected DatabaseConfig for %s", svc.Name)
+	}
+
+	// Filter: only non-databases.
+	notDB := false
+	svcs, total, err := s.Services().List(ctx, store.ServiceFilter{IsDatabase: &notDB})
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	require.Len(t, svcs, 2)
+	for _, svc := range svcs {
+		require.Nil(t, svc.DatabaseConfig, "expected nil DatabaseConfig for %s", svc.Name)
+	}
+
+	// No filter: returns all.
+	all, total, err := s.Services().List(ctx, store.ServiceFilter{})
+	require.NoError(t, err)
+	require.Equal(t, 4, total)
+	require.Len(t, all, 4)
+}
+
+func TestServiceListByIsDatabaseInList(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	// Verify that the IsDatabase filter works correctly with the List method
+	// when combined with other filters.
+	db := newTestService("db-filtered", loka.ServiceStatusStopped, "worker-1")
+	db.DatabaseConfig = &loka.DatabaseConfig{Engine: "postgres", Version: "16", Role: loka.DatabaseRolePrimary}
+	regular := newTestService("regular-filtered", loka.ServiceStatusStopped, "worker-1")
+
+	require.NoError(t, s.Services().Create(ctx, db))
+	require.NoError(t, s.Services().Create(ctx, regular))
+
+	// Filter by status AND isDatabase.
+	stopped := loka.ServiceStatusStopped
+	isDB := true
+	svcs, total, err := s.Services().List(ctx, store.ServiceFilter{Status: &stopped, IsDatabase: &isDB})
+	require.NoError(t, err)
+	require.Equal(t, 1, total)
+	require.Len(t, svcs, 1)
+	require.Equal(t, "db-filtered", svcs[0].Name)
+}
+
+func TestServiceUsesRoundtrip(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	svc := newTestService("uses-svc", loka.ServiceStatusRunning, "worker-1")
+	svc.Uses = map[string]string{
+		"db":    "mydb",
+		"cache": "shared-redis",
+	}
+
+	require.NoError(t, s.Services().Create(ctx, svc))
+
+	got, err := s.Services().Get(ctx, svc.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Uses)
+	require.Equal(t, "mydb", got.Uses["db"])
+	require.Equal(t, "shared-redis", got.Uses["cache"])
+}
+
+func TestServiceUsesNil(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	svc := newTestService("no-uses-svc", loka.ServiceStatusRunning, "worker-1")
+	// Uses is nil by default.
+
+	require.NoError(t, s.Services().Create(ctx, svc))
+
+	got, err := s.Services().Get(ctx, svc.ID)
+	require.NoError(t, err)
+	require.Empty(t, got.Uses)
+}
+
+func TestServiceListByPrimaryID(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	primary := newTestService("primary-svc", loka.ServiceStatusRunning, "worker-1")
+	primary.DatabaseConfig = &loka.DatabaseConfig{Engine: "postgres", Version: "16", Role: loka.DatabaseRolePrimary}
+	require.NoError(t, s.Services().Create(ctx, primary))
+
+	replica1 := newTestService("replica-1", loka.ServiceStatusRunning, "worker-1")
+	replica1.DatabaseConfig = &loka.DatabaseConfig{
+		Engine: "postgres", Version: "16", Role: loka.DatabaseRoleReplica, PrimaryID: primary.ID,
+	}
+	require.NoError(t, s.Services().Create(ctx, replica1))
+
+	replica2 := newTestService("replica-2", loka.ServiceStatusRunning, "worker-1")
+	replica2.DatabaseConfig = &loka.DatabaseConfig{
+		Engine: "postgres", Version: "16", Role: loka.DatabaseRoleReplica, PrimaryID: primary.ID,
+	}
+	require.NoError(t, s.Services().Create(ctx, replica2))
+
+	// Unrelated replica (different primary).
+	other := newTestService("other-replica", loka.ServiceStatusRunning, "worker-1")
+	other.DatabaseConfig = &loka.DatabaseConfig{
+		Engine: "postgres", Version: "16", Role: loka.DatabaseRoleReplica, PrimaryID: "other-primary-id",
+	}
+	require.NoError(t, s.Services().Create(ctx, other))
+
+	// Filter by PrimaryID.
+	svcs, total, err := s.Services().List(ctx, store.ServiceFilter{PrimaryID: &primary.ID})
+	require.NoError(t, err)
+	require.Equal(t, 2, total)
+	require.Len(t, svcs, 2)
+	for _, svc := range svcs {
+		require.Equal(t, primary.ID, svc.DatabaseConfig.PrimaryID)
+	}
+}
+
+func TestServiceListByPrimaryID_WithWildcards(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	// Create a service with a normal PrimaryID.
+	svc := newTestService("wildcard-test", loka.ServiceStatusRunning, "worker-1")
+	svc.DatabaseConfig = &loka.DatabaseConfig{
+		Engine: "postgres", Version: "16", Role: loka.DatabaseRoleReplica, PrimaryID: "real-primary-id",
+	}
+	require.NoError(t, s.Services().Create(ctx, svc))
+
+	// Filter with "%" wildcard — should NOT match everything.
+	wildcard := "%"
+	svcs, total, err := s.Services().List(ctx, store.ServiceFilter{PrimaryID: &wildcard})
+	require.NoError(t, err)
+	// The LIKE query embeds "%" literally inside the JSON pattern, so
+	// searching for PrimaryID="%" should not match "real-primary-id".
+	require.Equal(t, 0, total, "wildcard %% in PrimaryID should not match real IDs")
+	require.Len(t, svcs, 0)
+}
+
+func TestUnmarshalDatabaseConfig_InvalidJSON(t *testing.T) {
+	// Directly test the unmarshal helper.
+	var svc loka.Service
+	unmarshalDatabaseConfig("{broken json", &svc)
+	require.Nil(t, svc.DatabaseConfig, "malformed JSON should result in nil DatabaseConfig")
+}
+
+func TestUnmarshalDatabaseConfig_EmptyString(t *testing.T) {
+	var svc loka.Service
+	unmarshalDatabaseConfig("", &svc)
+	require.Nil(t, svc.DatabaseConfig, "empty string should result in nil DatabaseConfig")
+}
+
 func TestServiceJSONFields(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()
@@ -302,9 +574,9 @@ func TestServiceJSONFields(t *testing.T) {
 
 	// Set up complex JSON fields.
 	svc.Routes = []loka.ServiceRoute{
-		{Subdomain: "api", Port: 8080, Protocol: "http"},
+		{Domain: "api", Port: 8080, Protocol: "http"},
 		{CustomDomain: "app.example.com", Port: 443, Protocol: "http"},
-		{Subdomain: "grpc", Port: 9090, Protocol: "grpc"},
+		{Domain: "grpc", Port: 9090, Protocol: "grpc"},
 	}
 	svc.Mounts = []loka.Volume{
 		{Path: "/data", Provider: "volume", Name: "data-vol", Access: "readwrite"},
@@ -339,7 +611,7 @@ func TestServiceJSONFields(t *testing.T) {
 
 	// Routes round-trip.
 	require.Len(t, got.Routes, 3)
-	require.Equal(t, "api", got.Routes[0].Subdomain)
+	require.Equal(t, "api", got.Routes[0].Domain)
 	require.Equal(t, "app.example.com", got.Routes[1].CustomDomain)
 	require.Equal(t, 443, got.Routes[1].Port)
 	require.Equal(t, "grpc", got.Routes[2].Protocol)

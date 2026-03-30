@@ -24,11 +24,18 @@ type DNSToggler interface {
 }
 
 func (s *Server) registerAdminRoutes(r chi.Router) {
-	r.Post("/admin/gc", s.triggerGC)
-	r.Get("/admin/gc/status", s.gcStatus)
-	r.Get("/admin/retention", s.retentionConfig)
-	r.Post("/admin/dns", s.toggleDNS)
-	r.Get("/debug/raft", s.getRaftStatus)
+	// Admin routes require an additional admin key if configured.
+	// This prevents regular API key holders from accessing privileged operations.
+	r.Group(func(r chi.Router) {
+		if s.adminKey != "" {
+			r.Use(adminKeyAuth(s.adminKey))
+		}
+		r.Post("/admin/gc", s.triggerGC)
+		r.Get("/admin/gc/status", s.gcStatus)
+		r.Get("/admin/retention", s.retentionConfig)
+		r.Post("/admin/dns", s.toggleDNS)
+		r.Get("/debug/raft", s.getRaftStatus)
+	})
 }
 
 func (s *Server) triggerGC(w http.ResponseWriter, r *http.Request) {

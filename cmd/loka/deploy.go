@@ -51,6 +51,10 @@ type lokaYAML struct {
 	// Idle timeout in seconds (0 = never idle).
 	IdleTimeout int `yaml:"idle_timeout,omitempty"`
 
+	// Network ACL: which external services/databases this service can access.
+	// Supports list form (["mydb"]) or map form ({"db": "mydb"}).
+	Uses interface{} `yaml:"uses,omitempty"`
+
 	// Multi-component service.
 	Components map[string]lokaComponentYAML `yaml:"components,omitempty"`
 }
@@ -67,6 +71,7 @@ type lokaComponentYAML struct {
 	Include   []string          `yaml:"include,omitempty"`
 	Mounts    []loka.Volume     `yaml:"mounts,omitempty"`
 	DependsOn []string          `yaml:"depends_on,omitempty"`
+	Uses      interface{}       `yaml:"uses,omitempty"`
 	Command   string            `yaml:"command,omitempty"`
 
 	// Monorepo path reference.
@@ -472,6 +477,9 @@ Examples:
 			}
 			if cfg.IdleTimeout > 0 {
 				deployReq["idle_timeout"] = cfg.IdleTimeout
+			}
+			if cfg.Uses != nil {
+				deployReq["uses"] = loka.NormalizeUses(cfg.Uses)
 			}
 
 			// Always use client-side polling (not ?wait=true) so we can show progress.

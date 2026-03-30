@@ -20,6 +20,34 @@ func newSpaceCmd() *cobra.Command {
 		newDeployDownCmd(),
 		newDeployStatusCmd(),
 		newDeployDestroyCmd(),
+		newSpaceCreateCmd(),
+		newConnectCmd(),
+		newProviderCmd(),
+		newDeployFileCmd(),
+		newDeployExportCmd(),
+		newDeployRenameCmd(),
+	)
+	return cmd
+}
+
+func newSpaceCreateCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "create",
+		Short: "Create a new LOKA space",
+		Long: `Create a new LOKA space on local, cloud, or VM infrastructure.
+
+  loka space create local --name dev
+  loka space create aws --name prod --region us-east-1 --workers 3
+  loka space create vm --name staging --cp 10.0.0.1`,
+	}
+	cmd.AddCommand(
+		newDeployLocalCmd(),
+		newDeployCloudCmd("aws", "Deploy to AWS (EC2)", deployAWS),
+		newDeployCloudCmd("gcp", "Deploy to Google Cloud", deployGCP),
+		newDeployCloudCmd("azure", "Deploy to Azure", deployAzure),
+		newDeployCloudCmd("do", "Deploy to DigitalOcean", deployDigitalOcean),
+		newDeployCloudCmd("ovh", "Deploy to OVH", deployOVH),
+		newDeployVMCmd(),
 	)
 	return cmd
 }
@@ -30,7 +58,7 @@ func newSpaceListCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			store, _ := loadDeployments()
 			if len(store.Deployments) == 0 {
-				fmt.Println("No spaces. Set one up: loka setup local --name dev")
+				fmt.Println("No spaces. Set one up: loka space create local --name dev")
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -56,7 +84,7 @@ func newSpaceCurrentCmd() *cobra.Command {
 			store, _ := loadDeployments()
 			d := store.GetActive()
 			if d == nil {
-				fmt.Println("No active space. Set one up: loka setup local")
+				fmt.Println("No active space. Set one up: loka space create local")
 				return nil
 			}
 			fmt.Printf("Name:     %s\n", d.Name)

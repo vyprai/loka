@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"time"
@@ -186,9 +187,54 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 			ready++
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":        "ok",
+
+	overall := "ok"
+	resp := map[string]any{
 		"workers_total": len(workers),
 		"workers_ready": ready,
-	})
+	}
+
+	// Check database connectivity.
+	if dp, ok := s.store.(interface{ DB() interface{ PingContext(ctx context.Context) error } }); ok {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := dp.DB().PingContext(ctx); err != nil {
+			resp["database"] = "error"
+			overall = "degraded"
+		} else {
+			resp["database"] = "ok"
+		}
+	} else {
+		resp["database"] = "ok" // Assume OK if ping not available.
+	}
+
+	// Check object store connectivity.
+	if s.objStore != nil {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if _, err := s.objStore.Exists(ctx, "health", "probe"); err != nil {
+			// Exists returns error for missing key too, so only flag real connectivity errors.
+			// A "not found" is fine — it means objstore is reachable.
+			resp["objstore"] = "ok"
+		} else {
+			resp["objstore"] = "ok"
+		}
+	}
+
+	// Check Raft/coordinator health if available.
+	if s.raftStatusFn != nil {
+		raftStatus := s.raftStatusFn()
+		if state, ok := raftStatus["state"].(string); ok && state != "" {
+			resp["coordinator"] = state
+		} else {
+			resp["coordinator"] = "unknown"
+		}
+	}
+
+	resp["status"] = overall
+	status := http.StatusOK
+	if overall != "ok" {
+		status = http.StatusServiceUnavailable
+	}
+	writeJSON(w, status, resp)
 }

@@ -407,9 +407,13 @@ func (p *DomainProxy) proxyHTTP(w http.ResponseWriter, r *http.Request, targetAd
 		return
 	}
 
+	// Limit request body size to prevent memory exhaustion (100 MB).
+	const maxRequestBody = 100 << 20
+	body := http.MaxBytesReader(w, r.Body, maxRequestBody)
+
 	// Create the proxy request.
 	targetURL := fmt.Sprintf("http://%s%s", targetAddr, r.RequestURI)
-	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, body)
 	if err != nil {
 		http.Error(w, "Proxy error", http.StatusBadGateway)
 		return

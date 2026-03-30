@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	crypto_tls "crypto/tls"
+	"crypto/subtle"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
@@ -13,10 +14,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
+	grpccodes "google.golang.org/grpc/codes"
+	grpcmetadata "google.golang.org/grpc/metadata"
+	grpcstatus "google.golang.org/grpc/status"
 
 	"github.com/vyprai/loka/internal/config"
 	"github.com/vyprai/loka/internal/controlplane"
@@ -335,6 +340,14 @@ func main() {
 		}
 		caCertPath = caPath
 		logger.Info("auto-TLS enabled", "ca_cert", caPath, "server_cert", certPath)
+
+		// Warn if certs are expiring soon.
+		if expiry := tlsutil.CertExpiry(certPath); !expiry.IsZero() {
+			daysLeft := int(time.Until(expiry).Hours() / 24)
+			if daysLeft < 90 {
+				logger.Warn("TLS server cert expiring soon", "expires", expiry.Format("2006-01-02"), "days_left", daysLeft)
+			}
+		}
 	} else {
 		// Plaintext mode.
 		logger.Warn("════════════════════════════════════════")
@@ -582,6 +595,11 @@ func main() {
 	// ── Initialize task manager ────────────────────────────
 	taskMgr := lokatask.NewManager(db, registry, sched, imgMgr, logger)
 
+	// Set credential encryption key if configured.
+	if cfg.Auth.EncryptionKey != "" {
+		loka.EncryptionKey = cfg.Auth.EncryptionKey
+	}
+
 	// ── Initialize API server ───────────────────────────────
 	srv := api.NewServer(sm, registry, providerRegistry, imgMgr, drainer, db, logger, api.ServerOpts{
 		APIKey:         cfg.Auth.APIKey,
@@ -657,6 +675,37 @@ func main() {
 	if serverTLSCfg != nil {
 		grpcOpts = append(grpcOpts, grpc.Creds(credentials.NewTLS(serverTLSCfg)))
 	}
+	// Chain gRPC interceptors: auth + timeout.
+	grpcOpts = append(grpcOpts, grpc.ChainUnaryInterceptor(
+		// Auth interceptor: validate API key from gRPC metadata.
+		func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			if cfg.Auth.APIKey == "" {
+				return handler(ctx, req) // Auth disabled.
+			}
+			md, ok := grpcmetadata.FromIncomingContext(ctx)
+			if !ok {
+				return nil, grpcstatus.Errorf(grpccodes.Unauthenticated, "missing metadata")
+			}
+			tokens := md.Get("authorization")
+			if len(tokens) == 0 {
+				return nil, grpcstatus.Errorf(grpccodes.Unauthenticated, "authorization required")
+			}
+			token := strings.TrimPrefix(tokens[0], "Bearer ")
+			if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.Auth.APIKey)) != 1 {
+				return nil, grpcstatus.Errorf(grpccodes.PermissionDenied, "invalid API key")
+			}
+			return handler(ctx, req)
+		},
+		// Timeout interceptor: enforce deadline on all unary RPCs.
+		func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+			if _, ok := ctx.Deadline(); !ok {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 5*time.Minute)
+				defer cancel()
+			}
+			return handler(ctx, req)
+		},
+	))
 	grpcSrv := grpc.NewServer(grpcOpts...)
 	grpcAPI := api.NewGRPCServer(sm, registry, logger)
 	grpcAPI.Register(grpcSrv)
@@ -680,19 +729,30 @@ func main() {
 		<-sigCh
 		logger.Info("shutting down...")
 		cancel()
+
+		// Use a bounded context so stuck connections don't hang shutdown.
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+
 		if localWorker != nil {
 			localWorker.Stop()
 		}
 		sm.Close()
 		svcMgr.Close()
 		if domainServer != nil {
-			domainServer.Shutdown(context.Background())
+			if err := domainServer.Shutdown(shutdownCtx); err != nil {
+				logger.Warn("domain server shutdown timeout", "error", err)
+			}
 		}
 		if registryServer != nil {
-			registryServer.Shutdown(context.Background())
+			if err := registryServer.Shutdown(shutdownCtx); err != nil {
+				logger.Warn("registry server shutdown timeout", "error", err)
+			}
 		}
 		grpcSrv.GracefulStop()
-		httpServer.Shutdown(context.Background())
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("http server shutdown timeout", "error", err)
+		}
 	}()
 
 	// ── Start HTTP server ───────────────────────────────────

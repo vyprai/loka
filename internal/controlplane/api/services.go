@@ -33,6 +33,7 @@ type deployServiceReq struct {
 	Labels         map[string]string     `json:"labels,omitempty"`
 	Mounts         []loka.Volume    `json:"mounts,omitempty"`
 	Autoscale      *loka.AutoscaleConfig `json:"autoscale,omitempty"`
+	Uses           map[string]string     `json:"uses,omitempty"`
 }
 
 func (s *Server) deployService(w http.ResponseWriter, r *http.Request) {
@@ -63,6 +64,7 @@ func (s *Server) deployService(w http.ResponseWriter, r *http.Request) {
 		Labels:         req.Labels,
 		Mounts:         req.Mounts,
 		Autoscale:      req.Autoscale,
+		Uses:           req.Uses,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -116,6 +118,18 @@ func (s *Server) listServices(w http.ResponseWriter, r *http.Request) {
 		if v, err := strconv.Atoi(offsetStr); err == nil {
 			filter.Offset = v
 		}
+	}
+	// By default, hide database instances from service list.
+	// Use ?type=database to show only databases, or ?type=all for everything.
+	switch r.URL.Query().Get("type") {
+	case "database":
+		isDB := true
+		filter.IsDatabase = &isDB
+	case "all":
+		// No filter — show everything.
+	default:
+		isDB := false
+		filter.IsDatabase = &isDB
 	}
 
 	services, total, err := s.serviceManager.List(r.Context(), filter)

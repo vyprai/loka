@@ -113,6 +113,20 @@ func (ts *testServer) doRequest(t *testing.T, method, path string, body any, hea
 	return rec
 }
 
+// decodeErrorMsg extracts the error message from a standardized error response.
+func decodeErrorMsg(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	return body.Error.Message
+}
+
 // decodeBody is a test helper that decodes a JSON response into dst.
 func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, dst any) {
 	t.Helper()
@@ -696,10 +710,22 @@ func TestRESTErrorResponseFormat(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d", rec.Code)
 	}
-	var body map[string]string
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Status  int    `json:"status"`
+		} `json:"error"`
+	}
 	decodeBody(t, rec, &body)
-	if _, ok := body["error"]; !ok {
-		t.Error("expected 'error' key in response body")
+	if body.Error.Code == "" {
+		t.Error("expected non-empty error code")
+	}
+	if body.Error.Message == "" {
+		t.Error("expected non-empty error message")
+	}
+	if body.Error.Status != 404 {
+		t.Errorf("expected error status 404, got %d", body.Error.Status)
 	}
 }
 
@@ -1228,10 +1254,9 @@ func TestRESTListArtifacts_SessionNotFound(t *testing.T) {
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var body map[string]string
-	decodeBody(t, rec, &body)
-	if _, ok := body["error"]; !ok {
-		t.Error("expected 'error' key in response body")
+	errMsg := decodeErrorMsg(t, rec)
+	if errMsg == "" {
+		t.Error("expected non-empty error message")
 	}
 }
 
@@ -1289,9 +1314,8 @@ func TestRESTDownloadArtifact_MissingPath(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var body map[string]string
-	decodeBody(t, rec, &body)
-	if body["error"] == "" {
+	errMsg := decodeErrorMsg(t, rec)
+	if errMsg == "" {
 		t.Error("expected non-empty error message")
 	}
 }

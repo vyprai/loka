@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vyprai/loka/internal/config"
+	"github.com/vyprai/loka/internal/controlplane/database"
 	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/internal/controlplane/service"
 	"github.com/vyprai/loka/internal/controlplane/session"
@@ -42,8 +44,10 @@ type Server struct {
 	volumeManager    *volume.Manager // Named volume lifecycle manager.
 	lockManager      *lock.Manager  // Distributed file lock manager.
 	taskManager      *task.Manager  // One-time task manager.
+	backupManager    *database.BackupManager // Database backup scheduler.
 	domainProxy      *DomainProxy // Domain proxy for domain routing.
 	registryStore    *registry.Store // OCI registry blob/manifest store.
+	adminKey         string          // Separate key for admin endpoints (optional; if empty, same as apiKey).
 	raftStatusFn     RaftStatusFn    // Optional: returns Raft cluster status for debug endpoint.
 	dnsToggler       DNSToggler      // Optional: toggles the embedded DNS server at runtime.
 }
@@ -79,12 +83,19 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		volMgr = volume.NewManager(s, o.ObjStore, o.DataDir, logger)
 	}
 
+	// Create backup manager if object store is available.
+	var backupMgr *database.BackupManager
+	if o.ObjStore != nil {
+		backupMgr = database.NewBackupManager(s, o.ObjStore, logger)
+	}
+
 	srv := &Server{
 		router:           chi.NewRouter(),
 		sessionManager:   sm,
 		serviceManager:   o.ServiceManager,
 		volumeManager:    volMgr,
-		lockManager:      lock.NewManager(),
+		backupManager:    backupMgr,
+		lockManager:      lock.NewManager(extractDB(s)),
 		taskManager:      o.TaskManager,
 		workerRegistry:   reg,
 		providerRegistry: provReg,
@@ -132,7 +143,7 @@ func (s *Server) NewRegistryAPI() *RegistryServer {
 // serveCACert serves the auto-generated CA certificate.
 // Clients use this to bootstrap TLS trust:
 //   curl -k https://server:6840/ca.crt -o ca.crt
-//   loka connect https://server:6840 --ca-cert ca.crt
+//   loka space connect https://server:6840 --ca-cert ca.crt
 func (s *Server) serveCACert(w http.ResponseWriter, r *http.Request) {
 	if s.caCertPath == "" {
 		writeError(w, http.StatusNotFound, "no CA certificate configured")
@@ -223,6 +234,28 @@ func (s *Server) routes() {
 		r.Delete("/services/{id}/routes/{domain}", s.removeServiceRoute)
 		r.Get("/services/{id}/routes", s.listServiceRoutes)
 
+		// Databases — managed database instances.
+		r.Post("/databases", s.createDatabase)
+		r.Get("/databases", s.listDatabases)
+		r.Get("/databases/{id}", s.getDatabase)
+		r.Delete("/databases/{id}", s.destroyDatabase)
+		r.Post("/databases/{id}/stop", s.stopDatabase)
+		r.Post("/databases/{id}/start", s.startDatabase)
+		r.Get("/databases/{id}/logs", s.getDatabaseLogs)
+		r.Get("/databases/{id}/credentials", s.getDatabaseCredentials)
+		r.Post("/databases/{id}/credentials/rotate", s.rotateDatabaseCredentials)
+		r.Put("/databases/{id}/credentials", s.setDatabaseCredentials)
+		r.Post("/databases/{id}/replicas", s.addDatabaseReplica)
+		r.Delete("/databases/{id}/replicas/{rid}", s.removeDatabaseReplica)
+		r.Get("/databases/{id}/replicas", s.listDatabaseReplicas)
+		r.Post("/databases/{id}/backups", s.createDatabaseBackup)
+		r.Get("/databases/{id}/backups", s.listDatabaseBackups)
+		r.Post("/databases/{id}/restore", s.restoreDatabase)
+		r.Post("/databases/{id}/backups/{backupId}/verify", s.verifyDatabaseBackup)
+		r.Post("/databases/{id}/upgrade", s.upgradeDatabase)
+		r.Post("/databases/{id}/upgrade/rollback", s.rollbackDatabaseUpgrade)
+		r.Post("/databases/{id}/force-stop", s.forceStopDatabase)
+
 		// Object store — public API.
 		r.Put("/objstore/objects/{bucket}/*", s.objStorePut)
 		r.Get("/objstore/objects/{bucket}/*", s.objStoreGet)
@@ -293,11 +326,82 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// Error code constants for standardized API error responses.
+const (
+	ErrCodeBadRequest     = "BAD_REQUEST"
+	ErrCodeUnauthorized   = "UNAUTHORIZED"
+	ErrCodeForbidden      = "FORBIDDEN"
+	ErrCodeNotFound       = "NOT_FOUND"
+	ErrCodeConflict       = "CONFLICT"
+	ErrCodeTooMany        = "TOO_MANY_REQUESTS"
+	ErrCodeInternal       = "INTERNAL_ERROR"
+	ErrCodeUnavailable    = "SERVICE_UNAVAILABLE"
+	ErrCodeDBNotFound     = "DATABASE_NOT_FOUND"
+	ErrCodeInvalidEngine  = "INVALID_ENGINE"
+	ErrCodeInvalidVersion = "INVALID_VERSION"
+	ErrCodeBackupNotFound = "BACKUP_NOT_FOUND"
+	ErrCodeUpgradeFailed  = "UPGRADE_FAILED"
+)
+
+// statusToCode maps HTTP status codes to default error codes.
+func statusToCode(status int) string {
+	switch status {
+	case 400:
+		return ErrCodeBadRequest
+	case 401:
+		return ErrCodeUnauthorized
+	case 403:
+		return ErrCodeForbidden
+	case 404:
+		return ErrCodeNotFound
+	case 409:
+		return ErrCodeConflict
+	case 429:
+		return ErrCodeTooMany
+	case 503:
+		return ErrCodeUnavailable
+	default:
+		return ErrCodeInternal
+	}
+}
+
 func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+	writeJSON(w, status, map[string]any{
+		"error": map[string]any{
+			"code":    statusToCode(status),
+			"message": msg,
+			"status":  status,
+		},
+	})
+}
+
+// writeErrorCode writes an error with an explicit error code.
+func writeErrorCode(w http.ResponseWriter, status int, code, msg string) {
+	writeJSON(w, status, map[string]any{
+		"error": map[string]any{
+			"code":    code,
+			"message": msg,
+			"status":  status,
+		},
+	})
 }
 
 func decodeJSON(r *http.Request, v any) error {
+	// Limit request body to 10MB to prevent OOM attacks.
+	r.Body = http.MaxBytesReader(nil, r.Body, 10*1024*1024)
 	defer r.Body.Close()
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// dbProvider is implemented by store backends that expose their *sql.DB.
+type dbProvider interface {
+	DB() *sql.DB
+}
+
+// extractDB returns the underlying *sql.DB from a store, or nil if unavailable.
+func extractDB(s store.Store) *sql.DB {
+	if p, ok := s.(dbProvider); ok {
+		return p.DB()
+	}
+	return nil
 }

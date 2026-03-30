@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -25,8 +26,15 @@ type RegistryServer struct {
 	uploadsMu sync.Mutex
 }
 
+const (
+	maxUploadTotalSize = 5 * 1024 * 1024 * 1024 // 5GB max per upload
+	maxUploadAge       = 1 * time.Hour
+)
+
 type uploadState struct {
-	buf []byte
+	mu        sync.Mutex
+	buf       []byte
+	createdAt time.Time
 }
 
 // NewRegistryServer creates a new OCI registry API server.
@@ -212,6 +220,7 @@ func (rs *RegistryServer) headManifest(w http.ResponseWriter, r *http.Request, n
 
 // putManifest handles PUT /v2/{name}/manifests/{reference}.
 func (rs *RegistryServer) putManifest(w http.ResponseWriter, r *http.Request, name, reference string) {
+	r.Body = http.MaxBytesReader(nil, r.Body, 10*1024*1024) // 10MB max for manifests
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeRegistryError(w, http.StatusBadRequest, "MANIFEST_INVALID", "failed to read body")
@@ -279,7 +288,7 @@ func (rs *RegistryServer) startUpload(w http.ResponseWriter, r *http.Request, na
 	uploadID := uuid.New().String()
 
 	rs.uploadsMu.Lock()
-	rs.uploads[uploadID] = &uploadState{}
+	rs.uploads[uploadID] = &uploadState{createdAt: time.Now()}
 	rs.uploadsMu.Unlock()
 
 	w.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
@@ -300,16 +309,28 @@ func (rs *RegistryServer) uploadChunk(w http.ResponseWriter, r *http.Request, na
 		return
 	}
 
+	// Reject expired uploads.
+	if time.Since(state.createdAt) > maxUploadAge {
+		writeRegistryError(w, http.StatusBadRequest, "BLOB_UPLOAD_INVALID", "upload session expired")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(nil, r.Body, 1*1024*1024*1024) // 1GB max per chunk
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeRegistryError(w, http.StatusInternalServerError, "UNKNOWN", "failed to read chunk")
 		return
 	}
 
-	rs.uploadsMu.Lock()
+	state.mu.Lock()
+	if int64(len(state.buf))+int64(len(data)) > maxUploadTotalSize {
+		state.mu.Unlock()
+		writeRegistryError(w, http.StatusRequestEntityTooLarge, "BLOB_UPLOAD_INVALID", "upload exceeds 5GB limit")
+		return
+	}
 	state.buf = append(state.buf, data...)
 	offset := len(state.buf)
-	rs.uploadsMu.Unlock()
+	state.mu.Unlock()
 
 	w.Header().Set("Docker-Distribution-Api-Version", "registry/2.0")
 	w.Header().Set("Location", fmt.Sprintf("/v2/%s/blobs/uploads/%s", name, uploadID))
@@ -339,6 +360,7 @@ func (rs *RegistryServer) completeUpload(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Read any remaining body data.
+	r.Body = http.MaxBytesReader(nil, r.Body, 1*1024*1024*1024) // 1GB max
 	remaining, err := io.ReadAll(r.Body)
 	if err == nil && len(remaining) > 0 {
 		state.buf = append(state.buf, remaining...)

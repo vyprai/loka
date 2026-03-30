@@ -63,6 +63,8 @@ type Service struct {
 	AppSnapshotState string // Objstore key for app-level vmstate snapshot.
 	ForwardPort      int    // Local TCP port that tunnels to VM service port via vsock.
 	GuestIP          string // VM guest IP for direct TCP routing (TAP networking).
+	DatabaseConfig *DatabaseConfig `json:"DatabaseConfig,omitempty"` // Non-nil = managed database instance.
+	Uses           map[string]string `json:"Uses,omitempty"`        // Network ACL: alias→target service/db name.
 	Ready          bool
 	StatusMessage  string
 	LastActivity   time.Time

@@ -52,6 +52,24 @@ var migrations = []string{
 	`ALTER TABLE services ADD COLUMN IF NOT EXISTS forward_port INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE services ADD COLUMN IF NOT EXISTS app_snapshot_mem TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE services ADD COLUMN IF NOT EXISTS app_snapshot_state TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE services ADD COLUMN IF NOT EXISTS database_config TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE services ADD COLUMN IF NOT EXISTS uses TEXT NOT NULL DEFAULT '{}'`,
+	`CREATE TABLE IF NOT EXISTS file_locks (
+		lock_key    TEXT PRIMARY KEY,
+		volume      TEXT NOT NULL,
+		path        TEXT NOT NULL,
+		worker_id   TEXT NOT NULL,
+		exclusive   INTEGER NOT NULL DEFAULT 1,
+		acquired_at TEXT NOT NULL,
+		expires_at  TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_file_locks_volume ON file_locks(volume)`,
+	`CREATE INDEX IF NOT EXISTS idx_file_locks_expires ON file_locks(expires_at)`,
+}
+
+// DB returns the underlying *sql.DB for components that need raw access.
+func (s *Store) DB() *sql.DB {
+	return s.db
 }
 
 func (s *Store) Close() error {

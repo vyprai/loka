@@ -14,6 +14,7 @@ func (s *Server) registerInternalRoutes() {
 	s.router.Route("/api/internal", func(r chi.Router) {
 		r.Use(workerTokenAuth(s.store))
 		r.Post("/workers/register", s.internalRegisterWorker)
+		r.Post("/workers/heartbeat", s.internalWorkerHeartbeat)
 		r.Post("/exec/complete", s.internalExecComplete)
 		r.Post("/sessions/status", s.internalSessionStatus)
 
@@ -49,6 +50,57 @@ func (s *Server) internalRegisterWorker(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"worker_id": worker.ID})
+}
+
+type heartbeatReq struct {
+	WorkerID     string             `json:"worker_id"`
+	Status       string             `json:"status"`
+	SessionCount int                `json:"session_count"`
+	SessionIDs   []string           `json:"session_ids"`
+	Usage        loka.ResourceUsage `json:"usage"`
+}
+
+func (s *Server) internalWorkerHeartbeat(w http.ResponseWriter, r *http.Request) {
+	var req heartbeatReq
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	if req.WorkerID == "" {
+		writeError(w, http.StatusBadRequest, "worker_id required")
+		return
+	}
+	// Validate heartbeat data to prevent falsified accounting.
+	if req.SessionCount < 0 {
+		writeError(w, http.StatusBadRequest, "session_count must be non-negative")
+		return
+	}
+	if req.Usage.CPUPercent < 0 || req.Usage.CPUPercent > 100 {
+		writeError(w, http.StatusBadRequest, "CPU usage percentage must be 0-100")
+		return
+	}
+	if req.Usage.MemoryUsedMB < 0 || req.Usage.DiskUsedMB < 0 {
+		writeError(w, http.StatusBadRequest, "memory/disk usage must be non-negative")
+		return
+	}
+
+	hb := &loka.Heartbeat{
+		WorkerID:     req.WorkerID,
+		Timestamp:    time.Now(),
+		Status:       loka.WorkerStatus(req.Status),
+		SessionCount: req.SessionCount,
+		SessionIDs:   req.SessionIDs,
+		Usage:        req.Usage,
+	}
+	if err := s.workerRegistry.UpdateHeartbeat(r.Context(), req.WorkerID, hb); err != nil {
+		// Worker not found — tell it to re-register.
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"status": "unknown_worker",
+			"error":  err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 type execCompleteReq struct {
