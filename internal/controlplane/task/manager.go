@@ -41,13 +41,46 @@ type Manager struct {
 }
 
 // NewManager creates a task manager.
+// It resumes monitoring any tasks stuck in "running" or "pending" from a previous crash.
 func NewManager(s store.Store, registry *cpworker.Registry, sched *scheduler.Scheduler, images *image.Manager, logger *slog.Logger) *Manager {
-	return &Manager{
+	m := &Manager{
 		store:     s,
 		registry:  registry,
 		scheduler: sched,
 		images:    images,
 		logger:    logger,
+	}
+	m.recoverStuckTasks()
+	return m
+}
+
+// recoverStuckTasks handles tasks left in non-terminal states after a CP restart.
+// Running tasks older than 10 minutes are marked as errors since their monitoring
+// goroutine is gone. Pending tasks are also marked as errors.
+func (m *Manager) recoverStuckTasks() {
+	ctx := context.Background()
+	staleThreshold := time.Now().Add(-10 * time.Minute)
+
+	for _, status := range []loka.TaskStatus{loka.TaskStatusRunning, loka.TaskStatusPending} {
+		s := status
+		tasks, err := m.store.Tasks().List(ctx, store.TaskFilter{Status: &s})
+		if err != nil {
+			m.logger.Warn("failed to check stuck tasks", "status", s, "error", err)
+			continue
+		}
+		for _, task := range tasks {
+			if task.CreatedAt.Before(staleThreshold) {
+				task.Status = loka.TaskStatusError
+				task.StatusMessage = "interrupted by restart"
+				task.CompletedAt = time.Now()
+				task.UpdatedAt = time.Now()
+				if err := m.store.Tasks().Update(ctx, task); err != nil {
+					m.logger.Warn("failed to recover stuck task", "id", task.ID, "error", err)
+				} else {
+					m.logger.Info("recovered stuck task", "id", task.ID, "name", task.Name, "was", s)
+				}
+			}
+		}
 	}
 }
 

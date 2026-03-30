@@ -106,6 +106,25 @@ func (c *CPClient) Register(ctx context.Context, hostname, provider string, capa
 	return resp.WorkerID, err
 }
 
+// SendHeartbeat sends a heartbeat to the control plane.
+// Returns "unknown_worker" status if the CP doesn't recognize this worker.
+func (c *CPClient) SendHeartbeat(ctx context.Context, hb loka.Heartbeat) (string, error) {
+	var resp struct {
+		Status string `json:"status"`
+	}
+	err := c.post(ctx, "/api/internal/workers/heartbeat", map[string]any{
+		"worker_id":     hb.WorkerID,
+		"status":        string(hb.Status),
+		"session_count": hb.SessionCount,
+		"session_ids":   hb.SessionIDs,
+		"usage":         hb.Usage,
+	}, &resp)
+	if err != nil {
+		return "", err
+	}
+	return resp.Status, nil
+}
+
 // ReportExecComplete reports execution results to the control plane.
 func (c *CPClient) ReportExecComplete(ctx context.Context, sessionID, execID string, status loka.ExecStatus, results []loka.CommandResult, errMsg string) error {
 	return c.post(ctx, "/api/internal/exec/complete", map[string]any{

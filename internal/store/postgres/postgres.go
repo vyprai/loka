@@ -54,6 +54,9 @@ var migrations = []string{
 	`ALTER TABLE services ADD COLUMN IF NOT EXISTS app_snapshot_state TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE services ADD COLUMN IF NOT EXISTS database_config TEXT NOT NULL DEFAULT ''`,
 	`ALTER TABLE services ADD COLUMN IF NOT EXISTS uses TEXT NOT NULL DEFAULT '{}'`,
+	`ALTER TABLE services ADD COLUMN IF NOT EXISTS parent_service_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE services ADD COLUMN IF NOT EXISTS replicas INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE services ADD COLUMN IF NOT EXISTS relation_type TEXT NOT NULL DEFAULT ''`,
 	`CREATE TABLE IF NOT EXISTS file_locks (
 		lock_key    TEXT PRIMARY KEY,
 		volume      TEXT NOT NULL,

@@ -1,11 +1,11 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 
 	"github.com/vyprai/loka/internal/loka"
 	"github.com/vyprai/loka/internal/objstore"
@@ -41,8 +41,7 @@ type CheckpointResult struct {
 }
 
 // Create creates a checkpoint for a session.
-// For light checkpoints: snapshots the workspace overlay and uploads to objstore.
-// For full checkpoints: same as light + captures additional state metadata.
+// Uses a temp file instead of buffering the full tar.gz in memory.
 func (m *CheckpointManager) Create(ctx context.Context, sessionID, checkpointID string, cpType loka.CheckpointType) *CheckpointResult {
 	result := &CheckpointResult{
 		CheckpointID: checkpointID,
@@ -57,19 +56,33 @@ func (m *CheckpointManager) Create(ctx context.Context, sessionID, checkpointID 
 	}
 	result.LayerName = layerName
 
-	// 2. Tar the layer.
-	var buf bytes.Buffer
-	if err := m.overlay.TarLayer(sessionID, layerName, &buf); err != nil {
+	// 2. Tar the layer to a temp file (avoids buffering entire archive in memory).
+	tmpFile, err := os.CreateTemp("", "loka-checkpoint-*.tar.gz")
+	if err != nil {
+		result.Error = fmt.Sprintf("create temp file: %v", err)
+		return result
+	}
+	tmpPath := tmpFile.Name()
+	defer os.Remove(tmpPath)
+
+	if err := m.overlay.TarLayer(sessionID, layerName, tmpFile); err != nil {
+		tmpFile.Close()
 		result.Error = fmt.Sprintf("tar layer: %v", err)
 		return result
 	}
 
-	// 3. Upload to object store.
+	// Get size and rewind for upload.
+	size, _ := tmpFile.Seek(0, io.SeekEnd)
+	tmpFile.Seek(0, io.SeekStart)
+
+	// 3. Upload to object store from file (streaming, no heap spike).
 	overlayKey := fmt.Sprintf("sessions/%s/checkpoints/%s/overlay.tar.gz", sessionID, checkpointID)
-	if err := m.objStore.Put(ctx, checkpointBucket, overlayKey, &buf, int64(buf.Len())); err != nil {
+	if err := m.objStore.Put(ctx, checkpointBucket, overlayKey, tmpFile, size); err != nil {
+		tmpFile.Close()
 		result.Error = fmt.Sprintf("upload overlay: %v", err)
 		return result
 	}
+	tmpFile.Close()
 	result.OverlayKey = overlayKey
 
 	m.logger.Info("checkpoint created",
@@ -77,7 +90,7 @@ func (m *CheckpointManager) Create(ctx context.Context, sessionID, checkpointID 
 		"session", sessionID,
 		"type", cpType,
 		"layer", layerName,
-		"size", buf.Len(),
+		"size", size,
 	)
 
 	result.Success = true
@@ -85,23 +98,18 @@ func (m *CheckpointManager) Create(ctx context.Context, sessionID, checkpointID 
 }
 
 // Restore restores a session's workspace to a checkpoint state.
+// Streams directly from objstore to untar — no intermediate buffer.
 func (m *CheckpointManager) Restore(ctx context.Context, sessionID, checkpointID, overlayKey string) error {
-	// 1. Download overlay from object store.
+	// 1. Download overlay from object store (streaming reader).
 	reader, err := m.objStore.Get(ctx, checkpointBucket, overlayKey)
 	if err != nil {
 		return fmt.Errorf("download overlay: %w", err)
 	}
 	defer reader.Close()
 
-	// Read into buffer (needed for untar).
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, reader); err != nil {
-		return fmt.Errorf("read overlay: %w", err)
-	}
-
-	// 2. Create a layer from the downloaded data.
+	// 2. Stream directly into a new layer (no memory buffering).
 	layerName := fmt.Sprintf("restore-%s", checkpointID[:8])
-	if err := m.overlay.UntarLayer(sessionID, layerName, &buf); err != nil {
+	if err := m.overlay.UntarLayer(sessionID, layerName, reader); err != nil {
 		return fmt.Errorf("untar layer: %w", err)
 	}
 

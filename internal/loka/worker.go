@@ -18,7 +18,8 @@ const (
 type Worker struct {
 	ID           string
 	Hostname     string
-	IPAddress    string
+	IPAddress    string // Public IP (or primary IP).
+	PrivateIP    string // Private/internal IP for CP→worker traffic.
 	Provider     string
 	Region       string
 	Zone         string

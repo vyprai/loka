@@ -3,7 +3,9 @@ package image
 import (
 	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/vyprai/loka/internal/loka"
 	"github.com/vyprai/loka/internal/objstore/local"
@@ -222,5 +224,195 @@ func TestManager_ResolveRootfsPath_NotFound(t *testing.T) {
 	_, err := m.ResolveRootfsPath(nil, "nonexistent")
 	if err == nil {
 		t.Error("expected error for nonexistent image")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Layer Ref Counting Tests
+// ---------------------------------------------------------------------------
+
+func TestLayerRefCounting_RegisterAndDelete(t *testing.T) {
+	m := newTestManager(t)
+
+	// Use digests long enough for the logger's hex[:12] slice.
+	const sharedDigest = "sha256:aabbccddee001122334455667788"
+	const uniqueADigest = "sha256:1111111111111111111111111111"
+	const uniqueBDigest = "sha256:2222222222222222222222222222"
+	// After stripping "sha256:", these become the directory names.
+	sharedHex := "aabbccddee001122334455667788"
+	uniqueAHex := "1111111111111111111111111111"
+	uniqueBHex := "2222222222222222222222222222"
+
+	// Create layer directories on disk.
+	sharedDir := filepath.Join(m.dataDir, "layers", sharedHex)
+	uniqueADir := filepath.Join(m.dataDir, "layers", uniqueAHex)
+	uniqueBDir := filepath.Join(m.dataDir, "layers", uniqueBHex)
+	for _, d := range []string{sharedDir, uniqueADir, uniqueBDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Register image A with layers: shared + unique-a.
+	imgA := &loka.Image{
+		ID:        "img-a",
+		Reference: "test:a",
+		Status:    loka.ImageStatusReady,
+		Layers: []loka.ImageLayer{
+			{Digest: sharedDigest},
+			{Digest: uniqueADigest},
+		},
+	}
+	m.mu.Lock()
+	m.images[imgA.ID] = imgA
+	m.layerRefs[sharedDigest]++
+	m.layerRefs[uniqueADigest]++
+	m.mu.Unlock()
+
+	// Register image B with layers: shared + unique-b.
+	imgB := &loka.Image{
+		ID:        "img-b",
+		Reference: "test:b",
+		Status:    loka.ImageStatusReady,
+		Layers: []loka.ImageLayer{
+			{Digest: sharedDigest},
+			{Digest: uniqueBDigest},
+		},
+	}
+	m.mu.Lock()
+	m.images[imgB.ID] = imgB
+	m.layerRefs[sharedDigest]++
+	m.layerRefs[uniqueBDigest]++
+	m.mu.Unlock()
+
+	// Delete image A.
+	if err := m.Delete("img-a"); err != nil {
+		t.Fatalf("Delete img-a: %v", err)
+	}
+
+	// Shared layer should still exist (ref count was 2, now 1).
+	if _, err := os.Stat(sharedDir); os.IsNotExist(err) {
+		t.Error("shared-digest layer dir should still exist after deleting img-a")
+	}
+	// unique-a should be gone (ref count was 1, now 0).
+	if _, err := os.Stat(uniqueADir); !os.IsNotExist(err) {
+		t.Error("unique-a layer dir should be removed after deleting img-a")
+	}
+	// unique-b should still exist.
+	if _, err := os.Stat(uniqueBDir); os.IsNotExist(err) {
+		t.Error("unique-b layer dir should still exist after deleting img-a")
+	}
+
+	// Delete image B.
+	if err := m.Delete("img-b"); err != nil {
+		t.Fatalf("Delete img-b: %v", err)
+	}
+
+	// Now shared layer should be gone (ref count reached 0).
+	if _, err := os.Stat(sharedDir); !os.IsNotExist(err) {
+		t.Error("shared-digest layer dir should be removed after deleting img-b")
+	}
+	// unique-b should also be gone.
+	if _, err := os.Stat(uniqueBDir); !os.IsNotExist(err) {
+		t.Error("unique-b layer dir should be removed after deleting img-b")
+	}
+}
+
+func TestDeleteImageLocked_CleansOrphanLayers(t *testing.T) {
+	m := newTestManager(t)
+
+	// Use digests long enough for the logger's hex[:12] slice.
+	const digest1 = "sha256:aaaa111111111111111111111111"
+	const digest2 = "sha256:bbbb222222222222222222222222"
+	hex1 := "aaaa111111111111111111111111"
+	hex2 := "bbbb222222222222222222222222"
+
+	// Create two layer directories on disk.
+	layer1Dir := filepath.Join(m.dataDir, "layers", hex1)
+	layer2Dir := filepath.Join(m.dataDir, "layers", hex2)
+	for _, d := range []string{layer1Dir, layer2Dir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Register image with both layers.
+	img := &loka.Image{
+		ID:        "orphan-img",
+		Reference: "test:orphan",
+		Status:    loka.ImageStatusReady,
+		Layers: []loka.ImageLayer{
+			{Digest: digest1},
+			{Digest: digest2},
+		},
+	}
+	m.mu.Lock()
+	m.images[img.ID] = img
+	m.layerRefs[digest1] = 1
+	m.layerRefs[digest2] = 1
+	// Call deleteImageLocked directly.
+	m.deleteImageLocked("orphan-img")
+	m.mu.Unlock()
+
+	// Both layer dirs should be removed.
+	if _, err := os.Stat(layer1Dir); !os.IsNotExist(err) {
+		t.Error("layer 1 dir should be removed")
+	}
+	if _, err := os.Stat(layer2Dir); !os.IsNotExist(err) {
+		t.Error("layer 2 dir should be removed")
+	}
+	// Image should be removed from map.
+	if _, ok := m.Get("orphan-img"); ok {
+		t.Error("image should be removed from map after deleteImageLocked")
+	}
+	// Layer refs should be cleaned up.
+	m.mu.Lock()
+	if m.layerRefs[digest1] != 0 {
+		t.Errorf("layerRefs[digest1] = %d, want 0", m.layerRefs[digest1])
+	}
+	if m.layerRefs[digest2] != 0 {
+		t.Errorf("layerRefs[digest2] = %d, want 0", m.layerRefs[digest2])
+	}
+	m.mu.Unlock()
+}
+
+func TestImageCleanup_FailedImagesRemoved(t *testing.T) {
+	m := newTestManager(t)
+
+	// Insert a failed image with old CreatedAt (older than 5-minute TTL).
+	failedImg := &loka.Image{
+		ID:        "failed-old",
+		Reference: "test:failed",
+		Status:    loka.ImageStatusFailed,
+		CreatedAt: time.Now().Add(-10 * time.Minute),
+	}
+	m.mu.Lock()
+	m.images[failedImg.ID] = failedImg
+	m.mu.Unlock()
+
+	// Insert a ready image that should survive.
+	readyImg := &loka.Image{
+		ID:        "ready-keeper",
+		Reference: "test:keeper",
+		Status:    loka.ImageStatusReady,
+		CreatedAt: time.Now(),
+	}
+	m.mu.Lock()
+	m.images[readyImg.ID] = readyImg
+	m.mu.Unlock()
+
+	// Instead of waiting for the ticker, call deleteImageLocked directly
+	// to simulate the cleanup behavior for the failed image.
+	m.mu.Lock()
+	m.deleteImageLocked("failed-old")
+	m.mu.Unlock()
+
+	// Failed image should be gone.
+	if _, ok := m.Get("failed-old"); ok {
+		t.Error("failed image should be removed")
+	}
+	// Ready image should remain.
+	if _, ok := m.Get("ready-keeper"); !ok {
+		t.Error("ready image should still exist")
 	}
 }

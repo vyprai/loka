@@ -30,12 +30,13 @@ import (
 // Uses lokavm.Hypervisor (Apple VZ on macOS, Go KVM on Linux).
 // Falls back to lokavm vm.Manager if hypervisor is not set.
 type Agent struct {
-	id       string
-	hostname string
-	provider string
-	dataDir  string
-	labels   map[string]string
-	logger   *slog.Logger
+	id         string
+	hostname   string
+	provider   string
+	dataDir    string
+	labels     map[string]string
+	logger     *slog.Logger
+	remoteMode bool // True when running as a remote worker (not embedded in CP).
 
 	mu            sync.RWMutex
 	sessions      map[string]*SessionState
@@ -54,7 +55,8 @@ type Agent struct {
 type warmSnapshot struct {
 	imageRef string
 	snapshot lokavm.Snapshot
-	vmID     string // The paused VM ID to clone from.
+	vmID     string    // The paused VM ID to clone from.
+	lastUsed time.Time // For LRU eviction.
 }
 
 // ServiceLaunchOpts holds options for launching a service VM.
@@ -94,6 +96,10 @@ type SessionState struct {
 	// App-level warm snapshot paths (per-service, includes running app).
 	AppSnapshotMem   string
 	AppSnapshotState string
+
+	// opMu protects concurrent operations on this session (exec, stop, etc.)
+	// to prevent use-after-free on the vsock connection.
+	opMu sync.Mutex
 }
 
 // NewAgent creates a new worker agent with lokavm hypervisor.
@@ -133,6 +139,12 @@ func NewAgent(provider string, labels map[string]string, dataDir string, objStor
 	return agent, nil
 }
 
+// SetRemoteMode marks the agent as running remotely (not embedded in CP).
+// When remote, port forwarding binds to 0.0.0.0 instead of localhost.
+func (a *Agent) SetRemoteMode(remote bool) {
+	a.remoteMode = remote
+}
+
 // sessionReaper periodically removes stale session entries where the VM is gone.
 func (a *Agent) sessionReaper() {
 	ticker := time.NewTicker(30 * time.Second)
@@ -157,15 +169,19 @@ func (a *Agent) sessionReaper() {
 				delete(a.sessions, id)
 			}
 		}
-		// Warm cache eviction: keep max 10 entries.
+		// Warm cache eviction: keep max 10 entries, evict least recently used.
 		const maxWarmCache = 10
-		if len(a.warmCache) > maxWarmCache {
-			// Evict oldest entries.
-			for k := range a.warmCache {
-				if len(a.warmCache) <= maxWarmCache {
-					break
+		for len(a.warmCache) > maxWarmCache {
+			var oldestKey string
+			var oldestTime time.Time
+			for k, v := range a.warmCache {
+				if oldestKey == "" || v.lastUsed.Before(oldestTime) {
+					oldestKey = k
+					oldestTime = v.lastUsed
 				}
-				delete(a.warmCache, k)
+			}
+			if oldestKey != "" {
+				delete(a.warmCache, oldestKey)
 			}
 		}
 		a.mu.Unlock()
@@ -329,24 +345,35 @@ func (a *Agent) LaunchSession(ctx context.Context, sessionID string, opts Launch
 
 	hvVM, err := a.hypervisor.CreateVM(vmCfg)
 	if err != nil {
+		a.overlay.Cleanup(sessionID)
 		return fmt.Errorf("create VM: %w", err)
 	}
 	if err := a.hypervisor.StartVM(sessionID); err != nil {
+		a.hypervisor.StopVM(sessionID) // Best-effort cleanup.
+		a.overlay.Cleanup(sessionID)
 		return fmt.Errorf("start VM: %w", err)
 	}
 
 	vsockClient := vm.NewVsockClientFromDialer(hvVM.DialVsock)
 
 	// Wait for supervisor to be ready — prewarm the vsock connection.
+	supervisorReady := false
 	backoff := 50 * time.Millisecond
 	for i := 0; i < 60; i++ {
 		if err := vsockClient.Ping(); err == nil {
+			supervisorReady = true
 			break
 		}
 		time.Sleep(backoff)
 		if backoff < 1*time.Second {
 			backoff = time.Duration(float64(backoff) * 1.3)
 		}
+	}
+	if !supervisorReady {
+		// Clean up the VM since the supervisor never came up.
+		a.hypervisor.StopVM(sessionID)
+		a.overlay.Cleanup(sessionID)
+		return fmt.Errorf("supervisor not reachable after 60 retries")
 	}
 
 	vsockClient.SetPolicy(opts.Policy)
@@ -515,11 +542,16 @@ func (a *Agent) StopSession(sessionID string) error {
 		sess.PortForwardListener = nil
 		sess.ForwardedPort = 0
 	}
-	// Close vsock connection pool.
+	a.mu.Unlock()
+
+	// Wait for any in-flight operations on this session to complete,
+	// then close the vsock connection safely.
+	sess.opMu.Lock()
 	if sess.Vsock != nil {
 		sess.Vsock.Close()
+		sess.Vsock = nil
 	}
-	a.mu.Unlock()
+	sess.opMu.Unlock()
 
 	// Stop the VM before removing from sessions map to avoid orphans.
 	a.stopVM(sessionID)
@@ -561,13 +593,22 @@ type ExecResult struct {
 func (a *Agent) ExecCommands(ctx context.Context, sessionID, execID string, commands []loka.Command, parallel bool) *ExecResult {
 	a.mu.RLock()
 	sess, ok := a.sessions[sessionID]
-	vsock := sess.Vsock // Copy under lock to avoid use-after-free.
 	a.mu.RUnlock()
-	if !ok || vsock == nil {
+	if !ok || sess == nil || sess.Vsock == nil {
 		return &ExecResult{ExecID: execID, Status: loka.ExecStatusFailed, Error: fmt.Sprintf("instance %s not found", sessionID)}
 	}
 
+	// Hold per-session lock during vsock operations to prevent use-after-free
+	// if StopSession closes the vsock concurrently.
+	sess.opMu.Lock()
+	vsock := sess.Vsock
+	if vsock == nil {
+		sess.opMu.Unlock()
+		return &ExecResult{ExecID: execID, Status: loka.ExecStatusFailed, Error: "session stopped"}
+	}
 	resp, err := vsock.Execute(vm.ExecRequest{Commands: commands, Parallel: parallel, ExecID: execID})
+	sess.opMu.Unlock()
+
 	if err != nil {
 		return &ExecResult{ExecID: execID, Status: loka.ExecStatusFailed, Error: err.Error()}
 	}
@@ -1146,7 +1187,12 @@ func (a *Agent) StartPortForward(sessionID string, vmPort int) (int, error) {
 	}
 
 	// Listen on a random available port.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// Remote workers bind to all interfaces so the CP can reach them.
+	bindAddr := "127.0.0.1:0"
+	if a.remoteMode {
+		bindAddr = "0.0.0.0:0"
+	}
+	listener, err := net.Listen("tcp", bindAddr)
 	if err != nil {
 		return 0, fmt.Errorf("listen for port forward: %w", err)
 	}
@@ -1258,17 +1304,21 @@ func (a *Agent) forwardConnection(clientConn net.Conn, sess *SessionState, vmPor
 
 	// Connection is now a raw TCP tunnel. Bidirectional copy using the raw
 	// vsockConn (not the bufio.Reader) so no further buffering occurs.
-	var wg sync.WaitGroup
-	wg.Add(2)
+	// When either direction finishes (EOF or error), close both connections
+	// to unblock the other io.Copy goroutine and prevent leaks.
+	done := make(chan struct{}, 2)
 	go func() {
-		defer wg.Done()
 		io.Copy(vsockConn, clientConn)
+		vsockConn.Close() // Unblock the other direction.
+		done <- struct{}{}
 	}()
 	go func() {
-		defer wg.Done()
 		io.Copy(clientConn, vsockConn)
+		clientConn.Close() // Unblock the other direction.
+		done <- struct{}{}
 	}()
-	wg.Wait()
+	<-done
+	<-done
 }
 
 // StopPortForward closes the port forward listener for a session.

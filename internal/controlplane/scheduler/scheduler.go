@@ -95,9 +95,8 @@ func (s *Scheduler) score(c *worker.WorkerConn, constraints Constraints) float64
 		return 0 // Not schedulable.
 	}
 
-	// Strategy-specific scoring.
-	hb := heartbeatFromWorker(w)
-	usedRatio := float64(hb.SessionCount) / float64(max(w.Capacity.CPUCores, 1))
+	// Strategy-specific scoring using live heartbeat data from WorkerConn.
+	usedRatio := float64(c.SessionCount) / float64(max(w.Capacity.CPUCores, 1))
 
 	switch s.strategy {
 	case StrategySpread:
@@ -150,15 +149,6 @@ func isEligible(w *loka.Worker, c Constraints) bool {
 	}
 
 	return true
-}
-
-// heartbeatFromWorker creates a minimal heartbeat from worker state.
-// In production, we'd use the latest heartbeat data from the registry.
-func heartbeatFromWorker(w *loka.Worker) loka.Heartbeat {
-	return loka.Heartbeat{
-		WorkerID:     w.ID,
-		SessionCount: 0, // Will be populated from registry in production.
-	}
 }
 
 func max(a, b int) int {

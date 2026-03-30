@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -16,6 +17,7 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/session"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/store"
 )
 
 // DomainProxy is a reverse proxy that routes HTTP requests by domain
@@ -44,6 +46,13 @@ type DomainProxy struct {
 	wakeMu       sync.Mutex
 	wakeInFlight map[string]*wakeState // serviceID -> in-progress wake
 
+	// Round-robin counter for distributing across service instances.
+	rrCounter uint64
+
+	// Instance cache: service ID → running instances (primary + replicas).
+	instanceCache   sync.Map // string → *instanceCacheEntry
+	instanceCacheTTL time.Duration
+
 	// httpClient is a shared, reusable HTTP client for proxying requests.
 	// Avoids creating a new client (and transport) per request, enabling
 	// connection reuse and reducing GC pressure.
@@ -64,12 +73,13 @@ func NewDomainProxy(sm *session.Manager, registry *worker.Registry, logger *slog
 		o = opts[0]
 	}
 	return &DomainProxy{
-		sm:           sm,
-		svcMgr:       o.ServiceManager,
-		registry:     registry,
-		logger:       logger,
-		routes:       make(map[string]*loka.DomainRoute),
-		wakeInFlight: make(map[string]*wakeState),
+		sm:               sm,
+		svcMgr:           o.ServiceManager,
+		registry:         registry,
+		logger:           logger,
+		routes:           make(map[string]*loka.DomainRoute),
+		wakeInFlight:     make(map[string]*wakeState),
+		instanceCacheTTL: 5 * time.Second,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
@@ -239,8 +249,67 @@ func (p *DomainProxy) handleSessionRoute(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Proxy the request to the worker VM's port.
-	targetAddr := fmt.Sprintf("%s:%d", wc.Worker.IPAddress, route.RemotePort)
+	// Use private IP for internal routing if available.
+	workerAddr := wc.Worker.PrivateIP
+	if workerAddr == "" {
+		workerAddr = wc.Worker.IPAddress
+	}
+	targetAddr := fmt.Sprintf("%s:%d", workerAddr, route.RemotePort)
 	p.proxyHTTP(w, r, targetAddr, route, false)
+}
+
+// instanceCacheEntry holds cached running instances for round-robin.
+type instanceCacheEntry struct {
+	services  []*loka.Service
+	fetchedAt time.Time
+}
+
+// findRunningInstances returns all running instances of a service (primary + replicas).
+// Results are cached for instanceCacheTTL to avoid per-request DB queries.
+func (p *DomainProxy) findRunningInstances(ctx context.Context, svc *loka.Service) []*loka.Service {
+	if p.svcMgr == nil {
+		return []*loka.Service{svc}
+	}
+
+	// Use the primary ID for cache key (replicas point to it).
+	cacheKey := svc.ID
+	if svc.ParentServiceID != "" {
+		cacheKey = svc.ParentServiceID
+	}
+
+	// Check cache.
+	if cached, ok := p.instanceCache.Load(cacheKey); ok {
+		entry := cached.(*instanceCacheEntry)
+		if time.Since(entry.fetchedAt) < p.instanceCacheTTL {
+			return entry.services
+		}
+	}
+
+	// Fetch from store: primary + replicas.
+	running := loka.ServiceStatusRunning
+	all, _, _ := p.svcMgr.List(ctx, store.ServiceFilter{
+		PrimaryID: &cacheKey,
+		Status:    &running,
+	})
+
+	// Include the primary itself if it's running.
+	instances := []*loka.Service{}
+	primary, err := p.svcMgr.Get(ctx, cacheKey)
+	if err == nil && primary.Status == loka.ServiceStatusRunning {
+		instances = append(instances, primary)
+	}
+	instances = append(instances, all...)
+
+	// Cache the result.
+	p.instanceCache.Store(cacheKey, &instanceCacheEntry{
+		services:  instances,
+		fetchedAt: time.Now(),
+	})
+
+	if len(instances) == 0 {
+		return []*loka.Service{svc}
+	}
+	return instances
 }
 
 // handleServiceRoute proxies a request to a deployed service, with cold-start
@@ -307,6 +376,13 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
+	// Round-robin: select an instance if replicas exist.
+	instances := p.findRunningInstances(ctx, svc)
+	if len(instances) > 1 {
+		idx := atomic.AddUint64(&p.rrCounter, 1) % uint64(len(instances))
+		svc = instances[idx]
+	}
+
 	// Find the worker.
 	if svc.WorkerID == "" {
 		http.Error(w, "Service has no assigned worker", http.StatusServiceUnavailable)
@@ -330,7 +406,16 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 	if svc.GuestIP != "" {
 		targetAddr = fmt.Sprintf("%s:%d", svc.GuestIP, route.RemotePort)
 	} else if svc.ForwardPort > 0 {
-		targetAddr = fmt.Sprintf("127.0.0.1:%d", svc.ForwardPort)
+		// Use worker's private IP for remote workers, localhost for embedded.
+		workerAddr := wc.Worker.PrivateIP
+		if workerAddr == "" {
+			workerAddr = wc.Worker.IPAddress
+		}
+		if workerAddr == "" || workerAddr == "127.0.0.1" {
+			targetAddr = fmt.Sprintf("127.0.0.1:%d", svc.ForwardPort)
+		} else {
+			targetAddr = fmt.Sprintf("%s:%d", workerAddr, svc.ForwardPort)
+		}
 	} else {
 		targetAddr = fmt.Sprintf("%s:%d", wc.Worker.IPAddress, route.RemotePort)
 	}

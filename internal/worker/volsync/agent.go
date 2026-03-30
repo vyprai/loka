@@ -232,10 +232,18 @@ func (a *Agent) watchLoop(ctx context.Context, w *volumeWatch) {
 	timer := time.NewTimer(time.Hour) // Start with an inactive timer.
 	timer.Stop()
 
+	// Periodic full reconciliation catches events fsnotify may have missed
+	// under heavy load. Runs every 5 minutes.
+	reconcileTicker := time.NewTicker(5 * time.Minute)
+	defer reconcileTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
+
+		case <-reconcileTicker.C:
+			a.reconcileVolume(w)
 
 		case event, ok := <-w.watcher.Events:
 			if !ok {
@@ -296,6 +304,53 @@ func (a *Agent) watchLoop(ctx context.Context, w *volumeWatch) {
 	}
 }
 
+// reconcileVolume does a full directory walk to catch changes that fsnotify may
+// have missed (e.g., under heavy I/O load). Uploads new/changed files and
+// removes deleted entries from the manifest.
+func (a *Agent) reconcileVolume(w *volumeWatch) {
+	if a.objStore == nil {
+		return
+	}
+
+	// Walk the local directory and compute hashes.
+	currentFiles := make(map[string]bool)
+	filepath.Walk(w.localDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(w.localDir, path)
+		if relErr != nil || strings.HasPrefix(rel, ".lokavol") {
+			return nil
+		}
+		currentFiles[rel] = true
+
+		// Check if file has changed since last manifest entry.
+		existing, ok := w.manifest.Files[rel]
+		if ok && existing.Size == info.Size() && existing.MTime == info.ModTime().UTC().Format(time.RFC3339) {
+			return nil // Unchanged.
+		}
+
+		// Upload changed file.
+		if err := a.uploadFile(w.name, w.localDir, rel); err != nil {
+			a.logger.Warn("reconcile upload failed", "volume", w.name, "file", rel, "error", err)
+		}
+		return nil
+	})
+
+	// Remove manifest entries for deleted files.
+	changed := false
+	for rel := range w.manifest.Files {
+		if !currentFiles[rel] {
+			a.deleteRemoteFile(w.name, rel)
+			delete(w.manifest.Files, rel)
+			changed = true
+		}
+	}
+	if changed {
+		a.saveManifest(w)
+	}
+}
+
 // uploadFile uploads a single file to objstore and updates the manifest.
 func (a *Agent) uploadFile(volName, volDir, relPath string) error {
 	if a.objStore == nil {
@@ -349,14 +404,24 @@ func (a *Agent) downloadFile(volName, volDir, relPath string) error {
 	fullPath := filepath.Join(volDir, relPath)
 	os.MkdirAll(filepath.Dir(fullPath), 0o755)
 
-	f, err := os.Create(fullPath)
+	// Atomic write: write to temp file, then rename into place.
+	// This prevents partial/corrupted files on interrupted downloads.
+	tmpPath := fullPath + ".tmp"
+	f, err := os.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	_, err = io.Copy(f, reader)
-	return err
+	if _, err = io.Copy(f, reader); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	return os.Rename(tmpPath, fullPath)
 }
 
 // deleteRemoteFile removes a file from objstore.

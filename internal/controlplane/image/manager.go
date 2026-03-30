@@ -14,7 +14,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/crane"
@@ -37,19 +39,101 @@ type Manager struct {
 	hypervisor lokavm.Hypervisor // Hypervisor for creating warm snapshots (may be nil).
 	dataDir   string      // Local cache directory.
 	logger    *slog.Logger
+
+	mu        sync.Mutex                   // Protects images map and layerRefs.
+	pullLocks sync.Map                     // Per-reference dedup: ref → *pullResult.
+	layerRefs map[string]int               // Layer digest → reference count from images.
+}
+
+// pullResult is used to deduplicate concurrent pulls of the same image.
+type pullResult struct {
+	done chan struct{}
+	img  *loka.Image
+	err  error
 }
 
 // NewManager creates a new image manager.
 func NewManager(objStore objstore.ObjectStore, dataDir string, logger *slog.Logger) *Manager {
 	os.MkdirAll(filepath.Join(dataDir, "images"), 0o755)
 	m := &Manager{
-		images:   make(map[string]*loka.Image),
-		objStore: objStore,
-		dataDir:  dataDir,
-		logger:   logger,
+		images:    make(map[string]*loka.Image),
+		layerRefs: make(map[string]int),
+		objStore:  objStore,
+		dataDir:   dataDir,
+		logger:    logger,
 	}
 	m.ensureLokaOverlay()
+
+	// Start background sweep to clean up failed/stale image entries.
+	go m.imageCleanupLoop()
+
 	return m
+}
+
+// imageCleanupLoop periodically removes failed image entries and enforces
+// a max image count to prevent unbounded memory growth.
+func (m *Manager) imageCleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		m.mu.Lock()
+		now := time.Now()
+		const maxImages = 100
+		const failedTTL = 5 * time.Minute
+
+		// Remove failed images older than 5 minutes.
+		for id, img := range m.images {
+			if img.Status == loka.ImageStatusFailed && now.Sub(img.CreatedAt) > failedTTL {
+				delete(m.images, id)
+			}
+		}
+
+		// If still over limit, evict oldest ready images (least recently created).
+		if len(m.images) > maxImages {
+			type entry struct {
+				id  string
+				at  time.Time
+			}
+			var candidates []entry
+			for id, img := range m.images {
+				if img.Status == loka.ImageStatusReady {
+					candidates = append(candidates, entry{id, img.CreatedAt})
+				}
+			}
+			// Sort oldest first.
+			sort.Slice(candidates, func(i, j int) bool {
+				return candidates[i].at.Before(candidates[j].at)
+			})
+			toEvict := len(m.images) - maxImages
+			for i := 0; i < toEvict && i < len(candidates); i++ {
+				m.deleteImageLocked(candidates[i].id)
+			}
+		}
+
+		m.mu.Unlock()
+	}
+}
+
+// deleteImageLocked removes an image and decrements layer refs.
+// Must be called with m.mu held.
+func (m *Manager) deleteImageLocked(id string) {
+	img, ok := m.images[id]
+	if !ok {
+		return
+	}
+	layersBaseDir := filepath.Join(m.dataDir, "layers")
+	for _, l := range img.Layers {
+		m.layerRefs[l.Digest]--
+		if m.layerRefs[l.Digest] <= 0 {
+			delete(m.layerRefs, l.Digest)
+			hex := l.Digest
+			if idx := strings.Index(hex, ":"); idx >= 0 {
+				hex = hex[idx+1:]
+			}
+			os.RemoveAll(filepath.Join(layersBaseDir, hex))
+		}
+	}
+	delete(m.images, id)
 }
 
 // SetHypervisor sets the hypervisor used for creating warm snapshots.
@@ -84,11 +168,33 @@ type layerInfo struct {
 //  5. Store rootfs directory path
 func (m *Manager) Pull(ctx context.Context, reference string) (*loka.Image, error) {
 	// Check if already pulled.
+	m.mu.Lock()
 	for _, img := range m.images {
 		if img.Reference == reference && img.Status == loka.ImageStatusReady {
+			m.mu.Unlock()
 			return img, nil
 		}
 	}
+	m.mu.Unlock()
+
+	// Deduplicate concurrent pulls of the same image.
+	// If another goroutine is already pulling this reference, wait for it.
+	pr := &pullResult{done: make(chan struct{})}
+	if existing, loaded := m.pullLocks.LoadOrStore(reference, pr); loaded {
+		// Another pull is in progress — wait for it.
+		existingPR := existing.(*pullResult)
+		<-existingPR.done
+		return existingPR.img, existingPR.err
+	}
+	// We own this pull. Store result for waiters and clean up when done.
+	var pullImg *loka.Image
+	var pullErr error
+	defer func() {
+		pr.img = pullImg
+		pr.err = pullErr
+		close(pr.done)
+		m.pullLocks.Delete(reference)
+	}()
 
 	id := uuid.New().String()[:12]
 	img := &loka.Image{
@@ -97,7 +203,9 @@ func (m *Manager) Pull(ctx context.Context, reference string) (*loka.Image, erro
 		Status:    loka.ImageStatusPulling,
 		CreatedAt: time.Now(),
 	}
+	m.mu.Lock()
 	m.images[id] = img
+	m.mu.Unlock()
 
 	m.logger.Info("pulling image", "id", id, "reference", reference)
 
@@ -108,7 +216,8 @@ func (m *Manager) Pull(ctx context.Context, reference string) (*loka.Image, erro
 	}))
 	if err != nil {
 		img.Status = loka.ImageStatusFailed
-		return img, fmt.Errorf("pull %s: %w", reference, err)
+		pullImg, pullErr = img, fmt.Errorf("pull %s: %w", reference, err)
+		return pullImg, pullErr
 	}
 
 	// Get digest.
@@ -152,12 +261,14 @@ func (m *Manager) Pull(ctx context.Context, reference string) (*loka.Image, erro
 		lr, err := l.Uncompressed()
 		if err != nil {
 			img.Status = loka.ImageStatusFailed
-			return img, fmt.Errorf("uncompress layer %d: %w", i, err)
+			pullImg, pullErr = img, fmt.Errorf("uncompress layer %d: %w", i, err)
+			return pullImg, pullErr
 		}
 		if err := extractTarToDir(lr, layerDir); err != nil {
 			lr.Close()
 			img.Status = loka.ImageStatusFailed
-			return img, fmt.Errorf("extract layer %d: %w", i, err)
+			pullImg, pullErr = img, fmt.Errorf("extract layer %d: %w", i, err)
+			return pullImg, pullErr
 		}
 		lr.Close()
 		m.logger.Info("layer extracted", "digest", d.Hex[:12], "index", i)
@@ -191,6 +302,14 @@ func (m *Manager) Pull(ctx context.Context, reference string) (*loka.Image, erro
 	img.RootfsPath = strings.Join(layerDirs, ":")
 
 	img.Status = loka.ImageStatusReady
+
+	// Increment layer reference counts for this image.
+	m.mu.Lock()
+	for _, l := range img.Layers {
+		m.layerRefs[l.Digest]++
+	}
+	m.mu.Unlock()
+
 	m.logger.Info("image ready",
 		"id", id,
 		"reference", reference,
@@ -198,7 +317,8 @@ func (m *Manager) Pull(ctx context.Context, reference string) (*loka.Image, erro
 		"layers", len(img.Layers),
 		"rootfs", img.RootfsPath,
 	)
-	return img, nil
+	pullImg = img
+	return pullImg, nil
 }
 
 // extractTarToDir extracts a tar stream to a directory, handling whiteouts.
@@ -301,6 +421,19 @@ func (m *Manager) ensureLokaOverlay() {
 		}
 	}
 
+	// Also check if the source binary has changed (updated supervisor).
+	if !needsCreate {
+		supervisorSrc := m.findSupervisor()
+		if supervisorSrc != "" {
+			srcHash := fileHash(supervisorSrc)
+			dstHash := fileHash(supervisorDst)
+			if srcHash != "" && dstHash != "" && srcHash != dstHash {
+				needsCreate = true
+				m.logger.Info("loka overlay: supervisor binary changed, updating")
+			}
+		}
+	}
+
 	if !needsCreate {
 		return
 	}
@@ -383,6 +516,20 @@ func (m *Manager) findSupervisor() string {
 		}
 	}
 	return ""
+}
+
+// fileHash returns the SHA256 hex digest of a file, or empty string on error.
+func fileHash(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // createExt4FromDir creates an ext4 image from a directory.
@@ -588,17 +735,39 @@ func (m *Manager) List() []*loka.Image {
 }
 
 // Delete removes an image, its layer-pack, and warm snapshot files.
-// Individual layers are NOT deleted because they may be shared with other images.
+// Layers with no remaining references are also cleaned up from disk.
 func (m *Manager) Delete(id string) error {
+	m.mu.Lock()
 	img, ok := m.images[id]
 	if !ok {
+		m.mu.Unlock()
 		return fmt.Errorf("image not found")
 	}
+
+	// Decrement layer references; GC layers that reach zero.
+	layersBaseDir := filepath.Join(m.dataDir, "layers")
+	for _, l := range img.Layers {
+		m.layerRefs[l.Digest]--
+		if m.layerRefs[l.Digest] <= 0 {
+			delete(m.layerRefs, l.Digest)
+			// Extract hex digest from "sha256:abc123..." format.
+			hex := l.Digest
+			if idx := strings.Index(hex, ":"); idx >= 0 {
+				hex = hex[idx+1:]
+			}
+			layerDir := filepath.Join(layersBaseDir, hex)
+			os.RemoveAll(layerDir)
+			m.logger.Info("layer GC'd (zero refs)", "digest", hex[:12])
+		}
+	}
+
+	delete(m.images, id)
+	m.mu.Unlock()
+
 	// Remove layer-pack from object store.
 	if img.LayerPackKey != "" {
 		m.objStore.Delete(context.Background(), imageBucket, img.LayerPackKey)
 	}
-	// Also clean up via RootfsPath for backward compat (may be same as LayerPackKey).
 	if img.RootfsPath != "" && img.RootfsPath != img.LayerPackKey {
 		m.objStore.Delete(context.Background(), imageBucket, img.RootfsPath)
 	}
@@ -612,7 +781,6 @@ func (m *Manager) Delete(id string) error {
 	// Remove local cache (includes layer-pack and snapshot cache).
 	os.RemoveAll(filepath.Join(m.dataDir, "images", id))
 	os.RemoveAll(filepath.Join(m.dataDir, "cache", "images", id))
-	delete(m.images, id)
 	return nil
 }
 

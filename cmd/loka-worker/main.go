@@ -73,6 +73,7 @@ func main() {
 		logger.Error("failed to create agent", "error", err)
 		os.Exit(1)
 	}
+	agent.SetRemoteMode(true) // loka-worker is always a remote worker.
 
 	// Create CP client.
 	var tlsOpts *worker.CPClientTLS
@@ -84,12 +85,30 @@ func main() {
 	}
 	cpClient := worker.NewCPClient(cpURL, cfg.Token, tlsOpts, logger)
 
-	// Register with control plane.
+	// Register with control plane (retry with exponential backoff).
 	logger.Info("registering with control plane", "address", cfg.ControlPlane.Address)
-	workerID, err := cpClient.Register(ctx, agent.Hostname(), agent.Provider(), agent.Capacity(), agent.Labels())
-	if err != nil {
-		logger.Error("failed to register with control plane", "error", err)
-		os.Exit(1)
+	var workerID string
+	{
+		backoff := 1 * time.Second
+		maxBackoff := 30 * time.Second
+		for {
+			var regErr error
+			workerID, regErr = cpClient.Register(ctx, agent.Hostname(), agent.Provider(), agent.Capacity(), agent.Labels())
+			if regErr == nil {
+				break
+			}
+			logger.Warn("registration failed, retrying", "error", regErr, "backoff", backoff)
+			select {
+			case <-ctx.Done():
+				logger.Error("registration cancelled")
+				os.Exit(1)
+			case <-time.After(backoff):
+			}
+			backoff = time.Duration(float64(backoff) * 2)
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
 	}
 	agent.SetID(workerID)
 	logger.Info("registered", "worker_id", workerID)
@@ -114,6 +133,7 @@ func main() {
 	defer ticker.Stop()
 
 	logger.Info("worker running, sending heartbeats")
+	consecutiveFailures := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -121,8 +141,26 @@ func main() {
 			return
 		case <-ticker.C:
 			hb := agent.Heartbeat()
-			logger.Debug("heartbeat", "sessions", hb.SessionCount, "status", hb.Status)
-			// In production, send heartbeat over gRPC stream.
+			status, err := cpClient.SendHeartbeat(ctx, *hb)
+			if err != nil {
+				consecutiveFailures++
+				logger.Warn("heartbeat failed", "error", err, "failures", consecutiveFailures)
+				continue
+			}
+			consecutiveFailures = 0
+
+			// If CP doesn't recognize us, re-register.
+			if status == "unknown_worker" {
+				logger.Warn("CP returned unknown_worker, re-registering")
+				newID, regErr := cpClient.Register(ctx, agent.Hostname(), agent.Provider(), agent.Capacity(), agent.Labels())
+				if regErr != nil {
+					logger.Error("re-registration failed", "error", regErr)
+				} else {
+					agent.SetID(newID)
+					workerID = newID
+					logger.Info("re-registered", "worker_id", newID)
+				}
+			}
 		}
 	}
 }

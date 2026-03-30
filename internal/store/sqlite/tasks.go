@@ -17,10 +17,19 @@ type taskRepo struct {
 }
 
 func (r *taskRepo) Create(ctx context.Context, t *loka.Task) error {
-	args, _ := json.Marshal(t.Args)
-	env, _ := json.Marshal(t.Env)
-	mounts, _ := json.Marshal(t.Mounts)
-	_, err := r.db.ExecContext(ctx,
+	args, err := json.Marshal(t.Args)
+	if err != nil {
+		return fmt.Errorf("marshal args: %w", err)
+	}
+	env, err := json.Marshal(t.Env)
+	if err != nil {
+		return fmt.Errorf("marshal env: %w", err)
+	}
+	mounts, err := json.Marshal(t.Mounts)
+	if err != nil {
+		return fmt.Errorf("marshal mounts: %w", err)
+	}
+	_, err = r.db.ExecContext(ctx,
 		`INSERT INTO tasks (id, name, status, exit_code, worker_id, image_ref, command, args, env, workdir, bundle_key, vcpus, memory_mb, mounts, timeout, status_message, started_at, completed_at, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.Name, string(t.Status), t.ExitCode, t.WorkerID, t.ImageRef,
@@ -40,11 +49,20 @@ func (r *taskRepo) Get(ctx context.Context, id string) (*loka.Task, error) {
 }
 
 func (r *taskRepo) Update(ctx context.Context, t *loka.Task) error {
-	args, _ := json.Marshal(t.Args)
-	env, _ := json.Marshal(t.Env)
-	mounts, _ := json.Marshal(t.Mounts)
+	args, err := json.Marshal(t.Args)
+	if err != nil {
+		return fmt.Errorf("marshal args: %w", err)
+	}
+	env, err := json.Marshal(t.Env)
+	if err != nil {
+		return fmt.Errorf("marshal env: %w", err)
+	}
+	mounts, err := json.Marshal(t.Mounts)
+	if err != nil {
+		return fmt.Errorf("marshal mounts: %w", err)
+	}
 	t.UpdatedAt = time.Now()
-	_, err := r.db.ExecContext(ctx,
+	_, err = r.db.ExecContext(ctx,
 		`UPDATE tasks SET name=?, status=?, exit_code=?, worker_id=?, image_ref=?, command=?, args=?, env=?, workdir=?, bundle_key=?, vcpus=?, memory_mb=?, mounts=?, timeout=?, status_message=?, started_at=?, completed_at=?, updated_at=?
 		 WHERE id=?`,
 		t.Name, string(t.Status), t.ExitCode, t.WorkerID, t.ImageRef,

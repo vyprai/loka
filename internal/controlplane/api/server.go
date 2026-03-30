@@ -229,6 +229,7 @@ func (s *Server) routes() {
 		r.Post("/services/{id}/stop", s.stopService)
 		r.Post("/services/{id}/redeploy", s.redeployService)
 		r.Put("/services/{id}/env", s.updateServiceEnv)
+		r.Post("/services/{id}/scale", s.scaleService)
 		r.Get("/services/{id}/logs", s.getServiceLogs)
 		r.Post("/services/{id}/routes", s.addServiceRoute)
 		r.Delete("/services/{id}/routes/{domain}", s.removeServiceRoute)

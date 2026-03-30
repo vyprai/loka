@@ -34,6 +34,7 @@ type deployServiceReq struct {
 	Mounts         []loka.Volume    `json:"mounts,omitempty"`
 	Autoscale      *loka.AutoscaleConfig `json:"autoscale,omitempty"`
 	Uses           map[string]string     `json:"uses,omitempty"`
+	Replicas       int                   `json:"replicas,omitempty"`
 }
 
 func (s *Server) deployService(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +66,7 @@ func (s *Server) deployService(w http.ResponseWriter, r *http.Request) {
 		Mounts:         req.Mounts,
 		Autoscale:      req.Autoscale,
 		Uses:           req.Uses,
+		Replicas:       req.Replicas,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
@@ -218,6 +220,30 @@ func (s *Server) updateServiceEnv(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, svc)
+}
+
+func (s *Server) scaleService(w http.ResponseWriter, r *http.Request) {
+	id, err := s.resolveServiceID(r.Context(), chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	var req struct {
+		Replicas int `json:"replicas"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Replicas < 1 {
+		writeError(w, http.StatusBadRequest, "replicas must be at least 1")
+		return
+	}
+	if err := s.serviceManager.Scale(r.Context(), id, req.Replicas); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "scaled", "replicas": req.Replicas})
 }
 
 func (s *Server) getServiceLogs(w http.ResponseWriter, r *http.Request) {

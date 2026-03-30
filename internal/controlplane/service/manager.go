@@ -45,6 +45,9 @@ type DeployOpts struct {
 	Autoscale      *loka.AutoscaleConfig
 	DatabaseConfig *loka.DatabaseConfig // If set, deploy as a managed database instance.
 	Uses           map[string]string   // Network ACL: alias→target service/db name.
+	Replicas       int                 // Desired instance count (default 1). Creates N service records.
+	RelationType   string              // "replica", "component", etc.
+	ParentServiceID string             // Set on replicas/components to link to primary.
 }
 
 // DomainRouteRegistrar is an interface for registering/removing domain routes.
@@ -313,9 +316,12 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 		Labels:         opts.Labels,
 		Mounts:         opts.Mounts,
 		Autoscale:      opts.Autoscale,
-		DatabaseConfig: opts.DatabaseConfig,
-		Uses:           opts.Uses,
-		LastActivity:   now,
+		DatabaseConfig:  opts.DatabaseConfig,
+		Uses:            opts.Uses,
+		ParentServiceID: opts.ParentServiceID,
+		Replicas:        opts.Replicas,
+		RelationType:    opts.RelationType,
+		LastActivity:    now,
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -349,7 +355,91 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 	}()
 
 	m.logger.Info("service scheduled to worker", "service", svc.ID, "worker", wConn.Worker.ID)
+
+	// Create additional replicas if requested.
+	if opts.Replicas > 1 && opts.ParentServiceID == "" {
+		for i := 1; i < opts.Replicas; i++ {
+			replicaOpts := opts
+			replicaOpts.Name = fmt.Sprintf("%s-replica-%d", svc.Name, i)
+			replicaOpts.ParentServiceID = svc.ID
+			replicaOpts.RelationType = "replica"
+			replicaOpts.Replicas = 0 // Replicas don't spawn more replicas.
+			replicaOpts.Routes = nil // Only primary gets domain routes.
+			if _, err := m.Deploy(ctx, replicaOpts); err != nil {
+				m.logger.Warn("failed to create replica", "primary", svc.Name, "replica", i, "error", err)
+			}
+		}
+	}
+
 	return svc, nil
+}
+
+// Scale adjusts the number of replicas for a service.
+func (m *Manager) Scale(ctx context.Context, id string, replicas int) error {
+	svc, err := m.store.Services().Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if replicas < 1 {
+		return fmt.Errorf("replicas must be at least 1")
+	}
+
+	// Find current replicas.
+	currentReplicas, _, _ := m.store.Services().List(ctx, store.ServiceFilter{
+		PrimaryID: &svc.ID,
+	})
+	// Filter to only "replica" type.
+	var replicaServices []*loka.Service
+	for _, r := range currentReplicas {
+		if r.RelationType == "replica" {
+			replicaServices = append(replicaServices, r)
+		}
+	}
+	currentCount := len(replicaServices) + 1 // +1 for primary
+
+	if replicas > currentCount {
+		// Scale up: create new replicas.
+		for i := currentCount; i < replicas; i++ {
+			replicaOpts := DeployOpts{
+				Name:            fmt.Sprintf("%s-replica-%d", svc.Name, i),
+				ImageRef:        svc.ImageRef,
+				Command:         svc.Command,
+				Args:            svc.Args,
+				Env:             svc.Env,
+				Workdir:         svc.Workdir,
+				Port:            svc.Port,
+				VCPUs:           svc.VCPUs,
+				MemoryMB:        svc.MemoryMB,
+				BundleKey:       svc.BundleKey,
+				HealthPath:      svc.HealthPath,
+				HealthInterval:  svc.HealthInterval,
+				HealthTimeout:   svc.HealthTimeout,
+				HealthRetries:   svc.HealthRetries,
+				Labels:          svc.Labels,
+				Mounts:          svc.Mounts,
+				Uses:            svc.Uses,
+				ParentServiceID: svc.ID,
+				RelationType:    "replica",
+			}
+			if _, err := m.Deploy(ctx, replicaOpts); err != nil {
+				m.logger.Warn("scale up: failed to create replica", "primary", svc.Name, "error", err)
+			}
+		}
+	} else if replicas < currentCount {
+		// Scale down: remove newest replicas.
+		excess := currentCount - replicas
+		for i := len(replicaServices) - 1; i >= 0 && excess > 0; i-- {
+			if err := m.Destroy(ctx, replicaServices[i].ID); err != nil {
+				m.logger.Warn("scale down: failed to remove replica", "id", replicaServices[i].ID, "error", err)
+			}
+			excess--
+		}
+	}
+
+	// Update desired replica count on primary.
+	svc.Replicas = replicas
+	svc.UpdatedAt = time.Now()
+	return m.store.Services().Update(ctx, svc)
 }
 
 // asyncDeploy handles image pulling, sending launch command, and health checking.
@@ -686,6 +776,19 @@ func (m *Manager) Redeploy(ctx context.Context, id string) (*loka.Service, error
 		}
 	}
 
+	// Check worker affinity: if current worker is gone, reschedule.
+	if svc.WorkerID != "" {
+		if _, ok := m.registry.Get(svc.WorkerID); !ok {
+			// Worker is down — pick a new one.
+			wConn, err := m.scheduler.Pick(scheduler.Constraints{})
+			if err == nil {
+				m.logger.Info("redeploy: worker gone, rescheduling",
+					"service", svc.Name, "old_worker", svc.WorkerID, "new_worker", wConn.Worker.ID)
+				svc.WorkerID = wConn.Worker.ID
+			}
+		}
+	}
+
 	// Reset to deploying and re-launch.
 	svc.Status = loka.ServiceStatusDeploying
 	svc.Ready = false
@@ -759,6 +862,19 @@ func (m *Manager) Wake(ctx context.Context, id string) (*loka.Service, error) {
 			return svc, nil // Already running.
 		}
 		return nil, fmt.Errorf("cannot wake service in status %s", svc.Status)
+	}
+
+	// Check if the assigned worker is still alive. If not, reschedule.
+	if svc.WorkerID != "" {
+		if _, ok := m.registry.Get(svc.WorkerID); !ok {
+			wConn, err := m.scheduler.Pick(scheduler.Constraints{})
+			if err != nil {
+				return nil, fmt.Errorf("wake failover: no workers available")
+			}
+			m.logger.Info("wake failover: worker gone, rescheduling",
+				"service", svc.Name, "old_worker", svc.WorkerID, "new_worker", wConn.Worker.ID)
+			svc.WorkerID = wConn.Worker.ID
+		}
 	}
 
 	svc.Status = loka.ServiceStatusWaking

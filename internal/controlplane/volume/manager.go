@@ -160,6 +160,13 @@ func (m *Manager) ExtractBundle(ctx context.Context, volName, bundleKey string) 
 		return fmt.Errorf("object store not configured")
 	}
 
+	// Skip extraction if bundle already extracted (deduplication).
+	volDir := m.BundlePath(volName)
+	if entries, err := os.ReadDir(volDir); err == nil && len(entries) > 0 {
+		m.logger.Info("bundle already extracted, skipping", "volume", volName)
+		return nil
+	}
+
 	// Parse bundleKey into bucket and key.
 	parts := strings.SplitN(bundleKey, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
@@ -183,7 +190,7 @@ func (m *Manager) ExtractBundle(ctx context.Context, volName, bundleKey string) 
 
 	// Extract tar entries to the readonly bundles directory.
 	// Clean up partial directory on error.
-	volDir := m.BundlePath(volName)
+	volDir = m.BundlePath(volName)
 	if err := os.MkdirAll(volDir, 0o755); err != nil {
 		return fmt.Errorf("create bundle dir: %w", err)
 	}

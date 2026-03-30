@@ -203,6 +203,202 @@ func TestFullDiff_IdenticalLayers(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Overlay CoW Clone Tests
+// ---------------------------------------------------------------------------
+
+func TestCreateLayer_PreservesContent(t *testing.T) {
+	mgr, sid := setupTestOverlay(t)
+	ws := mgr.WorkspacePath(sid)
+
+	writeFile(t, filepath.Join(ws, "hello.txt"), "world")
+	writeFile(t, filepath.Join(ws, "sub/nested.txt"), "deep")
+
+	layerName, err := mgr.CreateLayer(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify layer content matches workspace.
+	layerDir := filepath.Join(mgr.SessionDir(sid), "layers", layerName)
+
+	got, err := os.ReadFile(filepath.Join(layerDir, "hello.txt"))
+	if err != nil {
+		t.Fatalf("read hello.txt from layer: %v", err)
+	}
+	if string(got) != "world" {
+		t.Errorf("hello.txt = %q, want %q", got, "world")
+	}
+
+	got, err = os.ReadFile(filepath.Join(layerDir, "sub/nested.txt"))
+	if err != nil {
+		t.Fatalf("read sub/nested.txt from layer: %v", err)
+	}
+	if string(got) != "deep" {
+		t.Errorf("sub/nested.txt = %q, want %q", got, "deep")
+	}
+}
+
+func TestRestoreLayer_RestoresContent(t *testing.T) {
+	mgr, sid := setupTestOverlay(t)
+	ws := mgr.WorkspacePath(sid)
+
+	// Write original content and create layer.
+	writeFile(t, filepath.Join(ws, "data.txt"), "original")
+	writeFile(t, filepath.Join(ws, "keep.txt"), "preserved")
+
+	layerName, err := mgr.CreateLayer(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Modify workspace after checkpoint.
+	writeFile(t, filepath.Join(ws, "data.txt"), "modified")
+	writeFile(t, filepath.Join(ws, "new-file.txt"), "should disappear")
+	os.Remove(filepath.Join(ws, "keep.txt"))
+
+	// Verify modifications took effect.
+	got, _ := os.ReadFile(filepath.Join(ws, "data.txt"))
+	if string(got) != "modified" {
+		t.Fatalf("data.txt should be modified before restore, got %q", got)
+	}
+
+	// Restore the layer.
+	if err := mgr.RestoreLayer(sid, layerName); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify workspace matches original state.
+	got, err = os.ReadFile(filepath.Join(ws, "data.txt"))
+	if err != nil {
+		t.Fatalf("read data.txt after restore: %v", err)
+	}
+	if string(got) != "original" {
+		t.Errorf("data.txt = %q after restore, want %q", got, "original")
+	}
+
+	got, err = os.ReadFile(filepath.Join(ws, "keep.txt"))
+	if err != nil {
+		t.Fatalf("read keep.txt after restore: %v", err)
+	}
+	if string(got) != "preserved" {
+		t.Errorf("keep.txt = %q after restore, want %q", got, "preserved")
+	}
+
+	// new-file.txt should not exist after restore.
+	if _, err := os.Stat(filepath.Join(ws, "new-file.txt")); !os.IsNotExist(err) {
+		t.Error("new-file.txt should not exist after restore")
+	}
+}
+
+func TestCloneDir_ContentMatch(t *testing.T) {
+	srcDir := filepath.Join(t.TempDir(), "src")
+	dstDir := filepath.Join(t.TempDir(), "dst")
+	os.MkdirAll(srcDir, 0o755)
+	os.MkdirAll(dstDir, 0o755)
+
+	// Create source files.
+	writeFile(t, filepath.Join(srcDir, "root.txt"), "root content")
+	writeFile(t, filepath.Join(srcDir, "sub/child.txt"), "child content")
+	writeFile(t, filepath.Join(srcDir, "sub/deep/leaf.txt"), "leaf content")
+
+	// Clone.
+	if err := cloneDir(srcDir, dstDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify all files match.
+	checks := map[string]string{
+		"root.txt":          "root content",
+		"sub/child.txt":     "child content",
+		"sub/deep/leaf.txt": "leaf content",
+	}
+	for rel, want := range checks {
+		got, err := os.ReadFile(filepath.Join(dstDir, rel))
+		if err != nil {
+			t.Fatalf("read %s from clone: %v", rel, err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", rel, got, want)
+		}
+	}
+}
+
+func TestCreateLayer_MultipleCheckpoints(t *testing.T) {
+	mgr, sid := setupTestOverlay(t)
+	ws := mgr.WorkspacePath(sid)
+
+	// Checkpoint 1: single file.
+	writeFile(t, filepath.Join(ws, "v1.txt"), "version 1")
+	layer1, err := mgr.CreateLayer(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Checkpoint 2: add another file.
+	writeFile(t, filepath.Join(ws, "v2.txt"), "version 2")
+	layer2, err := mgr.CreateLayer(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Checkpoint 3: modify first file.
+	writeFile(t, filepath.Join(ws, "v1.txt"), "version 1 updated")
+	layer3, err := mgr.CreateLayer(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify layer1 has only v1.txt with original content.
+	l1Dir := filepath.Join(mgr.SessionDir(sid), "layers", layer1)
+	got, err := os.ReadFile(filepath.Join(l1Dir, "v1.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "version 1" {
+		t.Errorf("layer1 v1.txt = %q, want %q", got, "version 1")
+	}
+	if _, err := os.Stat(filepath.Join(l1Dir, "v2.txt")); !os.IsNotExist(err) {
+		t.Error("layer1 should not contain v2.txt")
+	}
+
+	// Verify layer2 has both files.
+	l2Dir := filepath.Join(mgr.SessionDir(sid), "layers", layer2)
+	got, err = os.ReadFile(filepath.Join(l2Dir, "v1.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "version 1" {
+		t.Errorf("layer2 v1.txt = %q, want %q", got, "version 1")
+	}
+	got, err = os.ReadFile(filepath.Join(l2Dir, "v2.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "version 2" {
+		t.Errorf("layer2 v2.txt = %q, want %q", got, "version 2")
+	}
+
+	// Verify layer3 has updated v1.txt.
+	l3Dir := filepath.Join(mgr.SessionDir(sid), "layers", layer3)
+	got, err = os.ReadFile(filepath.Join(l3Dir, "v1.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "version 1 updated" {
+		t.Errorf("layer3 v1.txt = %q, want %q", got, "version 1 updated")
+	}
+
+	// All three layers should be listed.
+	layers, err := mgr.ListLayers(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(layers) != 3 {
+		t.Errorf("got %d layers, want 3", len(layers))
+	}
+}
+
 func TestDiffDirs_CrossSession(t *testing.T) {
 	dir := t.TempDir()
 	dirA := filepath.Join(dir, "a")

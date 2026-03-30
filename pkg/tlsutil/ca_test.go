@@ -1,9 +1,12 @@
 package tlsutil
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -292,5 +295,146 @@ func TestLoadServerTLS_WithoutCA(t *testing.T) {
 	}
 	if cfg.ClientCAs != nil {
 		t.Error("ClientCAs should be nil when no CA cert provided")
+	}
+}
+
+func TestCertExpiry_ReturnsExpiry(t *testing.T) {
+	dir := t.TempDir()
+	certPath, _, err := GenerateCA(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	expiry := CertExpiry(certPath)
+	if expiry.IsZero() {
+		t.Fatal("expected non-zero expiry")
+	}
+
+	// CA is valid for 5 years.
+	expectedMin := time.Now().Add(4 * 365 * 24 * time.Hour)
+	if expiry.Before(expectedMin) {
+		t.Errorf("expiry %v is too soon (expected >4 years from now)", expiry)
+	}
+	expectedMax := time.Now().Add(6 * 365 * 24 * time.Hour)
+	if expiry.After(expectedMax) {
+		t.Errorf("expiry %v is too far (expected <6 years from now)", expiry)
+	}
+}
+
+func TestCertExpiry_NonexistentFile(t *testing.T) {
+	expiry := CertExpiry("/nonexistent/cert.pem")
+	if !expiry.IsZero() {
+		t.Errorf("expected zero time for nonexistent file, got %v", expiry)
+	}
+}
+
+func TestCertExpiry_InvalidPEM(t *testing.T) {
+	dir := t.TempDir()
+	badPath := filepath.Join(dir, "garbage.crt")
+	if err := os.WriteFile(badPath, []byte("not valid PEM data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	expiry := CertExpiry(badPath)
+	if !expiry.IsZero() {
+		t.Errorf("expected zero time for invalid PEM, got %v", expiry)
+	}
+}
+
+func TestCertStillValid_RegeneratesNearExpiry(t *testing.T) {
+	dir := t.TempDir()
+
+	// Generate a valid CA first.
+	certPath, _, err := GenerateCA(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Read original cert to get its serial number.
+	origPEM, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origBlock, _ := pem.Decode(origPEM)
+	if origBlock == nil {
+		t.Fatal("failed to decode original cert PEM")
+	}
+	origCert, err := x509.ParseCertificate(origBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origSerial := origCert.SerialNumber
+
+	// Read the existing key to create a near-expiry cert.
+	keyPath := filepath.Join(dir, "ca.key")
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		t.Fatal("failed to decode key PEM")
+	}
+	caKey, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a cert that expires in 10 days (within the 30-day renewal window).
+	// certStillValid checks: now + 30d < NotAfter. A cert expiring in 10d fails this.
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	nearExpiryTemplate := x509.Certificate{
+		SerialNumber:          serial,
+		Subject:               pkix.Name{CommonName: "LOKA Auto CA"},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(10 * 24 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+	}
+
+	certDER, err := x509.CreateCertificate(rand.Reader, &nearExpiryTemplate, &nearExpiryTemplate, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("create near-expiry cert: %v", err)
+	}
+
+	// Overwrite the cert file with the near-expiry cert.
+	if err := writePEM(certPath, "CERTIFICATE", certDER, 0o644); err != nil {
+		t.Fatalf("write near-expiry cert: %v", err)
+	}
+
+	// Verify certStillValid returns false for the near-expiry cert.
+	if certStillValid(certPath) {
+		t.Fatal("certStillValid should return false for cert expiring in 10 days")
+	}
+
+	// Call GenerateCA again — it should regenerate because the cert is near expiry.
+	certPath2, _, err := GenerateCA(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newPEM, err := os.ReadFile(certPath2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newBlock, _ := pem.Decode(newPEM)
+	if newBlock == nil {
+		t.Fatal("failed to decode regenerated cert PEM")
+	}
+	newCert, err := x509.ParseCertificate(newBlock.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The regenerated cert should have a different serial number.
+	if origSerial.Cmp(newCert.SerialNumber) == 0 {
+		t.Error("expected different serial after regeneration, got same serial")
+	}
+
+	// The regenerated cert should expire ~5 years from now, not 10 days.
+	minExpiry := time.Now().Add(4 * 365 * 24 * time.Hour)
+	if newCert.NotAfter.Before(minExpiry) {
+		t.Errorf("regenerated cert NotAfter %v is too soon, expected >4 years", newCert.NotAfter)
 	}
 }

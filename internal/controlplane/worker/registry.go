@@ -14,8 +14,10 @@ import (
 
 // WorkerConn represents a connected worker with its command channel.
 type WorkerConn struct {
-	Worker  *loka.Worker
-	CmdChan chan WorkerCommand
+	Worker       *loka.Worker
+	CmdChan      chan WorkerCommand
+	SessionCount int               // Updated from heartbeat.
+	Usage        loka.ResourceUsage // Updated from heartbeat.
 }
 
 // WorkerCommand is a command sent from CP to a worker.
@@ -178,6 +180,8 @@ func (r *Registry) List() []*WorkerConn {
 }
 
 // SendCommand sends a command to a specific worker.
+// Critical commands (stop_session, drain) use a blocking send with timeout
+// to avoid dropping them when the channel is full.
 func (r *Registry) SendCommand(workerID string, cmd WorkerCommand) error {
 	r.mu.RLock()
 	conn, ok := r.workers[workerID]
@@ -196,12 +200,31 @@ func (r *Registry) SendCommand(workerID string, cmd WorkerCommand) error {
 		)
 	}
 
+	// Critical commands must not be dropped — use blocking send with timeout.
+	if isCriticalCommand(cmd.Type) {
+		select {
+		case conn.CmdChan <- cmd:
+			return nil
+		case <-time.After(10 * time.Second):
+			return fmt.Errorf("worker %s command channel full, critical command %s timed out", workerID, cmd.Type)
+		}
+	}
+
 	select {
 	case conn.CmdChan <- cmd:
 		return nil
 	default:
 		return fmt.Errorf("worker %s command channel full (%d/%d)", workerID, chanLen, chanCap)
 	}
+}
+
+// isCriticalCommand returns true for commands that should never be silently dropped.
+func isCriticalCommand(cmdType string) bool {
+	switch cmdType {
+	case "stop_session", "drain", "checkpoint":
+		return true
+	}
+	return false
 }
 
 // UpdateHeartbeat updates a worker's last seen time and resource usage.
@@ -215,6 +238,8 @@ func (r *Registry) UpdateHeartbeat(ctx context.Context, workerID string, hb *lok
 
 	conn.Worker.LastSeen = hb.Timestamp
 	conn.Worker.Status = hb.Status
+	conn.SessionCount = hb.SessionCount
+	conn.Usage = hb.Usage
 
 	return r.store.Workers().UpdateHeartbeat(ctx, workerID, hb)
 }

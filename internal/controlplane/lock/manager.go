@@ -1,19 +1,25 @@
 // Package lock provides a distributed file lock manager for LOKA volumes.
 // Workers acquire locks via the control plane API before writing to shared volumes.
 // Locks have TTLs to prevent deadlocks from crashed workers.
+// Locks are persisted to the database so they survive CP restarts.
 package lock
 
 import (
+	"context"
+	"database/sql"
 	"fmt"
 	"sync"
 	"time"
 )
 
+
 // Manager provides distributed file locking for volumes.
 // Runs in the control plane. Workers acquire/release locks via HTTP API.
+// In-memory map provides fast access; DB provides durability across restarts.
 type Manager struct {
 	mu    sync.Mutex
 	locks map[string]*FileLock // key: "volume:path"
+	db    *sql.DB              // Persistent store (nil = in-memory only).
 
 	// Background reaper for expired locks.
 	done chan struct{}
@@ -31,11 +37,20 @@ type FileLock struct {
 }
 
 // NewManager creates a new lock manager and starts the TTL reaper.
-func NewManager() *Manager {
+// If db is non-nil, locks are persisted to the file_locks table and
+// restored on startup.
+func NewManager(db *sql.DB) *Manager {
 	m := &Manager{
 		locks: make(map[string]*FileLock),
+		db:    db,
 		done:  make(chan struct{}),
 	}
+
+	// Restore locks from DB.
+	if db != nil {
+		m.loadFromDB()
+	}
+
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -61,32 +76,37 @@ func (m *Manager) Acquire(volume, path, workerID string, exclusive bool, ttl tim
 	}
 
 	key := lockKey(volume, path)
+	now := time.Now()
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if existing, ok := m.locks[key]; ok {
 		// Check if expired.
-		if time.Now().After(existing.ExpiresAt) {
+		if now.After(existing.ExpiresAt) {
 			delete(m.locks, key)
+			m.deleteFromDB(key)
 		} else if existing.WorkerID != workerID {
 			return fmt.Errorf("file %s in volume %s is locked by worker %s (expires %s)",
 				path, volume, existing.WorkerID, existing.ExpiresAt.Format(time.RFC3339))
 		} else {
 			// Same worker re-acquiring — extend TTL.
-			existing.ExpiresAt = time.Now().Add(ttl)
+			existing.ExpiresAt = now.Add(ttl)
+			m.upsertToDB(key, existing)
 			return nil
 		}
 	}
 
-	m.locks[key] = &FileLock{
+	lock := &FileLock{
 		Volume:     volume,
 		Path:       path,
 		WorkerID:   workerID,
 		Exclusive:  exclusive,
-		AcquiredAt: time.Now(),
-		ExpiresAt:  time.Now().Add(ttl),
+		AcquiredAt: now,
+		ExpiresAt:  now.Add(ttl),
 	}
+	m.locks[key] = lock
+	m.upsertToDB(key, lock)
 	return nil
 }
 
@@ -107,6 +127,7 @@ func (m *Manager) Release(volume, path, workerID string) error {
 	}
 
 	delete(m.locks, key)
+	m.deleteFromDB(key)
 	return nil
 }
 
@@ -119,6 +140,7 @@ func (m *Manager) ReleaseAll(workerID string) int {
 	for key, lock := range m.locks {
 		if lock.WorkerID == workerID {
 			delete(m.locks, key)
+			m.deleteFromDB(key)
 			count++
 		}
 	}
@@ -138,6 +160,7 @@ func (m *Manager) IsLocked(volume, path string) (bool, *FileLock) {
 	}
 	if time.Now().After(lock.ExpiresAt) {
 		delete(m.locks, key)
+		m.deleteFromDB(key)
 		return false, nil
 	}
 	return true, lock
@@ -153,6 +176,7 @@ func (m *Manager) ListLocks(volume string) []*FileLock {
 	for key, lock := range m.locks {
 		if now.After(lock.ExpiresAt) {
 			delete(m.locks, key)
+			m.deleteFromDB(key)
 			continue
 		}
 		if lock.Volume == volume {
@@ -162,7 +186,7 @@ func (m *Manager) ListLocks(volume string) []*FileLock {
 	return result
 }
 
-// reapExpired periodically removes expired locks.
+// reapExpired periodically removes expired locks from memory and DB.
 func (m *Manager) reapExpired() {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -180,8 +204,79 @@ func (m *Manager) reapExpired() {
 				}
 			}
 			m.mu.Unlock()
+
+			// Bulk delete expired from DB.
+			if m.db != nil {
+				m.db.ExecContext(context.Background(),
+					`DELETE FROM file_locks WHERE expires_at < ?`,
+					time.Now().UTC().Format(time.RFC3339))
+			}
 		}
 	}
+}
+
+// ── DB persistence (best-effort, errors logged but not fatal) ──
+
+func (m *Manager) loadFromDB() {
+	rows, err := m.db.QueryContext(context.Background(),
+		`SELECT lock_key, volume, path, worker_id, exclusive, acquired_at, expires_at FROM file_locks`)
+	if err != nil {
+		return // Table may not exist yet (pre-migration).
+	}
+	defer rows.Close()
+
+	now := time.Now()
+	for rows.Next() {
+		var key, volume, path, workerID, acquiredStr, expiresStr string
+		var exclusive int
+		if err := rows.Scan(&key, &volume, &path, &workerID, &exclusive, &acquiredStr, &expiresStr); err != nil {
+			continue
+		}
+		acquired, _ := time.Parse(time.RFC3339, acquiredStr)
+		expires, _ := time.Parse(time.RFC3339, expiresStr)
+		if now.After(expires) {
+			continue // Skip expired.
+		}
+		m.locks[key] = &FileLock{
+			Volume:     volume,
+			Path:       path,
+			WorkerID:   workerID,
+			Exclusive:  exclusive == 1,
+			AcquiredAt: acquired,
+			ExpiresAt:  expires,
+		}
+	}
+}
+
+// upsertToDB persists a lock. Must be called with m.mu held.
+func (m *Manager) upsertToDB(key string, lock *FileLock) {
+	if m.db == nil {
+		return
+	}
+	exclusive := 0
+	if lock.Exclusive {
+		exclusive = 1
+	}
+	m.db.ExecContext(context.Background(),
+		`INSERT INTO file_locks (lock_key, volume, path, worker_id, exclusive, acquired_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(lock_key) DO UPDATE SET
+		   worker_id = excluded.worker_id,
+		   exclusive = excluded.exclusive,
+		   acquired_at = excluded.acquired_at,
+		   expires_at = excluded.expires_at`,
+		key, lock.Volume, lock.Path, lock.WorkerID, exclusive,
+		lock.AcquiredAt.UTC().Format(time.RFC3339),
+		lock.ExpiresAt.UTC().Format(time.RFC3339))
+}
+
+// deleteFromDB removes a lock. Must be called with m.mu held.
+func (m *Manager) deleteFromDB(key string) {
+	if m.db == nil {
+		return
+	}
+	m.db.ExecContext(context.Background(),
+		`DELETE FROM file_locks WHERE lock_key = ?`, key)
 }
 
 func lockKey(volume, path string) string {

@@ -27,6 +27,7 @@ type GarbageCollector struct {
 
 	mu             sync.Mutex
 	pendingCleanup map[string][]string // workerID → []sessionID for retry
+	cleanupRetries map[string]int      // "workerID:sessionID" → retry count
 	lastRun        time.Time
 	lastResult     *SweepResult
 }
@@ -61,6 +62,7 @@ func New(
 		retention:      ret,
 		logger:         logger,
 		pendingCleanup: make(map[string][]string),
+		cleanupRetries: make(map[string]int),
 	}
 }
 
@@ -257,11 +259,22 @@ func (gc *GarbageCollector) cleanupWorkers(ctx context.Context) int {
 
 	for workerID, sessionIDs := range pending {
 		for _, sid := range sessionIDs {
+			retryKey := workerID + ":" + sid
 			if err := gc.sendCleanup(workerID, sid); err != nil {
 				gc.mu.Lock()
-				gc.pendingCleanup[workerID] = append(gc.pendingCleanup[workerID], sid)
+				gc.cleanupRetries[retryKey]++
+				if gc.cleanupRetries[retryKey] <= 3 {
+					gc.pendingCleanup[workerID] = append(gc.pendingCleanup[workerID], sid)
+				} else {
+					// Give up after 3 retries — worker is likely permanently gone.
+					delete(gc.cleanupRetries, retryKey)
+					gc.logger.Warn("gc: abandoned cleanup after 3 retries", "worker", workerID, "session", sid)
+				}
 				gc.mu.Unlock()
 			} else {
+				gc.mu.Lock()
+				delete(gc.cleanupRetries, retryKey)
+				gc.mu.Unlock()
 				cleaned++
 			}
 		}

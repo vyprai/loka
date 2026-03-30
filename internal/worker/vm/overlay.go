@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -69,9 +71,12 @@ func (m *OverlayManager) CreateLayer(sessionID string) (string, error) {
 		return "", fmt.Errorf("create layer dir: %w", err)
 	}
 
-	// Copy current workspace state into the layer.
+	// Clone workspace state into the layer using CoW when available.
+	// macOS APFS: instant copy-on-write via cp -c (zero disk until writes).
+	// Linux btrfs: reflink via cp --reflink=auto.
+	// Fallback: regular recursive copy.
 	workspace := m.WorkspacePath(sessionID)
-	if err := copyDir(workspace, layerDir); err != nil {
+	if err := cloneDir(workspace, layerDir); err != nil {
 		return "", fmt.Errorf("snapshot workspace: %w", err)
 	}
 
@@ -95,8 +100,8 @@ func (m *OverlayManager) RestoreLayer(sessionID, layerName string) error {
 		return fmt.Errorf("recreate workspace: %w", err)
 	}
 
-	// Copy layer state into workspace.
-	if err := copyDir(layerDir, workspace); err != nil {
+	// Clone layer state into workspace (CoW when available).
+	if err := cloneDir(layerDir, workspace); err != nil {
 		return fmt.Errorf("restore layer: %w", err)
 	}
 
@@ -339,6 +344,29 @@ func DiffDirs(dirA, dirB string) (*DiffSummary, error) {
 }
 
 // ── Helpers ─────────────────────────────────────────────
+
+// cloneDir creates a copy of src directory at dst, using CoW when available.
+// macOS APFS: cp -c (instant clone, zero disk until writes).
+// Linux: cp --reflink=auto (btrfs/XFS reflink, falls back to regular copy).
+// Fallback: regular recursive copy.
+func cloneDir(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("create clone parent: %w", err)
+	}
+	if runtime.GOOS == "darwin" {
+		// APFS clone: instant CoW.
+		if err := exec.Command("cp", "-ac", src+"/.", dst).Run(); err == nil {
+			return nil
+		}
+	} else {
+		// Linux: try reflink first (btrfs/XFS).
+		if err := exec.Command("cp", "-a", "--reflink=auto", src+"/.", dst).Run(); err == nil {
+			return nil
+		}
+	}
+	// Fallback: regular recursive copy.
+	return copyDir(src, dst)
+}
 
 func copyDir(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {

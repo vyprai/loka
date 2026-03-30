@@ -70,8 +70,8 @@ func (r *serviceRepo) Create(ctx context.Context, svc *loka.Service) error {
 		return fmt.Errorf("marshal uses: %w", err)
 	}
 	_, err = r.db.ExecContext(ctx,
-		`INSERT INTO services (id, name, status, worker_id, image_ref, image_id, recipe_name, command, args, env, workdir, port, vcpus, memory_mb, routes, bundle_key, idle_timeout, health_path, health_interval, health_timeout, health_retries, labels, mounts, autoscale, snapshot_id, app_snapshot_mem, app_snapshot_state, forward_port, ready, status_message, database_config, uses, last_activity, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO services (id, name, status, worker_id, image_ref, image_id, recipe_name, command, args, env, workdir, port, vcpus, memory_mb, routes, bundle_key, idle_timeout, health_path, health_interval, health_timeout, health_retries, labels, mounts, autoscale, snapshot_id, app_snapshot_mem, app_snapshot_state, forward_port, ready, status_message, database_config, uses, parent_service_id, replicas, relation_type, last_activity, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		svc.ID, svc.Name, string(svc.Status), svc.WorkerID,
 		svc.ImageRef, svc.ImageID, svc.RecipeName, svc.Command,
 		string(args), string(env), svc.Workdir, svc.Port,
@@ -82,6 +82,7 @@ func (r *serviceRepo) Create(ctx context.Context, svc *loka.Service) error {
 		svc.ForwardPort, boolToInt(svc.Ready), svc.StatusMessage,
 		marshalDatabaseConfig(svc.DatabaseConfig),
 		string(usesJSON),
+		svc.ParentServiceID, svc.Replicas, svc.RelationType,
 		svc.LastActivity.UTC().Format(time.RFC3339),
 		svc.CreatedAt.UTC().Format(time.RFC3339),
 		svc.UpdatedAt.UTC().Format(time.RFC3339),
@@ -128,7 +129,7 @@ func (r *serviceRepo) Update(ctx context.Context, svc *loka.Service) error {
 	}
 	svc.UpdatedAt = time.Now()
 	_, err = r.db.ExecContext(ctx,
-		`UPDATE services SET name=?, status=?, worker_id=?, image_ref=?, image_id=?, recipe_name=?, command=?, args=?, env=?, workdir=?, port=?, vcpus=?, memory_mb=?, routes=?, bundle_key=?, idle_timeout=?, health_path=?, health_interval=?, health_timeout=?, health_retries=?, labels=?, mounts=?, autoscale=?, snapshot_id=?, app_snapshot_mem=?, app_snapshot_state=?, forward_port=?, ready=?, status_message=?, database_config=?, uses=?, last_activity=?, updated_at=?
+		`UPDATE services SET name=?, status=?, worker_id=?, image_ref=?, image_id=?, recipe_name=?, command=?, args=?, env=?, workdir=?, port=?, vcpus=?, memory_mb=?, routes=?, bundle_key=?, idle_timeout=?, health_path=?, health_interval=?, health_timeout=?, health_retries=?, labels=?, mounts=?, autoscale=?, snapshot_id=?, app_snapshot_mem=?, app_snapshot_state=?, forward_port=?, ready=?, status_message=?, database_config=?, uses=?, parent_service_id=?, replicas=?, relation_type=?, last_activity=?, updated_at=?
 		 WHERE id=?`,
 		svc.Name, string(svc.Status), svc.WorkerID,
 		svc.ImageRef, svc.ImageID, svc.RecipeName, svc.Command,
@@ -140,6 +141,7 @@ func (r *serviceRepo) Update(ctx context.Context, svc *loka.Service) error {
 		svc.ForwardPort, boolToInt(svc.Ready), svc.StatusMessage,
 		marshalDatabaseConfig(svc.DatabaseConfig),
 		string(usesJSON),
+		svc.ParentServiceID, svc.Replicas, svc.RelationType,
 		svc.LastActivity.UTC().Format(time.RFC3339),
 		svc.UpdatedAt.UTC().Format(time.RFC3339),
 		svc.ID,
@@ -224,7 +226,7 @@ func (r *serviceRepo) ListByWorker(ctx context.Context, workerID string) ([]*lok
 	return svcs, err
 }
 
-const serviceSelectSQL = `SELECT id, name, status, worker_id, image_ref, image_id, recipe_name, command, args, env, workdir, port, vcpus, memory_mb, routes, bundle_key, idle_timeout, health_path, health_interval, health_timeout, health_retries, labels, mounts, autoscale, snapshot_id, app_snapshot_mem, app_snapshot_state, forward_port, ready, status_message, database_config, uses, last_activity, created_at, updated_at FROM services`
+const serviceSelectSQL = `SELECT id, name, status, worker_id, image_ref, image_id, recipe_name, command, args, env, workdir, port, vcpus, memory_mb, routes, bundle_key, idle_timeout, health_path, health_interval, health_timeout, health_retries, labels, mounts, autoscale, snapshot_id, app_snapshot_mem, app_snapshot_state, forward_port, ready, status_message, database_config, uses, parent_service_id, replicas, relation_type, last_activity, created_at, updated_at FROM services`
 
 func scanService(row *sql.Row) (*loka.Service, error) {
 	var svc loka.Service
@@ -242,6 +244,7 @@ func scanService(row *sql.Row) (*loka.Service, error) {
 		&svc.SnapshotID, &svc.AppSnapshotMem, &svc.AppSnapshotState,
 		&svc.ForwardPort, &ready, &svc.StatusMessage,
 		&databaseConfigJSON, &usesJSON,
+		&svc.ParentServiceID, &svc.Replicas, &svc.RelationType,
 		&lastActivity, &createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -294,6 +297,7 @@ func scanServiceRows(rows *sql.Rows) (*loka.Service, error) {
 		&svc.SnapshotID, &svc.AppSnapshotMem, &svc.AppSnapshotState,
 		&svc.ForwardPort, &ready, &svc.StatusMessage,
 		&databaseConfigJSON, &usesJSON,
+		&svc.ParentServiceID, &svc.Replicas, &svc.RelationType,
 		&lastActivity, &createdAt, &updatedAt,
 	)
 	if err != nil {

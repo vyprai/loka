@@ -243,19 +243,81 @@ func TestPickPrefersProvider(t *testing.T) {
 
 func TestSpreadPrefersLessLoadedWorker(t *testing.T) {
 	reg := newTestRegistry(t)
+	ctx := context.Background()
 	sched := New(reg, StrategySpread)
 
-	// Create two workers with different capacity (used as proxy for load).
-	// Worker with more CPU cores gets a higher capacity bonus, so to test spread
-	// behavior we make them identical.
-	registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
-	registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
+	// Create two identical workers.
+	w1 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
+	w2 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
 
-	// With spread and identical workers, the scheduler should pick one.
-	// We just verify it does not error.
-	_, err := sched.Pick(Constraints{})
+	// Set w1 as heavily loaded via heartbeat.
+	if err := reg.UpdateHeartbeat(ctx, w1.ID, &loka.Heartbeat{
+		WorkerID:     w1.ID,
+		Timestamp:    time.Now(),
+		Status:       loka.WorkerStatusReady,
+		SessionCount: 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set w2 as lightly loaded.
+	if err := reg.UpdateHeartbeat(ctx, w2.ID, &loka.Heartbeat{
+		WorkerID:     w2.ID,
+		Timestamp:    time.Now(),
+		Status:       loka.WorkerStatusReady,
+		SessionCount: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Spread should prefer the less loaded worker (w2).
+	picked, err := sched.Pick(Constraints{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if picked.Worker.ID != w2.ID {
+		t.Errorf("spread picked %s (sessions=%d), want %s (sessions=0)",
+			picked.Worker.ID, picked.SessionCount, w2.ID)
+	}
+}
+
+func TestBinPackPrefersMoreLoadedWorker(t *testing.T) {
+	reg := newTestRegistry(t)
+	ctx := context.Background()
+	sched := New(reg, StrategyBinPack)
+
+	// Create two identical workers.
+	w1 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
+	w2 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
+
+	// Set w1 as having some sessions (but not full).
+	if err := reg.UpdateHeartbeat(ctx, w1.ID, &loka.Heartbeat{
+		WorkerID:     w1.ID,
+		Timestamp:    time.Now(),
+		Status:       loka.WorkerStatusReady,
+		SessionCount: 2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Set w2 as idle.
+	if err := reg.UpdateHeartbeat(ctx, w2.ID, &loka.Heartbeat{
+		WorkerID:     w2.ID,
+		Timestamp:    time.Now(),
+		Status:       loka.WorkerStatusReady,
+		SessionCount: 0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// BinPack should prefer the more loaded worker (w1).
+	picked, err := sched.Pick(Constraints{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if picked.Worker.ID != w1.ID {
+		t.Errorf("binpack picked %s (sessions=%d), want %s (sessions=2)",
+			picked.Worker.ID, picked.SessionCount, w1.ID)
 	}
 }
 

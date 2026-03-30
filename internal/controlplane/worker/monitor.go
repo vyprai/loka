@@ -11,13 +11,14 @@ import (
 
 // Monitor watches worker health and detects failures.
 type Monitor struct {
-	registry      *Registry
-	store         store.Store
-	migrateFunc   MigrateFunc
-	logger        *slog.Logger
-	suspectAfter  time.Duration
-	deadAfter     time.Duration
-	checkInterval time.Duration
+	registry       *Registry
+	store          store.Store
+	migrateFunc    MigrateFunc
+	logger         *slog.Logger
+	suspectAfter   time.Duration
+	deadAfter      time.Duration
+	checkInterval  time.Duration
+	migrationTries map[string]int // session ID → retry count
 }
 
 // MonitorConfig configures the health monitor.
@@ -48,13 +49,14 @@ func NewMonitor(registry *Registry, s store.Store, migrateFn MigrateFunc, cfg Mo
 		cfg.CheckInterval = 5 * time.Second
 	}
 	return &Monitor{
-		registry:      registry,
-		store:         s,
-		migrateFunc:   migrateFn,
-		logger:        logger,
-		suspectAfter:  cfg.SuspectAfter,
-		deadAfter:     cfg.DeadAfter,
-		checkInterval: cfg.CheckInterval,
+		registry:       registry,
+		store:          s,
+		migrateFunc:    migrateFn,
+		logger:         logger,
+		suspectAfter:   cfg.SuspectAfter,
+		deadAfter:      cfg.DeadAfter,
+		checkInterval:  cfg.CheckInterval,
+		migrationTries: make(map[string]int),
 	}
 }
 
@@ -136,9 +138,19 @@ func (m *Monitor) handleWorkerDead(ctx context.Context, w *loka.Worker) {
 		}
 
 		if m.migrateFunc != nil {
+			m.migrationTries[sess.ID]++
 			if err := m.migrateFunc(ctx, sess.ID, target.Worker.ID); err != nil {
-				m.logger.Error("rescheduling failed", "session", sess.ID, "error", err)
+				m.logger.Error("rescheduling failed", "session", sess.ID, "attempt", m.migrationTries[sess.ID], "error", err)
+				// After 3 failures, give up and mark as error.
+				if m.migrationTries[sess.ID] >= 3 {
+					sess.Status = loka.SessionStatusError
+					sess.UpdatedAt = time.Now()
+					m.store.Sessions().Update(ctx, sess)
+					delete(m.migrationTries, sess.ID)
+					m.logger.Warn("session migration abandoned after 3 failures", "session", sess.ID)
+				}
 			} else {
+				delete(m.migrationTries, sess.ID)
 				rescheduled++
 			}
 		}

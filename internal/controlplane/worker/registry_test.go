@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -250,5 +251,95 @@ func TestConcurrentAccess(t *testing.T) {
 	conns := r.List()
 	if len(conns) != 20 {
 		t.Errorf("after concurrent ops: got %d workers, want 20", len(conns))
+	}
+}
+
+func TestSendCommand_CriticalBlocksOnFull(t *testing.T) {
+	r := newTestRegistry()
+	w := registerTestWorker(t, r)
+
+	conn, ok := r.Get(w.ID)
+	if !ok {
+		t.Fatal("worker not found")
+	}
+
+	// Fill the command channel to capacity.
+	chanCap := cap(conn.CmdChan)
+	for i := 0; i < chanCap; i++ {
+		conn.CmdChan <- WorkerCommand{ID: fmt.Sprintf("filler-%d", i), Type: "noop"}
+	}
+
+	// Send a critical command in a goroutine — it should block, not drop.
+	done := make(chan error, 1)
+	go func() {
+		done <- r.SendCommand(w.ID, WorkerCommand{ID: "critical-1", Type: "stop_session"})
+	}()
+
+	// Give it a moment to confirm it's blocking, then drain one slot.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case err := <-done:
+		t.Fatalf("critical command should have blocked, but returned immediately: %v", err)
+	default:
+		// Good — still blocking.
+	}
+
+	// Drain one command to make room.
+	<-conn.CmdChan
+
+	// The critical send should now succeed within a reasonable time.
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("critical command failed after drain: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("critical command did not unblock after draining a slot")
+	}
+}
+
+func TestSendCommand_NonCriticalDropsOnFull(t *testing.T) {
+	r := newTestRegistry()
+	w := registerTestWorker(t, r)
+
+	conn, ok := r.Get(w.ID)
+	if !ok {
+		t.Fatal("worker not found")
+	}
+
+	// Fill the command channel to capacity.
+	chanCap := cap(conn.CmdChan)
+	for i := 0; i < chanCap; i++ {
+		conn.CmdChan <- WorkerCommand{ID: fmt.Sprintf("filler-%d", i), Type: "noop"}
+	}
+
+	// Non-critical command should return an error immediately (not block).
+	err := r.SendCommand(w.ID, WorkerCommand{ID: "exec-1", Type: "exec"})
+	if err == nil {
+		t.Fatal("expected error when sending non-critical command to a full channel")
+	}
+}
+
+func TestHeartbeatUpdatesSessionCount(t *testing.T) {
+	r := newTestRegistry()
+	w := registerTestWorker(t, r)
+
+	ctx := context.Background()
+	hb := &loka.Heartbeat{
+		WorkerID:     w.ID,
+		Timestamp:    time.Now(),
+		Status:       loka.WorkerStatusBusy,
+		SessionCount: 5,
+	}
+	if err := r.UpdateHeartbeat(ctx, w.ID, hb); err != nil {
+		t.Fatalf("UpdateHeartbeat: %v", err)
+	}
+
+	conn, ok := r.Get(w.ID)
+	if !ok {
+		t.Fatal("worker not found after heartbeat")
+	}
+	if conn.SessionCount != 5 {
+		t.Errorf("SessionCount = %d, want 5", conn.SessionCount)
 	}
 }

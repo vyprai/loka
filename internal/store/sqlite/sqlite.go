@@ -227,6 +227,9 @@ CREATE TABLE IF NOT EXISTS services (
 	status_message   TEXT NOT NULL DEFAULT '',
 	database_config  TEXT NOT NULL DEFAULT '',
 	uses             TEXT NOT NULL DEFAULT '{}',
+	parent_service_id TEXT NOT NULL DEFAULT '',
+	replicas         INTEGER NOT NULL DEFAULT 0,
+	relation_type    TEXT NOT NULL DEFAULT '',
 	last_activity    TEXT NOT NULL DEFAULT (datetime('now')),
 	created_at       TEXT NOT NULL DEFAULT (datetime('now')),
 	updated_at       TEXT NOT NULL DEFAULT (datetime('now'))
