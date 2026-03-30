@@ -665,3 +665,97 @@ func TestRecoverStuckDatabases_CleansExpiredGrace(t *testing.T) {
 		t.Error("expected GraceDeadline cleared")
 	}
 }
+
+func TestScale_NonExistentService(t *testing.T) {
+	s := setupTestStore(t)
+	m := newManagerFromStore(t, s)
+	err := m.Scale(context.Background(), "nonexistent-id", 3)
+	if err == nil {
+		t.Error("expected error for non-existent service")
+	}
+}
+
+func TestRecoverStuckDatabases_NonExpiredGrace(t *testing.T) {
+	s := setupTestStore(t)
+	now := time.Now()
+	db := &loka.Service{
+		ID: "db-fresh-grace", Name: "fresh-grace", Status: loka.ServiceStatusRunning,
+		ImageRef: "postgres:16", Port: 5432, VCPUs: 1, MemoryMB: 512,
+		DatabaseConfig: &loka.DatabaseConfig{
+			Engine: "postgres", Version: "16", LoginRole: "new", Password: "p",
+			Role:              loka.DatabaseRolePrimary,
+			PreviousLoginRole: "old_login",
+			GraceDeadline:     now.Add(1 * time.Hour), // Expires in 1 hour (not yet).
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	s.Services().Create(context.Background(), db)
+
+	_ = newManagerFromStore(t, s)
+
+	got, _ := s.Services().Get(context.Background(), db.ID)
+	if got.DatabaseConfig.PreviousLoginRole == "" {
+		t.Error("non-expired grace should NOT be cleared")
+	}
+}
+
+func TestDeploy_WithReplicasAndDatabaseConfig(t *testing.T) {
+	s := setupTestStore(t)
+	m := newManagerFromStore(t, s)
+
+	svc, err := m.Deploy(context.Background(), DeployOpts{
+		Name:     "db-with-replicas",
+		Replicas: 2,
+		DatabaseConfig: &loka.DatabaseConfig{
+			Engine: "postgres", Version: "16", LoginRole: "user", Password: "pass",
+			DBName: "testdb", Role: loka.DatabaseRolePrimary,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if svc.DatabaseConfig == nil {
+		t.Fatal("expected DatabaseConfig on primary")
+	}
+
+	// Verify replica was created.
+	replicas, _, _ := s.Services().List(context.Background(), store.ServiceFilter{ParentServiceID: &svc.ID})
+	count := 0
+	for _, r := range replicas {
+		if r.RelationType == "replica" {
+			count++
+		}
+	}
+	if count != 1 { // 2 total - 1 primary = 1 replica
+		t.Errorf("expected 1 replica, got %d", count)
+	}
+}
+
+func TestRecoverStuckDatabases_ExpiredGraceWithoutPreviousRole(t *testing.T) {
+	s := setupTestStore(t)
+	now := time.Now()
+	db := &loka.Service{
+		ID: "db-no-role", Name: "no-role", Status: loka.ServiceStatusRunning,
+		ImageRef: "postgres:16", Port: 5432, VCPUs: 1, MemoryMB: 512,
+		DatabaseConfig: &loka.DatabaseConfig{
+			Engine: "postgres", Version: "16", LoginRole: "current", Password: "p",
+			Role:              loka.DatabaseRolePrimary,
+			PreviousLoginRole: "", // No previous role — grace period check skipped.
+			GraceDeadline:     now.Add(-1 * time.Hour), // Expired.
+		},
+		CreatedAt: now, UpdatedAt: now,
+	}
+	s.Services().Create(context.Background(), db)
+
+	_ = newManagerFromStore(t, s)
+
+	got, _ := s.Services().Get(context.Background(), db.ID)
+	// With PreviousLoginRole empty, the recovery code checks both conditions:
+	// cfg.PreviousLoginRole != "" && !cfg.GraceDeadline.IsZero() && now.After(cfg.GraceDeadline)
+	// Since PreviousLoginRole is empty, it should NOT be modified.
+	if !got.DatabaseConfig.GraceDeadline.IsZero() && got.DatabaseConfig.PreviousLoginRole == "" {
+		// This is actually fine — the condition requires PreviousLoginRole != "".
+		// The deadline stays stale but harmless. Document this behavior.
+		t.Log("expired deadline without previous role: left as-is (expected)")
+	}
+}

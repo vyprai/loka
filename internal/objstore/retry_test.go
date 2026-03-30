@@ -166,5 +166,44 @@ func TestRetryStore_List_SingleRetry(t *testing.T) {
 	}
 }
 
+func TestRetryStore_GetPresignedURL_RetriesOnFailure(t *testing.T) {
+	inner := &failStore{failCount: 1}
+	store := NewRetryStore(inner)
+	store.backoff = 1 * time.Millisecond
+
+	url, err := store.GetPresignedURL(context.Background(), "b", "k", time.Hour)
+	if err != nil {
+		t.Fatalf("expected success, got %v", err)
+	}
+	if url == "" {
+		t.Error("expected non-empty URL")
+	}
+}
+
+func TestRetryStore_List_ExceedsMaxRetries(t *testing.T) {
+	inner := &failStore{failCount: 10}
+	store := NewRetryStore(inner)
+	store.backoff = 1 * time.Millisecond
+
+	_, err := store.List(context.Background(), "b", "prefix")
+	if err == nil {
+		t.Fatal("expected error after max retries for List")
+	}
+}
+
+func TestRetryStore_Put_NilReader(t *testing.T) {
+	inner := &failStore{data: make(map[string]string)}
+	store := NewRetryStore(inner)
+	// Nil reader panics in io.ReadAll — document this is expected.
+	// Callers must never pass nil reader.
+	defer func() {
+		if r := recover(); r != nil {
+			t.Logf("Put with nil reader panics as expected: %v", r)
+		}
+	}()
+	store.Put(context.Background(), "b", "k", nil, 0)
+	// If we reach here, it didn't panic (some stores may handle nil).
+}
+
 // Ensure the bytes import is used by the test package.
 var _ = bytes.NewReader

@@ -61,6 +61,37 @@ func TestHandleUpdateRoutes_OverwritesPrevious(t *testing.T) {
 	}
 }
 
+func TestHandleUpdateRoutes_EmptyServicesList(t *testing.T) {
+	a := testAgent()
+	a.HandleUpdateRoutes(99, []ServiceRouteEntry{})
+	if a.RouteVersion() != 99 {
+		t.Errorf("version = %d, want 99", a.RouteVersion())
+	}
+	_, ok := a.LookupRoute("anything")
+	if ok {
+		t.Error("expected no routes after empty update")
+	}
+}
+
+func TestRouteVersion_InitialValue(t *testing.T) {
+	a := testAgent()
+	if a.RouteVersion() != 0 {
+		t.Errorf("initial RouteVersion = %d, want 0", a.RouteVersion())
+	}
+}
+
+func TestHandleUpdateRoutes_EmptyServiceName(t *testing.T) {
+	a := testAgent()
+	a.HandleUpdateRoutes(1, []ServiceRouteEntry{{Name: "", WorkerIP: "10.0.0.1", Port: 80}})
+	route, ok := a.LookupRoute("")
+	if !ok {
+		t.Fatal("expected route stored under empty key")
+	}
+	if route.WorkerIP != "10.0.0.1" {
+		t.Errorf("WorkerIP = %q, want 10.0.0.1", route.WorkerIP)
+	}
+}
+
 func TestSetRemoteMode(t *testing.T) {
 	a := testAgent()
 	if a.remoteMode {

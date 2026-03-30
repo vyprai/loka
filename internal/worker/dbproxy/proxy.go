@@ -46,6 +46,10 @@ func (r *Route) PickBackend(isRead bool) *Backend {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
+	if r.Primary == nil {
+		return nil
+	}
+
 	if !isRead || len(r.Replicas) == 0 {
 		return r.Primary
 	}

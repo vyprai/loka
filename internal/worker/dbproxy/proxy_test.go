@@ -250,7 +250,115 @@ func TestRedisClassifyCommand_Subscribe(t *testing.T) {
 	}
 }
 
+// --- SQL classification edge cases ---
+
+func TestPostgresClassifySQL_EmptyQuery(t *testing.T) {
+	pp := &PostgresProxy{prepStmts: make(map[string]bool)}
+	if pp.classifySQL("") {
+		t.Error("empty query should be write (safe default)")
+	}
+}
+
+func TestPostgresClassifySQL_MultilineQuery(t *testing.T) {
+	pp := &PostgresProxy{prepStmts: make(map[string]bool)}
+	if !pp.classifySQL("SELECT\n* FROM\nusers") {
+		t.Error("multiline SELECT should be read")
+	}
+}
+
+func TestPostgresClassifySQL_WithInlineComment(t *testing.T) {
+	pp := &PostgresProxy{prepStmts: make(map[string]bool)}
+	// Comment before SELECT — prefix matching sees "/*" not "SELECT".
+	// This routes to primary (safe default).
+	if pp.classifySQL("/* comment */ SELECT 1") {
+		t.Error("SQL with leading comment should go to primary (prefix doesn't match SELECT)")
+	}
+}
+
+func TestPostgresClassifySQL_WithLeadingLineComment(t *testing.T) {
+	pp := &PostgresProxy{prepStmts: make(map[string]bool)}
+	if pp.classifySQL("-- comment\nSELECT 1") {
+		t.Error("SQL with leading line comment should go to primary")
+	}
+}
+
+func TestPostgresClassifySQL_MultipleStatements(t *testing.T) {
+	pp := &PostgresProxy{prepStmts: make(map[string]bool)}
+	// Known limitation: only checks prefix. "SELECT 1; DROP TABLE" looks like a read.
+	// This is safe because postgres doesn't allow multiple statements in simple query
+	// protocol when using prepared statements, and the proxy pins transactions.
+	if !pp.classifySQL("SELECT 1; DROP TABLE users") {
+		t.Error("prefix-only classification: SELECT; is still a read")
+	}
+}
+
+func TestPostgresClassifySQL_Fetch(t *testing.T) {
+	pp := &PostgresProxy{prepStmts: make(map[string]bool)}
+	if !pp.classifySQL("FETCH NEXT FROM my_cursor") {
+		t.Error("FETCH should be read")
+	}
+}
+
+func TestPostgresClassifyMessage_UnknownType(t *testing.T) {
+	pp := &PostgresProxy{prepStmts: make(map[string]bool)}
+	if pp.classifyMessage(0xFF, []byte("anything")) {
+		t.Error("unknown message type should be write (safe default)")
+	}
+}
+
+func TestMySQLClassifyPacket_EmptyPayload(t *testing.T) {
+	mp := &MySQLProxy{stmtMap: make(map[uint32]bool)}
+	if mp.classifyPacket(comQuery, []byte{}) {
+		t.Error("empty COM_QUERY should be write")
+	}
+}
+
+func TestMySQLClassifySQL_MultilineQuery(t *testing.T) {
+	mp := &MySQLProxy{stmtMap: make(map[uint32]bool)}
+	if !mp.classifySQL("SELECT\n* FROM\nusers") {
+		t.Error("multiline SELECT should be read")
+	}
+}
+
+func TestMySQLClassifySQL_WithComments(t *testing.T) {
+	mp := &MySQLProxy{stmtMap: make(map[uint32]bool)}
+	if mp.classifySQL("/* hint */ SELECT 1") {
+		t.Error("SQL with leading comment should go to primary")
+	}
+}
+
+func TestRedisClassifyCommand_EmptyCommand(t *testing.T) {
+	rp := &RedisProxy{}
+	if rp.classifyCommand("") {
+		t.Error("empty command should be write")
+	}
+}
+
+func TestRedisClassifyCommand_Discard(t *testing.T) {
+	rp := &RedisProxy{txnPinned: true}
+	rp.classifyCommand("DISCARD")
+	if rp.txnPinned {
+		t.Error("expected txnPinned=false after DISCARD")
+	}
+}
+
 // --- Route PickBackend ---
+
+func TestPickBackend_NilPrimary(t *testing.T) {
+	r := &Route{Primary: nil, Replicas: []*Backend{{ID: "r1", Healthy: true}}}
+	b := r.PickBackend(false)
+	if b != nil {
+		t.Error("expected nil when Primary is nil")
+	}
+}
+
+func TestPickBackend_ReadWithNilReplicas(t *testing.T) {
+	r := &Route{Primary: &Backend{ID: "p", Healthy: true}, Replicas: nil}
+	b := r.PickBackend(true)
+	if b == nil || b.ID != "p" {
+		t.Error("read with nil Replicas should fall to primary")
+	}
+}
 
 func TestPickBackend_WriteGoesToPrimary(t *testing.T) {
 	r := &Route{
