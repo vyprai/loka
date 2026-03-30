@@ -23,8 +23,24 @@ type WorkerConn struct {
 // WorkerCommand is a command sent from CP to a worker.
 type WorkerCommand struct {
 	ID   string
-	Type string // "launch_session", "stop_session", "exec", "checkpoint", "drain", etc.
+	Type string // "launch_session", "stop_session", "exec", "checkpoint", "drain", "update_routes", etc.
 	Data any
+}
+
+// UpdateRoutesData is the payload for pushing the service route table to a worker.
+type UpdateRoutesData struct {
+	Version  int64          `json:"version"`  // Route table version for staleness detection.
+	Services []ServiceRoute `json:"services"` // All routable services.
+}
+
+// ServiceRoute describes a service's network location for worker-to-worker routing.
+type ServiceRoute struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	WorkerIP string `json:"worker_ip"` // PrivateIP of the worker hosting this service.
+	Port     int    `json:"port"`      // ForwardPort on that worker.
+	Engine   string `json:"engine"`    // "postgres", "mysql", "redis" (for DB proxy).
+	Role     string `json:"role"`      // "primary", "replica", "component"
 }
 
 // LaunchSessionData is the payload for launching a session on a worker.

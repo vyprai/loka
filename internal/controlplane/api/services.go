@@ -35,6 +35,18 @@ type deployServiceReq struct {
 	Autoscale      *loka.AutoscaleConfig `json:"autoscale,omitempty"`
 	Uses           map[string]string     `json:"uses,omitempty"`
 	Replicas       int                   `json:"replicas,omitempty"`
+	Components     []deployComponentReq  `json:"components,omitempty"`
+}
+
+type deployComponentReq struct {
+	Name      string            `json:"name"`
+	Image     string            `json:"image"`
+	Command   string            `json:"command,omitempty"`
+	Port      int               `json:"port"`
+	Domain    string            `json:"domain,omitempty"`
+	Env       map[string]string `json:"env,omitempty"`
+	DependsOn []string          `json:"depends_on,omitempty"`
+	Uses      interface{}       `json:"uses,omitempty"`
 }
 
 func (s *Server) deployService(w http.ResponseWriter, r *http.Request) {
@@ -71,6 +83,30 @@ func (s *Server) deployService(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Deploy components as child services if present.
+	if len(req.Components) > 0 {
+		for _, comp := range req.Components {
+			var routes []loka.ServiceRoute
+			if comp.Domain != "" {
+				routes = []loka.ServiceRoute{{Domain: comp.Domain, Port: comp.Port, Protocol: "http"}}
+			}
+			compOpts := service.DeployOpts{
+				Name:            comp.Name,
+				ImageRef:        comp.Image,
+				Command:         comp.Command,
+				Port:            comp.Port,
+				Env:             comp.Env,
+				Routes:          routes,
+				ParentServiceID: svc.ID,
+				RelationType:    "component",
+				Uses:            loka.NormalizeUses(comp.Uses),
+			}
+			if _, err := s.serviceManager.Deploy(r.Context(), compOpts); err != nil {
+				s.logger.Warn("failed to deploy component", "parent", svc.Name, "component", comp.Name, "error", err)
+			}
+		}
 	}
 
 	// If ?wait=true, block until the service is ready.

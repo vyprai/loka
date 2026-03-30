@@ -442,6 +442,63 @@ func (m *Manager) Scale(ctx context.Context, id string, replicas int) error {
 	return m.store.Services().Update(ctx, svc)
 }
 
+// BroadcastRoutes pushes the current service route table to all workers.
+// Called after deploy, stop, destroy, or any service state change.
+func (m *Manager) BroadcastRoutes(ctx context.Context) {
+	running := loka.ServiceStatusRunning
+	services, _, err := m.store.Services().List(ctx, store.ServiceFilter{Status: &running, Limit: 1000})
+	if err != nil {
+		m.logger.Error("broadcast routes: list services failed", "error", err)
+		return
+	}
+
+	var routes []worker.ServiceRoute
+	for _, svc := range services {
+		engine := ""
+		role := "service"
+		if svc.DatabaseConfig != nil {
+			engine = svc.DatabaseConfig.Engine
+			role = string(svc.DatabaseConfig.Role)
+		}
+		if svc.RelationType != "" {
+			role = svc.RelationType
+		}
+		routes = append(routes, worker.ServiceRoute{
+			ID:       svc.ID,
+			Name:     svc.Name,
+			WorkerIP: "", // Filled by worker lookup below.
+			Port:     svc.ForwardPort,
+			Engine:   engine,
+			Role:     role,
+		})
+	}
+
+	// Fill worker IPs.
+	for i := range routes {
+		svc := services[i]
+		if wc, ok := m.registry.Get(svc.WorkerID); ok {
+			addr := wc.Worker.PrivateIP
+			if addr == "" {
+				addr = wc.Worker.IPAddress
+			}
+			routes[i].WorkerIP = addr
+		}
+	}
+
+	// Push to all workers.
+	data := worker.UpdateRoutesData{
+		Version:  time.Now().UnixMilli(),
+		Services: routes,
+	}
+	for _, wc := range m.registry.List() {
+		m.registry.SendCommand(wc.Worker.ID, worker.WorkerCommand{
+			ID:   uuid.New().String(),
+			Type: "update_routes",
+			Data: data,
+		})
+	}
+}
+
 // asyncDeploy handles image pulling, sending launch command, and health checking.
 func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts DeployOpts) {
 	// Acquire deploy semaphore to limit concurrent deploys.
