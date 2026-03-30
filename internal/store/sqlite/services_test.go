@@ -566,6 +566,24 @@ func TestUnmarshalDatabaseConfig_EmptyString(t *testing.T) {
 	require.Nil(t, svc.DatabaseConfig, "empty string should result in nil DatabaseConfig")
 }
 
+func TestServiceReplicaFieldsRoundtrip(t *testing.T) {
+	s := setupTestDB(t)
+	ctx := context.Background()
+
+	svc := newTestService("replica-fields", loka.ServiceStatusRunning, "worker-1")
+	svc.ParentServiceID = "parent-123"
+	svc.Replicas = 3
+	svc.RelationType = "replica"
+
+	require.NoError(t, s.Services().Create(ctx, svc))
+
+	got, err := s.Services().Get(ctx, svc.ID)
+	require.NoError(t, err)
+	require.Equal(t, "parent-123", got.ParentServiceID)
+	require.Equal(t, 3, got.Replicas)
+	require.Equal(t, "replica", got.RelationType)
+}
+
 func TestServiceJSONFields(t *testing.T) {
 	s := setupTestDB(t)
 	ctx := context.Background()

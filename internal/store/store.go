@@ -97,7 +97,8 @@ type ServiceFilter struct {
 	WorkerID   *string
 	Name       *string
 	IsDatabase *bool   // If non-nil, filter by database_config presence.
-	PrimaryID  *string // If non-nil, filter replicas by primary_id in database_config.
+	PrimaryID       *string // If non-nil, filter replicas by primary_id in database_config (JSON).
+	ParentServiceID *string // If non-nil, filter by parent_service_id column.
 	Limit      int
 	Offset     int
 }

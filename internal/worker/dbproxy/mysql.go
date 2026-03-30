@@ -165,20 +165,23 @@ func (mp *MySQLProxy) classifyPacket(cmd byte, payload []byte) bool {
 
 // classifySQL checks if a SQL statement is a read.
 func (mp *MySQLProxy) classifySQL(sql string) bool {
-	if mp.txnPinned {
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+
+	// COMMIT/ROLLBACK must be checked BEFORE the txnPinned early-return
+	// so that they can reset the pin state.
+	if strings.HasPrefix(upper, "COMMIT") || strings.HasPrefix(upper, "ROLLBACK") {
+		mp.txnPinned = false
 		return false
 	}
 
-	upper := strings.ToUpper(strings.TrimSpace(sql))
+	if mp.txnPinned {
+		return false
+	}
 
 	if strings.HasPrefix(upper, "BEGIN") ||
 		strings.HasPrefix(upper, "START TRANSACTION") ||
 		strings.HasPrefix(upper, "SET") {
 		mp.txnPinned = true
-		return false
-	}
-	if strings.HasPrefix(upper, "COMMIT") || strings.HasPrefix(upper, "ROLLBACK") {
-		mp.txnPinned = false
 		return false
 	}
 

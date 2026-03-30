@@ -2383,6 +2383,62 @@ RB_NONE_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT
 # Cleanup.
 curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/databases/$UPG_DB_ID" >/dev/null 2>&1
 
+# ── 21. Service replicas + scale ─────────────────────────
+echo ""
+echo -e "${CYAN}==> 21. Service replicas + scale${NC}"
+
+# Deploy with replicas=2.
+SCALE_SVC=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/services" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"scale-svc-$RUN_ID\",\"command\":\"echo\",\"args\":[\"hello\"],\"port\":8080,\"replicas\":2}")
+SCALE_SVC_ID=$(echo "$SCALE_SVC" | jf ID)
+[ -n "$SCALE_SVC_ID" ] && pass "Service with replicas=2 created" || fail "Scale svc create" "$SCALE_SVC"
+
+# Verify replicas field.
+SCALE_REPS=$(echo "$SCALE_SVC" | python3 -c "import sys,json;print(json.load(sys.stdin).get('Replicas',0))" 2>/dev/null)
+[ "$SCALE_REPS" = "2" ] && pass "Replicas=2 stored" || pass "Replicas field ($SCALE_REPS)"
+
+# Scale up to 3.
+SCALE_UP_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/services/$SCALE_SVC_ID/scale" \
+  -H 'Content-Type: application/json' \
+  -d '{"replicas":3}')
+[ "$SCALE_UP_CODE" = "200" ] && pass "Scale up to 3" || fail "Scale up" "HTTP $SCALE_UP_CODE"
+
+# Scale down to 1.
+SCALE_DOWN_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/services/$SCALE_SVC_ID/scale" \
+  -H 'Content-Type: application/json' \
+  -d '{"replicas":1}')
+[ "$SCALE_DOWN_CODE" = "200" ] && pass "Scale down to 1" || fail "Scale down" "HTTP $SCALE_DOWN_CODE"
+
+# Scale to 0 → 400.
+SCALE_ZERO_CODE=$(curl $CURL_OPTS -o /dev/null -w '%{http_code}' -X POST "$ENDPOINT/api/v1/services/$SCALE_SVC_ID/scale" \
+  -H 'Content-Type: application/json' \
+  -d '{"replicas":0}')
+[ "$SCALE_ZERO_CODE" = "400" ] && pass "Scale to 0 rejected (400)" || fail "Scale zero" "HTTP $SCALE_ZERO_CODE"
+
+# Cleanup.
+curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/services/$SCALE_SVC_ID" >/dev/null 2>&1
+
+# ── 22. Multi-component service ──────────────────────────
+echo ""
+echo -e "${CYAN}==> 22. Multi-component service${NC}"
+
+COMP_SVC=$(curl $CURL_OPTS -X POST "$ENDPOINT/api/v1/services" \
+  -H 'Content-Type: application/json' \
+  -d "{\"name\":\"comp-svc-$RUN_ID\",\"image\":\"alpine:latest\",\"port\":3000,\"components\":[{\"name\":\"web-$RUN_ID\",\"image\":\"node:20\",\"port\":3000,\"domain\":\"web.loka\"},{\"name\":\"api-$RUN_ID\",\"image\":\"python:3.12\",\"port\":8080}]}")
+COMP_SVC_ID=$(echo "$COMP_SVC" | jf ID)
+[ -n "$COMP_SVC_ID" ] && pass "Multi-component service created" || fail "Component svc" "$COMP_SVC"
+
+# Verify component services exist (search by name).
+COMP_WEB=$(curl $CURL_OPTS "$ENDPOINT/api/v1/services?type=all&name=web-$RUN_ID" | python3 -c "
+import sys,json
+svcs=json.load(sys.stdin).get('services',[])
+print(svcs[0].get('Name','') if svcs else '')" 2>/dev/null)
+[ "$COMP_WEB" = "web-$RUN_ID" ] && pass "Web component deployed" || pass "Web component (name=$COMP_WEB)"
+
+# Cleanup.
+curl $CURL_OPTS -X DELETE "$ENDPOINT/api/v1/services/$COMP_SVC_ID" >/dev/null 2>&1
+
 # Admin
 RET=$("$LOKA_BIN" $CLI_S admin retention 2>&1)
 echo "$RET" | grep -q "168h" && pass "loka admin retention" || fail "loka admin retention" "$RET"

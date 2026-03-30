@@ -334,10 +334,25 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 
 	m.logger.Info("service created", "id", svc.ID, "name", svc.Name)
 
-	// Schedule to a worker via scheduler.
+	// Create additional replicas if requested (before scheduling, so replicas
+	// are created even if no workers are available yet).
+	if opts.Replicas > 1 && opts.ParentServiceID == "" {
+		for i := 1; i < opts.Replicas; i++ {
+			replicaOpts := opts
+			replicaOpts.Name = fmt.Sprintf("%s-replica-%d", svc.Name, i)
+			replicaOpts.ParentServiceID = svc.ID
+			replicaOpts.RelationType = "replica"
+			replicaOpts.Replicas = 0
+			replicaOpts.Routes = nil
+			if _, err := m.Deploy(ctx, replicaOpts); err != nil {
+				m.logger.Warn("failed to create replica", "primary", svc.Name, "replica", i, "error", err)
+			}
+		}
+	}
+
+	// Schedule the primary to a worker.
 	wConn, err := m.scheduler.Pick(scheduler.Constraints{})
 	if err != nil {
-		// No workers available — mark deploying, will retry when a worker appears.
 		m.logger.Warn("no workers available for service", "id", svc.ID)
 		svc.StatusMessage = "waiting for worker"
 		svc.UpdatedAt = time.Now()
@@ -349,7 +364,6 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 	svc.UpdatedAt = time.Now()
 	m.store.Services().Update(ctx, svc)
 
-	// Launch the async deploy goroutine.
 	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
@@ -357,22 +371,6 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 	}()
 
 	m.logger.Info("service scheduled to worker", "service", svc.ID, "worker", wConn.Worker.ID)
-
-	// Create additional replicas if requested.
-	if opts.Replicas > 1 && opts.ParentServiceID == "" {
-		for i := 1; i < opts.Replicas; i++ {
-			replicaOpts := opts
-			replicaOpts.Name = fmt.Sprintf("%s-replica-%d", svc.Name, i)
-			replicaOpts.ParentServiceID = svc.ID
-			replicaOpts.RelationType = "replica"
-			replicaOpts.Replicas = 0 // Replicas don't spawn more replicas.
-			replicaOpts.Routes = nil // Only primary gets domain routes.
-			if _, err := m.Deploy(ctx, replicaOpts); err != nil {
-				m.logger.Warn("failed to create replica", "primary", svc.Name, "replica", i, "error", err)
-			}
-		}
-	}
-
 	return svc, nil
 }
 
@@ -386,9 +384,9 @@ func (m *Manager) Scale(ctx context.Context, id string, replicas int) error {
 		return fmt.Errorf("replicas must be at least 1")
 	}
 
-	// Find current replicas.
+	// Find current replicas via parent_service_id column.
 	currentReplicas, _, _ := m.store.Services().List(ctx, store.ServiceFilter{
-		PrimaryID: &svc.ID,
+		ParentServiceID: &svc.ID,
 	})
 	// Filter to only "replica" type.
 	var replicaServices []*loka.Service

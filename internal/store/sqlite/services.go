@@ -179,6 +179,10 @@ func (r *serviceRepo) List(ctx context.Context, f store.ServiceFilter) ([]*loka.
 			where += ` AND database_config = ''`
 		}
 	}
+	if f.ParentServiceID != nil {
+		where += ` AND parent_service_id = ?`
+		args = append(args, *f.ParentServiceID)
+	}
 	if f.PrimaryID != nil {
 		// Escape LIKE wildcards in the PrimaryID to prevent injection.
 		escaped := strings.ReplaceAll(*f.PrimaryID, `%`, `\%`)

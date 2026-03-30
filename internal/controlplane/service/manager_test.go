@@ -14,6 +14,7 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/loka"
 	"github.com/vyprai/loka/internal/objstore/local"
+	"github.com/vyprai/loka/internal/store"
 	"github.com/vyprai/loka/internal/store/sqlite"
 
 	_ "modernc.org/sqlite"
@@ -538,5 +539,129 @@ func TestRecoverStuckDeploys_LeavesRunningAlone(t *testing.T) {
 	}
 	if got.Status != loka.ServiceStatusRunning {
 		t.Errorf("status = %q, want %q", got.Status, loka.ServiceStatusRunning)
+	}
+}
+
+// --- Scale tests ---
+
+func TestScale_Up(t *testing.T) {
+	s := setupTestStore(t)
+	m := newManagerFromStore(t, s)
+
+	svc, err := m.Deploy(context.Background(), DeployOpts{
+		Name: "scale-up", ImageRef: "alpine:latest",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Scale(context.Background(), svc.ID, 3); err != nil {
+		t.Fatalf("Scale: %v", err)
+	}
+
+	// Verify replicas created.
+	replicas, _, _ := s.Services().List(context.Background(), store.ServiceFilter{ParentServiceID: &svc.ID})
+	count := 0
+	for _, r := range replicas {
+		if r.RelationType == "replica" {
+			count++
+		}
+	}
+	if count != 2 { // 3 total - 1 primary = 2 replicas
+		t.Errorf("expected 2 replicas, got %d", count)
+	}
+}
+
+func TestScale_Down(t *testing.T) {
+	s := setupTestStore(t)
+	m := newManagerFromStore(t, s)
+
+	svc, err := m.Deploy(context.Background(), DeployOpts{
+		Name: "scale-down", ImageRef: "alpine:latest", Replicas: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Scale(context.Background(), svc.ID, 1); err != nil {
+		t.Fatalf("Scale: %v", err)
+	}
+
+	// Verify replicas removed.
+	replicas, _, _ := s.Services().List(context.Background(), store.ServiceFilter{ParentServiceID: &svc.ID})
+	for _, r := range replicas {
+		if r.RelationType == "replica" {
+			t.Error("expected all replicas removed")
+		}
+	}
+}
+
+func TestScale_MinOne(t *testing.T) {
+	s := setupTestStore(t)
+	m := newManagerFromStore(t, s)
+
+	svc, _ := m.Deploy(context.Background(), DeployOpts{Name: "scale-min", ImageRef: "alpine:latest"})
+	err := m.Scale(context.Background(), svc.ID, 0)
+	if err == nil {
+		t.Error("expected error for replicas < 1")
+	}
+}
+
+func TestDeploy_WithReplicas(t *testing.T) {
+	s := setupTestStore(t)
+	m := newManagerFromStore(t, s)
+
+	svc, err := m.Deploy(context.Background(), DeployOpts{
+		Name: "with-replicas", ImageRef: "alpine:latest", Replicas: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if svc.Replicas != 3 {
+		t.Errorf("Replicas = %d, want 3", svc.Replicas)
+	}
+
+	// Verify 2 replica records.
+	replicas, _, _ := s.Services().List(context.Background(), store.ServiceFilter{ParentServiceID: &svc.ID})
+	replicaCount := 0
+	for _, r := range replicas {
+		if r.RelationType == "replica" && r.ParentServiceID == svc.ID {
+			replicaCount++
+		}
+	}
+	if replicaCount != 2 {
+		t.Errorf("expected 2 replicas, got %d", replicaCount)
+	}
+}
+
+// --- recoverStuckDatabases tests ---
+
+func TestRecoverStuckDatabases_CleansExpiredGrace(t *testing.T) {
+	s := setupTestStore(t)
+
+	// Create a DB with expired grace period.
+	now := time.Now()
+	db := &loka.Service{
+		ID: "db-stuck-grace", Name: "stuck-grace", Status: loka.ServiceStatusRunning,
+		ImageRef: "postgres:16", Port: 5432, VCPUs: 1, MemoryMB: 512,
+		DatabaseConfig: &loka.DatabaseConfig{
+			Engine: "postgres", Version: "16", LoginRole: "new", Password: "p",
+			Role: loka.DatabaseRolePrimary,
+			PreviousLoginRole: "old_login",
+			GraceDeadline:     now.Add(-1 * time.Hour), // Expired 1 hour ago.
+		},
+		CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now.Add(-2 * time.Hour),
+	}
+	s.Services().Create(context.Background(), db)
+
+	_ = newManagerFromStore(t, s) // Triggers recoverStuckDatabases.
+
+	got, _ := s.Services().Get(context.Background(), db.ID)
+	if got.DatabaseConfig.PreviousLoginRole != "" {
+		t.Error("expected PreviousLoginRole cleared")
+	}
+	if !got.DatabaseConfig.GraceDeadline.IsZero() {
+		t.Error("expected GraceDeadline cleared")
 	}
 }
