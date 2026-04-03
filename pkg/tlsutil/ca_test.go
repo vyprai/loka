@@ -208,8 +208,8 @@ func TestLoadServerTLS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadServerTLS with CA: %v", err)
 	}
-	if cfg.MinVersion != tls.VersionTLS12 {
-		t.Errorf("MinVersion = %d, want %d", cfg.MinVersion, tls.VersionTLS12)
+	if cfg.MinVersion != tls.VersionTLS13 {
+		t.Errorf("MinVersion = %d, want %d", cfg.MinVersion, tls.VersionTLS13)
 	}
 	if len(cfg.Certificates) != 1 {
 		t.Errorf("Certificates count = %d, want 1", len(cfg.Certificates))
@@ -290,8 +290,8 @@ func TestLoadServerTLS_WithoutCA(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadServerTLS without CA: %v", err)
 	}
-	if cfg.MinVersion != tls.VersionTLS12 {
-		t.Errorf("MinVersion = %d, want %d", cfg.MinVersion, tls.VersionTLS12)
+	if cfg.MinVersion != tls.VersionTLS13 {
+		t.Errorf("MinVersion = %d, want %d", cfg.MinVersion, tls.VersionTLS13)
 	}
 	if cfg.ClientCAs != nil {
 		t.Error("ClientCAs should be nil when no CA cert provided")
