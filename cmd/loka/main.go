@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/vyprai/loka/pkg/lokaapi"
@@ -15,6 +19,52 @@ var (
 	token      string
 	outputFmt  string
 )
+
+// checkAlertBanner makes a quick async check for firing alerts and prints a banner.
+func checkAlertBanner() {
+	endpoint, tok, caCert, insecureTLS := resolveServer()
+	_ = caCert
+	_ = insecureTLS
+
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	req, err := http.NewRequest("GET", endpoint+"/api/v1/alerts?status=firing&limit=5", nil)
+	if err != nil {
+		return
+	}
+	if tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return
+	}
+
+	var result struct {
+		Status string `json:"status"`
+		Data   []struct {
+			RuleName string `json:"rule_name"`
+			Severity string `json:"severity"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Status != "success" {
+		return
+	}
+	if len(result.Data) == 0 {
+		return
+	}
+
+	// Build banner.
+	var names []string
+	for _, a := range result.Data {
+		names = append(names, a.RuleName+" ("+a.Severity+")")
+	}
+	fmt.Fprintf(os.Stderr, "\n  ⚠ %d alert(s) firing: %s\n", len(result.Data), strings.Join(names, ", "))
+	fmt.Fprintf(os.Stderr, "  Run `loka alerts list` for details or `loka alerts dismiss <id>` to dismiss\n\n")
+}
 
 // resolveServer returns the endpoint, token, and TLS metadata for the active server.
 func resolveServer() (endpoint, tok, caCert string, insecureTLS bool) {
@@ -125,6 +175,21 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&token, "token", "t", "", "Auth token")
 	rootCmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "table", "Output format: table, json")
 
+	// Check for firing alerts on every command (async, 100ms timeout).
+	var noAlerts bool
+	rootCmd.PersistentFlags().BoolVar(&noAlerts, "no-alerts", false, "Disable alert banner")
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if noAlerts || os.Getenv("LOKA_NO_ALERT_CHECK") == "1" {
+			return
+		}
+		// Skip for metrics/alerts/version/completion commands.
+		name := cmd.Name()
+		if name == "metrics" || name == "logs" || name == "alerts" || name == "version" || name == "completion" {
+			return
+		}
+		checkAlertBanner()
+	}
+
 	rootCmd.AddCommand(
 		newVersionCmd(),
 		newSpaceCmd(),
@@ -147,6 +212,9 @@ func main() {
 		newSecretCmd(),
 		newImageCmd(),
 		newVolumeCmd(),
+		newAlertsCmd(),
+		newMetricsCmd(),
+		newLogsCmd(),
 	)
 
 	rootCmd.AddCommand(&cobra.Command{

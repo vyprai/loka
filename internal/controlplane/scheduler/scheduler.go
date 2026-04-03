@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/vyprai/loka/internal/controlplane/metrics/recorder"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/metrics"
 )
 
 // Strategy defines the scheduling strategy.
@@ -20,30 +22,36 @@ const (
 
 // Constraints are optional scheduling constraints from the session request.
 type Constraints struct {
-	RequireLabels map[string]string // Worker must have these labels.
-	PreferRegion  string            // Prefer workers in this region.
-	PreferProvider string           // Prefer this cloud provider.
-	ExcludeWorkers []string         // Workers to exclude (e.g., during rescheduling).
+	RequireLabels  map[string]string // Worker must have these labels.
+	PreferRegion   string            // Prefer workers in this region.
+	PreferProvider string            // Prefer this cloud provider.
+	ExcludeWorkers []string          // Workers to exclude (e.g., during rescheduling).
+	PreferWorkers  []string          // Prefer these workers (e.g., volume affinity).
 }
 
 // Scheduler selects workers for session placement.
 type Scheduler struct {
 	registry *worker.Registry
 	strategy Strategy
+	recorder recorder.Recorder
 }
 
 // New creates a new scheduler.
-func New(registry *worker.Registry, strategy Strategy) *Scheduler {
+func New(registry *worker.Registry, strategy Strategy, rec recorder.Recorder) *Scheduler {
 	if strategy == "" {
 		strategy = StrategySpread
 	}
-	return &Scheduler{registry: registry, strategy: strategy}
+	if rec == nil {
+		rec = recorder.NopRecorder{}
+	}
+	return &Scheduler{registry: registry, strategy: strategy, recorder: rec}
 }
 
 // Pick selects the best worker for a new session.
 func (s *Scheduler) Pick(constraints Constraints) (*worker.WorkerConn, error) {
 	candidates := s.registry.List()
 	if len(candidates) == 0 {
+		s.recorder.Inc("scheduler_pick_failures_total", metrics.Label{Name: "reason", Value: "no_workers"})
 		return nil, fmt.Errorf("no workers available")
 	}
 
@@ -57,6 +65,7 @@ func (s *Scheduler) Pick(constraints Constraints) (*worker.WorkerConn, error) {
 	}
 
 	if len(filtered) == 0 {
+		s.recorder.Inc("scheduler_pick_failures_total", metrics.Label{Name: "reason", Value: "no_match"})
 		return nil, fmt.Errorf("no workers match constraints")
 	}
 
@@ -73,6 +82,7 @@ func (s *Scheduler) Pick(constraints Constraints) (*worker.WorkerConn, error) {
 		return scored[i].score > scored[j].score // Higher score = better.
 	})
 
+	s.recorder.Inc("scheduler_picks_total", metrics.Label{Name: "worker_id", Value: scored[0].conn.Worker.ID}, metrics.Label{Name: "strategy", Value: string(s.strategy)})
 	return scored[0].conn, nil
 }
 
@@ -119,6 +129,14 @@ func (s *Scheduler) score(c *worker.WorkerConn, constraints Constraints) float64
 	// Provider affinity bonus.
 	if constraints.PreferProvider != "" && w.Provider == constraints.PreferProvider {
 		score += 10
+	}
+
+	// Volume affinity bonus — strongly prefer workers that already hold volume data.
+	for _, preferred := range constraints.PreferWorkers {
+		if w.ID == preferred {
+			score += 40
+			break
+		}
 	}
 
 	// Capacity bonus — more resources available = higher score.

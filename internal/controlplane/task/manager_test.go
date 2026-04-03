@@ -57,8 +57,8 @@ func createTestTask(t *testing.T, s *sqlite.Store, name string, status loka.Task
 func newManagerFromStore(t *testing.T, s *sqlite.Store) *Manager {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	reg := cpworker.NewRegistry(s, logger)
-	sched := scheduler.New(reg, "")
+	reg := cpworker.NewRegistry(s, logger, nil)
+	sched := scheduler.New(reg, "", nil)
 
 	dataDir := t.TempDir()
 	objStore, err := local.New(dataDir)

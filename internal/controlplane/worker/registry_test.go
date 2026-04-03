@@ -92,7 +92,7 @@ func (s *mockStore) Close() error                            { return nil }
 
 func newTestRegistry() *Registry {
 	logger := slog.Default()
-	return NewRegistry(newMockStore(), logger)
+	return NewRegistry(newMockStore(), logger, nil)
 }
 
 func registerTestWorker(t *testing.T, r *Registry) *loka.Worker {

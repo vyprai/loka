@@ -19,7 +19,7 @@ func setupDatabaseTestServer(t *testing.T) *testServer {
 	ts := setupTestServer(t)
 	ts.registerTestWorker(t)
 
-	svcMgr := service.NewManager(ts.store, ts.registry, ts.sched, ts.imgMgr, nil, nil, ts.server.logger)
+	svcMgr := service.NewManager(ts.store, ts.registry, ts.sched, ts.imgMgr, nil, nil, ts.server.logger, nil)
 	t.Cleanup(func() { svcMgr.Close() })
 	ts.server.serviceManager = svcMgr
 	return ts
@@ -517,7 +517,7 @@ func setupDatabaseTestServerWithBackup(t *testing.T) *testServer {
 		t.Fatal(err)
 	}
 
-	svcMgr := service.NewManager(ts.store, ts.registry, ts.sched, ts.imgMgr, nil, nil, ts.server.logger)
+	svcMgr := service.NewManager(ts.store, ts.registry, ts.sched, ts.imgMgr, nil, nil, ts.server.logger, nil)
 	t.Cleanup(func() { svcMgr.Close() })
 	ts.server.serviceManager = svcMgr
 

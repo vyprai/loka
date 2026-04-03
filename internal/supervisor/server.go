@@ -29,7 +29,8 @@ type Server struct {
 	logger   *slog.Logger
 	ctx      context.Context
 	cancel   context.CancelFunc
-	service  *ServiceProcess // At most one service per VM.
+	service          *ServiceProcess // At most one service per VM.
+	metricsCollector *MetricsCollector
 }
 
 // NewServer creates a new supervisor server.
@@ -254,6 +255,12 @@ func (s *Server) handleRPC(req vm.RPCRequest) vm.RPCResponse {
 
 	case "file_unlock":
 		return s.handleFileUnlock(req)
+
+	case "metrics_scrape":
+		return s.handleMetricsScrape(req)
+
+	case "set_metrics_config":
+		return s.handleSetMetricsConfig(req)
 
 	default:
 		return vm.RPCResponse{

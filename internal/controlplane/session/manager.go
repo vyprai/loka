@@ -16,7 +16,9 @@ import (
 	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/pkg/slug"
 	"github.com/vyprai/loka/internal/controlplane/metrics"
+	"github.com/vyprai/loka/internal/controlplane/metrics/recorder"
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
+	imetrics "github.com/vyprai/loka/internal/metrics"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/loka"
 	"github.com/vyprai/loka/internal/objstore"
@@ -49,6 +51,7 @@ type Manager struct {
 	images    *image.Manager
 	objStore  objstore.ObjectStore
 	logger    *slog.Logger
+	recorder  recorder.Recorder
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -56,9 +59,12 @@ type Manager struct {
 }
 
 // NewManager creates a new session manager.
-func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler, imgMgr *image.Manager, objStore objstore.ObjectStore, logger *slog.Logger) *Manager {
+func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler, imgMgr *image.Manager, objStore objstore.ObjectStore, logger *slog.Logger, rec recorder.Recorder) *Manager {
+	if rec == nil {
+		rec = recorder.NopRecorder{}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Manager{store: s, registry: reg, scheduler: sched, images: imgMgr, objStore: objStore, logger: logger, ctx: ctx, cancel: cancel}
+	return &Manager{store: s, registry: reg, scheduler: sched, images: imgMgr, objStore: objStore, logger: logger, recorder: rec, ctx: ctx, cancel: cancel}
 }
 
 // Close cancels all in-flight goroutines and waits for them to finish.
@@ -116,6 +122,7 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*loka.Session, e
 
 	metrics.SessionsCreated.Inc()
 	metrics.SessionsTotal.WithLabelValues("creating").Inc()
+	m.recorder.Inc("sessions_created_total", imetrics.Label{Name: "id", Value: "session_" + s.ID}, imetrics.Label{Name: "type", Value: "session"}, imetrics.Label{Name: "name", Value: s.Name})
 	m.logger.Info("session created", "id", s.ID, "name", s.Name)
 
 	// Schedule to a worker via scheduler.
@@ -366,6 +373,8 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	}
 
 	metrics.SessionsDestroyed.Inc()
+	m.recorder.Inc("sessions_destroyed_total", imetrics.Label{Name: "id", Value: "session_" + s.ID}, imetrics.Label{Name: "name", Value: s.Name})
+	m.recorder.Observe("session_duration_seconds", time.Since(s.CreatedAt).Seconds(), imetrics.Label{Name: "id", Value: "session_" + s.ID}, imetrics.Label{Name: "name", Value: s.Name})
 	m.logger.Info("session destroyed", "id", id)
 	return nil
 }
@@ -420,6 +429,7 @@ func (m *Manager) Purge(ctx context.Context, id string) error {
 	}
 
 	metrics.SessionsDestroyed.Inc()
+	m.recorder.Inc("sessions_destroyed_total", imetrics.Label{Name: "id", Value: "session_" + id}, imetrics.Label{Name: "type", Value: "purge"})
 	m.logger.Info("session purged", "id", id)
 	return nil
 }
@@ -635,6 +645,7 @@ func (m *Manager) Exec(ctx context.Context, sessionID string, commands []loka.Co
 	}
 
 	metrics.ExecsTotal.Inc()
+	m.recorder.Inc("executions_total", imetrics.Label{Name: "session_id", Value: sessionID}, imetrics.Label{Name: "exec_id", Value: exec.ID}, imetrics.Label{Name: "type", Value: "dispatched"})
 	m.logger.Info("execution dispatched", "id", exec.ID, "session", sessionID, "worker", s.WorkerID)
 	return exec, nil
 }
@@ -699,6 +710,7 @@ func (m *Manager) ApproveExecution(ctx context.Context, sessionID, execID string
 	m.store.Executions().Update(ctx, exec)
 
 	metrics.ExecsTotal.Inc()
+	m.recorder.Inc("executions_total", imetrics.Label{Name: "session_id", Value: sessionID}, imetrics.Label{Name: "exec_id", Value: execID}, imetrics.Label{Name: "type", Value: "approved"})
 	m.logger.Info("execution approved — resuming suspended command", "id", execID, "session", sessionID)
 	return exec, nil
 }
@@ -774,10 +786,12 @@ func (m *Manager) CompleteExecution(ctx context.Context, execID string, status l
 		return err
 	}
 	metrics.ExecsByStatus.WithLabelValues(string(status)).Inc()
+	m.recorder.Inc("executions_by_status_total", imetrics.Label{Name: "status", Value: string(status)}, imetrics.Label{Name: "exec_id", Value: execID})
 	if len(results) > 0 {
 		duration := results[len(results)-1].EndedAt.Sub(results[0].StartedAt).Seconds()
 		if duration > 0 {
 			metrics.ExecDuration.Observe(duration)
+			m.recorder.Observe("execution_duration_seconds", duration, imetrics.Label{Name: "exec_id", Value: execID}, imetrics.Label{Name: "status", Value: string(status)})
 		}
 	}
 	m.logger.Info("execution completed", "id", execID, "status", status)

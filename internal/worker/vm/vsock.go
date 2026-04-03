@@ -149,6 +149,21 @@ type PendingInfo struct {
 	Reason  string `json:"reason"`
 }
 
+// CancelCommand cancels a specific running command by ID.
+func (c *VsockClient) CancelCommand(cmdID string) error {
+	params, _ := json.Marshal(map[string]string{
+		"command_id": cmdID,
+	})
+	_, err := c.call("cancel", params)
+	return err
+}
+
+// CancelAllCommands cancels all running commands.
+func (c *VsockClient) CancelAllCommands() error {
+	_, err := c.call("cancel", json.RawMessage(`{}`))
+	return err
+}
+
 // Ping checks if the supervisor is alive.
 func (c *VsockClient) Ping() error {
 	_, err := c.call("ping", nil)
@@ -321,6 +336,17 @@ func (c *VsockClient) HealthCheck(port int, path string) error {
 		"path": path,
 	})
 	_, err := c.call("health_check", params)
+	return err
+}
+
+// MetricsScrape calls the metrics_scrape RPC to get VM-level metrics.
+func (c *VsockClient) MetricsScrape() (json.RawMessage, error) {
+	return c.call("metrics_scrape", nil)
+}
+
+// SetMetricsConfig sends the set_metrics_config RPC to configure VM-level metric collection.
+func (c *VsockClient) SetMetricsConfig(config json.RawMessage) error {
+	_, err := c.call("set_metrics_config", config)
 	return err
 }
 

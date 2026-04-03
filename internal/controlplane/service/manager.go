@@ -12,10 +12,12 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/vyprai/loka/internal/controlplane/image"
+	"github.com/vyprai/loka/internal/controlplane/metrics/recorder"
 	"github.com/vyprai/loka/internal/controlplane/scheduler"
 	"github.com/vyprai/loka/internal/controlplane/volume"
 	"github.com/vyprai/loka/internal/controlplane/worker"
 	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/metrics"
 	"github.com/vyprai/loka/internal/objstore"
 	"github.com/vyprai/loka/internal/store"
 	"github.com/vyprai/loka/pkg/slug"
@@ -59,6 +61,18 @@ type DomainRouteRegistrar interface {
 	ListRoutes() []*loka.DomainRoute
 }
 
+// AutoscaleMetrics provides per-service request metrics for autoscaling decisions.
+type AutoscaleMetrics interface {
+	GetActiveConnections(serviceID string) int64
+}
+
+// RouteBroadcaster pushes route changes to connected gateways.
+// Used when the gateway runs as a separate process (--role=gw).
+type RouteBroadcaster interface {
+	BroadcastRouteAdd(domain, serviceID, serviceName string, remotePort int)
+	BroadcastRouteRemove(domain string)
+}
+
 // Manager orchestrates service lifecycle.
 type Manager struct {
 	store         store.Store
@@ -76,12 +90,18 @@ type Manager struct {
 	deploySem chan struct{}  // semaphore limiting concurrent deploys
 	scaleMu   sync.Map      // serviceID → *sync.Mutex for scale operations
 
-	logsFn func(serviceID string, lines int) ([]string, []string, error) // set by localworker
-	proxy  DomainRouteRegistrar // domain proxy for route registration
+	logsFn           func(serviceID string, lines int) ([]string, []string, error) // set by localworker
+	proxy            DomainRouteRegistrar // domain proxy for route registration (embedded mode)
+	routeBroadcaster RouteBroadcaster     // pushes route changes to remote gateways
+	autoscaleMetrics AutoscaleMetrics     // proxy metrics for autoscaling
+	recorder         recorder.Recorder
 }
 
 // NewManager creates a new service manager.
-func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler, imgMgr *image.Manager, objStore objstore.ObjectStore, volMgr *volume.Manager, logger *slog.Logger) *Manager {
+func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler, imgMgr *image.Manager, objStore objstore.ObjectStore, volMgr *volume.Manager, logger *slog.Logger, rec recorder.Recorder) *Manager {
+	if rec == nil {
+		rec = recorder.NopRecorder{}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
 		store:         s,
@@ -91,6 +111,7 @@ func NewManager(s store.Store, reg *worker.Registry, sched *scheduler.Scheduler,
 		objStore:      objStore,
 		volumeManager: volMgr,
 		logger:        logger,
+		recorder:      rec,
 		ctx:           ctx,
 		cancel:        cancel,
 		deploySem:     make(chan struct{}, 10), // max 10 concurrent deploys
@@ -222,6 +243,7 @@ func (m *Manager) reRegisterRoutes() {
 					RemotePort: route.Port,
 					Type:       loka.DomainRouteService,
 				})
+				m.broadcastRouteAdd(route.Domain, svc.ID, svc.Name, route.Port)
 				count++
 			}
 		}
@@ -296,7 +318,7 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 		volName := "db-" + opts.Name
 		if m.volumeManager != nil {
 			if _, err := m.volumeManager.Get(ctx, volName); err != nil {
-				if _, err := m.volumeManager.Create(ctx, volName); err != nil {
+				if _, err := m.volumeManager.CreateBlock(ctx, volName, 0); err != nil {
 					return nil, fmt.Errorf("create database volume %s: %w", volName, err)
 				}
 			}
@@ -384,6 +406,7 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 		return nil, fmt.Errorf("create service: %w", err)
 	}
 
+	m.recorder.Inc("services_deployed_total", metrics.Label{Name: "service_id", Value: svc.ID}, metrics.Label{Name: "name", Value: svc.Name})
 	m.logger.Info("service created", "id", svc.ID, "name", svc.Name)
 
 	// Create additional replicas if requested (before scheduling, so replicas
@@ -402,8 +425,21 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 		}
 	}
 
+	// Build volume affinity: prefer workers that already hold block volume primaries.
+	constraints := scheduler.Constraints{}
+	if m.volumeManager != nil {
+		for _, mount := range opts.Mounts {
+			if mount.EffectiveType() == "block" && mount.Name != "" {
+				vol, err := m.volumeManager.Get(ctx, mount.Name)
+				if err == nil && vol.PrimaryWorkerID != "" {
+					constraints.PreferWorkers = append(constraints.PreferWorkers, vol.PrimaryWorkerID)
+				}
+			}
+		}
+	}
+
 	// Schedule the primary to a worker.
-	wConn, err := m.scheduler.Pick(scheduler.Constraints{})
+	wConn, err := m.scheduler.Pick(constraints)
 	if err != nil {
 		m.logger.Warn("no workers available for service", "id", svc.ID)
 		svc.StatusMessage = "waiting for worker"
@@ -415,6 +451,20 @@ func (m *Manager) Deploy(ctx context.Context, opts DeployOpts) (*loka.Service, e
 	svc.WorkerID = wConn.Worker.ID
 	svc.UpdatedAt = time.Now()
 	m.store.Services().Update(ctx, svc)
+
+	// Assign volume placement for block mounts on the selected worker.
+	if m.volumeManager != nil {
+		for _, mount := range opts.Mounts {
+			if mount.EffectiveType() == "block" && mount.Name != "" {
+				if err := m.volumeManager.AssignPrimary(ctx, mount.Name, wConn.Worker.ID); err != nil {
+					m.logger.Warn("failed to assign volume primary", "volume", mount.Name, "error", err)
+				}
+				if err := m.volumeManager.AssignReplica(ctx, mount.Name); err != nil {
+					m.logger.Warn("failed to assign volume replica", "volume", mount.Name, "error", err)
+				}
+			}
+		}
+	}
 
 	m.wg.Add(1)
 	go func() {
@@ -496,6 +546,7 @@ func (m *Manager) Scale(ctx context.Context, id string, replicas int) error {
 	// Update desired replica count on primary.
 	svc.Replicas = replicas
 	svc.UpdatedAt = time.Now()
+	m.recorder.Inc("service_scale_operations_total", metrics.Label{Name: "service_id", Value: id}, metrics.Label{Name: "name", Value: svc.Name}, metrics.Label{Name: "replicas", Value: fmt.Sprintf("%d", replicas)})
 	return m.store.Services().Update(ctx, svc)
 }
 
@@ -807,6 +858,7 @@ func (m *Manager) asyncDeploy(ctx context.Context, serviceID string, opts Deploy
 							RemotePort: route.Port,
 							Type:       loka.DomainRouteService,
 						})
+						m.broadcastRouteAdd(route.Domain, s.ID, s.Name, route.Port)
 					}
 				}
 				m.logger.Info("service deployed and running", "service", serviceID)
@@ -842,11 +894,12 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		})
 	}
 
-	// Remove domain routes from the proxy.
+	// Remove domain routes from the proxy and remote gateways.
 	if m.proxy != nil {
 		for _, route := range svc.Routes {
 			if route.Domain != "" {
 				m.proxy.RemoveRoute(route.Domain)
+				m.broadcastRouteRemove(route.Domain)
 			}
 		}
 	}
@@ -884,11 +937,12 @@ func (m *Manager) Stop(ctx context.Context, id string) (*loka.Service, error) {
 		})
 	}
 
-	// Remove domain routes from the proxy.
+	// Remove domain routes from the proxy and remote gateways.
 	if m.proxy != nil {
 		for _, route := range svc.Routes {
 			if route.Domain != "" {
 				m.proxy.RemoveRoute(route.Domain)
+				m.broadcastRouteRemove(route.Domain)
 			}
 		}
 	}
@@ -1182,6 +1236,30 @@ func (m *Manager) SetLogsFn(fn func(string, int) ([]string, []string, error)) {
 	m.logsFn = fn
 }
 
+// SetAutoscaleMetrics sets the metrics provider for autoscaling decisions.
+func (m *Manager) SetAutoscaleMetrics(am AutoscaleMetrics) {
+	m.autoscaleMetrics = am
+}
+
+// SetRouteBroadcaster sets the broadcaster for pushing route changes to remote gateways.
+func (m *Manager) SetRouteBroadcaster(rb RouteBroadcaster) {
+	m.routeBroadcaster = rb
+}
+
+// broadcastRouteAdd notifies remote gateways of a new route.
+func (m *Manager) broadcastRouteAdd(domain, serviceID, serviceName string, port int) {
+	if m.routeBroadcaster != nil {
+		m.routeBroadcaster.BroadcastRouteAdd(domain, serviceID, serviceName, port)
+	}
+}
+
+// broadcastRouteRemove notifies remote gateways of a removed route.
+func (m *Manager) broadcastRouteRemove(domain string) {
+	if m.routeBroadcaster != nil {
+		m.routeBroadcaster.BroadcastRouteRemove(domain)
+	}
+}
+
 // SetDomainProxy sets the domain proxy for automatic route registration.
 // After setting the proxy, it registers routes for all currently running services.
 func (m *Manager) SetDomainProxy(p DomainRouteRegistrar) {
@@ -1212,6 +1290,7 @@ func (m *Manager) registerExistingRoutes() {
 				RemotePort: route.Port,
 				Type:       loka.DomainRouteService,
 			})
+			m.broadcastRouteAdd(route.Domain, svc.ID, svc.Name, route.Port)
 		}
 	}
 	if len(services) > 0 {
@@ -1266,6 +1345,7 @@ func (m *Manager) checkIdleServices() {
 			continue // never idle
 		}
 		if time.Since(svc.LastActivity) > time.Duration(svc.IdleTimeout)*time.Second {
+			m.recorder.Inc("service_idle_transitions_total", metrics.Label{Name: "service_id", Value: svc.ID}, metrics.Label{Name: "name", Value: svc.Name})
 			m.logger.Info("service idle, transitioning", "service_id", svc.ID, "name", svc.Name)
 			// Update store FIRST — only send stop/snapshot command if store update succeeds.
 			svc.Status = loka.ServiceStatusIdle
@@ -1465,13 +1545,31 @@ func (m *Manager) checkAutoscale(lastScale map[string]time.Time) {
 		}
 		currentInstances := runningReplicas + 1 // +1 for primary
 
-		// TODO: Get actual concurrency from proxy metrics.
-		// For now, use a placeholder: scale based on instance count vs desired.
+		// Determine desired instances based on active connection load.
 		desiredInstances := currentInstances
-		if currentInstances < cfg.Min {
+		targetConcurrency := 10 // Default: 10 concurrent connections per instance.
+		if cfg.TargetConcurrency > 0 {
+			targetConcurrency = cfg.TargetConcurrency
+		}
+
+		if m.autoscaleMetrics != nil {
+			activeConns := m.autoscaleMetrics.GetActiveConnections(svc.ID)
+			if activeConns > 0 && targetConcurrency > 0 {
+				// Scale up if load per instance exceeds target.
+				loadPerInstance := int(activeConns) / max(currentInstances, 1)
+				if loadPerInstance > targetConcurrency {
+					desiredInstances = currentInstances + 1
+				} else if loadPerInstance < targetConcurrency/2 && currentInstances > cfg.Min {
+					desiredInstances = currentInstances - 1
+				}
+			}
+		}
+
+		// Clamp to configured min/max.
+		if desiredInstances < cfg.Min {
 			desiredInstances = cfg.Min
 		}
-		if currentInstances > cfg.Max {
+		if desiredInstances > cfg.Max {
 			desiredInstances = cfg.Max
 		}
 

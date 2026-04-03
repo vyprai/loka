@@ -28,7 +28,7 @@ func setupTestDB(t *testing.T) *sql.DB {
 
 func TestAcquireRelease(t *testing.T) {
 	db := setupTestDB(t)
-	m := NewManager(db)
+	m := NewManager(db, nil)
 	defer m.Stop()
 
 	err := m.Acquire("vol1", "/data/file.txt", "worker-1", true, 5*time.Second)
@@ -57,7 +57,7 @@ func TestAcquireRelease(t *testing.T) {
 
 func TestAcquireConflict(t *testing.T) {
 	db := setupTestDB(t)
-	m := NewManager(db)
+	m := NewManager(db, nil)
 	defer m.Stop()
 
 	err := m.Acquire("vol1", "/shared.txt", "worker-1", true, 5*time.Second)
@@ -73,7 +73,7 @@ func TestAcquireConflict(t *testing.T) {
 
 func TestAcquireSameWorkerExtendsTTL(t *testing.T) {
 	db := setupTestDB(t)
-	m := NewManager(db)
+	m := NewManager(db, nil)
 	defer m.Stop()
 
 	err := m.Acquire("vol1", "/f.txt", "worker-1", true, 2*time.Second)
@@ -99,7 +99,7 @@ func TestAcquireSameWorkerExtendsTTL(t *testing.T) {
 
 func TestReleaseWrongWorker(t *testing.T) {
 	db := setupTestDB(t)
-	m := NewManager(db)
+	m := NewManager(db, nil)
 	defer m.Stop()
 
 	err := m.Acquire("vol1", "/f.txt", "worker-1", true, 5*time.Second)
@@ -124,7 +124,7 @@ func TestReleaseWrongWorker(t *testing.T) {
 
 func TestReleaseAll(t *testing.T) {
 	db := setupTestDB(t)
-	m := NewManager(db)
+	m := NewManager(db, nil)
 	defer m.Stop()
 
 	// Worker-1 acquires several locks.
@@ -158,7 +158,7 @@ func TestReleaseAll(t *testing.T) {
 
 func TestTTLExpiry(t *testing.T) {
 	db := setupTestDB(t)
-	m := NewManager(db)
+	m := NewManager(db, nil)
 	defer m.Stop()
 
 	err := m.Acquire("vol1", "/tmp.txt", "worker-1", true, 100*time.Millisecond)
@@ -183,7 +183,7 @@ func TestPersistenceAcrossRestart(t *testing.T) {
 	db := setupTestDB(t)
 
 	// First manager acquires a lock.
-	m1 := NewManager(db)
+	m1 := NewManager(db, nil)
 	err := m1.Acquire("vol1", "/persist.txt", "worker-1", true, 30*time.Second)
 	if err != nil {
 		t.Fatalf("Acquire: %v", err)
@@ -191,7 +191,7 @@ func TestPersistenceAcrossRestart(t *testing.T) {
 	m1.Stop()
 
 	// Second manager with the same DB should see the lock.
-	m2 := NewManager(db)
+	m2 := NewManager(db, nil)
 	defer m2.Stop()
 
 	locked, lock := m2.IsLocked("vol1", "/persist.txt")
@@ -204,7 +204,7 @@ func TestPersistenceAcrossRestart(t *testing.T) {
 }
 
 func TestNilDB(t *testing.T) {
-	m := NewManager(nil)
+	m := NewManager(nil, nil)
 	defer m.Stop()
 
 	err := m.Acquire("vol1", "/mem.txt", "worker-1", true, 5*time.Second)
@@ -225,5 +225,131 @@ func TestNilDB(t *testing.T) {
 	locked, _ = m.IsLocked("vol1", "/mem.txt")
 	if locked {
 		t.Error("expected lock to be released in-memory mode")
+	}
+}
+
+func TestSharedLock_MultipleHolders(t *testing.T) {
+	m := NewManager(nil, nil)
+	defer m.Stop()
+
+	// Two workers acquire shared locks on the same file.
+	if err := m.Acquire("vol1", "/data.txt", "worker-1", false, 5*time.Second); err != nil {
+		t.Fatalf("worker-1 shared acquire: %v", err)
+	}
+	if err := m.Acquire("vol1", "/data.txt", "worker-2", false, 5*time.Second); err != nil {
+		t.Fatalf("worker-2 shared acquire: %v", err)
+	}
+
+	locked, lock := m.IsLocked("vol1", "/data.txt")
+	if !locked {
+		t.Fatal("expected file to be locked")
+	}
+	if len(lock.Holders) != 2 {
+		t.Fatalf("expected 2 holders, got %d", len(lock.Holders))
+	}
+	if lock.Exclusive {
+		t.Error("expected shared lock, got exclusive")
+	}
+}
+
+func TestSharedLock_ExclusiveBlocksShared(t *testing.T) {
+	m := NewManager(nil, nil)
+	defer m.Stop()
+
+	// Worker-1 takes exclusive lock.
+	if err := m.Acquire("vol1", "/data.txt", "worker-1", true, 5*time.Second); err != nil {
+		t.Fatalf("exclusive acquire: %v", err)
+	}
+
+	// Worker-2 tries shared — should fail.
+	if err := m.Acquire("vol1", "/data.txt", "worker-2", false, 5*time.Second); err == nil {
+		t.Fatal("expected error: shared lock should be blocked by exclusive")
+	}
+}
+
+func TestSharedLock_SharedBlocksExclusive(t *testing.T) {
+	m := NewManager(nil, nil)
+	defer m.Stop()
+
+	// Two workers hold shared locks.
+	m.Acquire("vol1", "/data.txt", "worker-1", false, 5*time.Second)
+	m.Acquire("vol1", "/data.txt", "worker-2", false, 5*time.Second)
+
+	// Worker-3 tries exclusive — should fail (2 holders present).
+	if err := m.Acquire("vol1", "/data.txt", "worker-3", true, 5*time.Second); err == nil {
+		t.Fatal("expected error: exclusive lock should be blocked by shared holders")
+	}
+}
+
+func TestSharedLock_ReleaseOneHolder(t *testing.T) {
+	m := NewManager(nil, nil)
+	defer m.Stop()
+
+	m.Acquire("vol1", "/data.txt", "worker-1", false, 5*time.Second)
+	m.Acquire("vol1", "/data.txt", "worker-2", false, 5*time.Second)
+
+	// Release worker-1.
+	if err := m.Release("vol1", "/data.txt", "worker-1"); err != nil {
+		t.Fatalf("release worker-1: %v", err)
+	}
+
+	// Lock should still be held by worker-2.
+	locked, lock := m.IsLocked("vol1", "/data.txt")
+	if !locked {
+		t.Fatal("expected file to still be locked")
+	}
+	if len(lock.Holders) != 1 {
+		t.Fatalf("expected 1 holder, got %d", len(lock.Holders))
+	}
+	if lock.Holders[0].WorkerID != "worker-2" {
+		t.Errorf("expected worker-2, got %s", lock.Holders[0].WorkerID)
+	}
+}
+
+func TestSharedLock_SameWorkerExtendsTTL(t *testing.T) {
+	m := NewManager(nil, nil)
+	defer m.Stop()
+
+	m.Acquire("vol1", "/data.txt", "worker-1", false, 2*time.Second)
+	m.Acquire("vol1", "/data.txt", "worker-2", false, 2*time.Second)
+
+	// Worker-1 re-acquires with longer TTL.
+	if err := m.Acquire("vol1", "/data.txt", "worker-1", false, 10*time.Second); err != nil {
+		t.Fatalf("re-acquire: %v", err)
+	}
+
+	// Should still have 2 holders (not 3).
+	_, lock := m.IsLocked("vol1", "/data.txt")
+	if len(lock.Holders) != 2 {
+		t.Fatalf("expected 2 holders after re-acquire, got %d", len(lock.Holders))
+	}
+}
+
+func TestReleaseAll_SharedLocks(t *testing.T) {
+	m := NewManager(nil, nil)
+	defer m.Stop()
+
+	m.Acquire("vol1", "/a.txt", "worker-1", false, 5*time.Second)
+	m.Acquire("vol1", "/a.txt", "worker-2", false, 5*time.Second)
+	m.Acquire("vol1", "/b.txt", "worker-1", true, 5*time.Second)
+
+	count := m.ReleaseAll("worker-1")
+	if count != 2 {
+		t.Fatalf("expected 2 releases, got %d", count)
+	}
+
+	// /a.txt should still be locked by worker-2.
+	locked, lock := m.IsLocked("vol1", "/a.txt")
+	if !locked {
+		t.Fatal("/a.txt should still be locked")
+	}
+	if len(lock.Holders) != 1 || lock.Holders[0].WorkerID != "worker-2" {
+		t.Error("expected only worker-2 as holder")
+	}
+
+	// /b.txt should be unlocked.
+	locked, _ = m.IsLocked("vol1", "/b.txt")
+	if locked {
+		t.Error("/b.txt should be unlocked after ReleaseAll")
 	}
 }

@@ -26,7 +26,7 @@ func newTestRegistry(t *testing.T) *worker.Registry {
 	t.Cleanup(func() { s.Close() })
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	return worker.NewRegistry(s, logger)
+	return worker.NewRegistry(s, logger, nil)
 }
 
 // registerWorker is a helper that registers a worker with the given properties.
@@ -54,7 +54,7 @@ func registerWorker(t *testing.T, reg *worker.Registry, provider, region string,
 
 func TestPickNoWorkers(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	_, err := sched.Pick(Constraints{})
 	if err == nil {
@@ -68,7 +68,7 @@ func TestPickNoWorkers(t *testing.T) {
 
 func TestPickSingleWorker(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	w := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
 
@@ -87,7 +87,7 @@ func TestPickSingleWorker(t *testing.T) {
 
 func TestPickSkipsNonEligibleWorkers(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	// Register a draining worker.
 	registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusDraining, nil, 4, 8192)
@@ -100,7 +100,7 @@ func TestPickSkipsNonEligibleWorkers(t *testing.T) {
 
 func TestPickSkipsDeadWorkers(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusDead, nil, 4, 8192)
 
@@ -116,7 +116,7 @@ func TestPickSkipsDeadWorkers(t *testing.T) {
 
 func TestPickRespectsExcludeWorkers(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	w1 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
 	w2 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
@@ -132,7 +132,7 @@ func TestPickRespectsExcludeWorkers(t *testing.T) {
 
 func TestPickAllWorkersExcluded(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	w1 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
 
@@ -148,7 +148,7 @@ func TestPickAllWorkersExcluded(t *testing.T) {
 
 func TestPickRequireLabelsMatch(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, map[string]string{"tier": "standard"}, 4, 8192)
 	w2 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, map[string]string{"tier": "gpu"}, 8, 16384)
@@ -166,7 +166,7 @@ func TestPickRequireLabelsMatch(t *testing.T) {
 
 func TestPickRequireLabelsNoMatch(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, map[string]string{"tier": "standard"}, 4, 8192)
 
@@ -180,7 +180,7 @@ func TestPickRequireLabelsNoMatch(t *testing.T) {
 
 func TestPickRequireMultipleLabels(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, map[string]string{"tier": "gpu"}, 4, 8192)
 	w2 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, map[string]string{"tier": "gpu", "env": "prod"}, 4, 8192)
@@ -202,7 +202,7 @@ func TestPickRequireMultipleLabels(t *testing.T) {
 
 func TestPickPrefersRegion(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	// Two workers with identical specs, different regions.
 	registerWorker(t, reg, "aws", "us-west-2", loka.WorkerStatusReady, nil, 4, 8192)
@@ -223,7 +223,7 @@ func TestPickPrefersRegion(t *testing.T) {
 
 func TestPickPrefersProvider(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
 	registerWorker(t, reg, "gcp", "us-central1", loka.WorkerStatusReady, nil, 4, 8192)
@@ -244,7 +244,7 @@ func TestPickPrefersProvider(t *testing.T) {
 func TestSpreadPrefersLessLoadedWorker(t *testing.T) {
 	reg := newTestRegistry(t)
 	ctx := context.Background()
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	// Create two identical workers.
 	w1 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
@@ -284,7 +284,7 @@ func TestSpreadPrefersLessLoadedWorker(t *testing.T) {
 func TestBinPackPrefersMoreLoadedWorker(t *testing.T) {
 	reg := newTestRegistry(t)
 	ctx := context.Background()
-	sched := New(reg, StrategyBinPack)
+	sched := New(reg, StrategyBinPack, nil)
 
 	// Create two identical workers.
 	w1 := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)
@@ -323,7 +323,7 @@ func TestBinPackPrefersMoreLoadedWorker(t *testing.T) {
 
 func TestBinPackPrefersHigherCapacityWorker(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategyBinPack)
+	sched := New(reg, StrategyBinPack, nil)
 
 	// Worker with more resources should be preferred by binpack
 	// due to higher capacity scoring bonus.
@@ -343,7 +343,7 @@ func TestBinPackPrefersHigherCapacityWorker(t *testing.T) {
 
 func TestDefaultStrategyIsSpread(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, "")
+	sched := New(reg, "", nil)
 
 	if sched.strategy != StrategySpread {
 		t.Errorf("default strategy = %s, want spread", sched.strategy)
@@ -356,7 +356,7 @@ func TestDefaultStrategyIsSpread(t *testing.T) {
 
 func TestPickBusyWorkerWhenOnlyOption(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	w := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusBusy, nil, 4, 8192)
 
@@ -371,7 +371,7 @@ func TestPickBusyWorkerWhenOnlyOption(t *testing.T) {
 
 func TestPickPrefersReadyOverBusy(t *testing.T) {
 	reg := newTestRegistry(t)
-	sched := New(reg, StrategySpread)
+	sched := New(reg, StrategySpread, nil)
 
 	registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusBusy, nil, 4, 8192)
 	wReady := registerWorker(t, reg, "aws", "us-east-1", loka.WorkerStatusReady, nil, 4, 8192)

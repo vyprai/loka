@@ -12,6 +12,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/vyprai/loka/internal/config"
 	"github.com/vyprai/loka/internal/controlplane/database"
+	cpmetrics "github.com/vyprai/loka/internal/controlplane/metrics"
+	"github.com/vyprai/loka/internal/controlplane/metrics/alerting"
+	metricsscraper "github.com/vyprai/loka/internal/controlplane/metrics/scraper"
+	metricstsdb "github.com/vyprai/loka/internal/controlplane/metrics/tsdb"
+	logapi "github.com/vyprai/loka/internal/controlplane/logging/api"
+	logstore "github.com/vyprai/loka/internal/controlplane/logging/store"
 	"github.com/vyprai/loka/internal/controlplane/image"
 	"github.com/vyprai/loka/internal/controlplane/service"
 	"github.com/vyprai/loka/internal/controlplane/session"
@@ -50,6 +56,11 @@ type Server struct {
 	adminKey         string          // Separate key for admin endpoints (optional; if empty, same as apiKey).
 	raftStatusFn     RaftStatusFn    // Optional: returns Raft cluster status for debug endpoint.
 	dnsToggler       DNSToggler      // Optional: toggles the embedded DNS server at runtime.
+	metricsStore     metricstsdb.MetricsStore  // Built-in metrics TSDB (optional).
+	metricsScraper   *metricsscraper.Scraper   // Metrics target scraper (optional).
+	alertRuleStore   alerting.AlertRuleStore    // Alert rule persistence (optional).
+	alertManager     *alerting.AlertManager     // Alert evaluation engine (optional).
+	logStore         logstore.LogStore          // Centralized log store (optional).
 }
 
 // ServerOpts holds optional configuration for the API server.
@@ -60,9 +71,16 @@ type ServerOpts struct {
 	Retention      config.RetentionConfig  // Retention configuration.
 	ObjStore       objstore.ObjectStore    // Object store (exposed to workers/HA nodes).
 	DataDir        string                  // Data directory for volume storage.
+	DBDriver       string                  // Database driver ("sqlite" or "postgres").
+	DBDSN          string                  // Database DSN (file path for SQLite).
 	ServiceManager *service.Manager        // Service manager (optional).
 	TaskManager    *task.Manager           // Task manager (optional).
 	DomainProxy    *DomainProxy            // Domain proxy for domain-based routing (optional).
+	MetricsStore   metricstsdb.MetricsStore  // Built-in metrics TSDB (optional).
+	MetricsScraper *metricsscraper.Scraper   // Metrics target scraper (optional).
+	AlertRuleStore alerting.AlertRuleStore    // Alert rule persistence (optional).
+	AlertManager   *alerting.AlertManager     // Alert evaluation engine (optional).
+	LogStore       logstore.LogStore          // Centralized log store (optional).
 }
 
 // NewServer creates a new API server.
@@ -77,16 +95,17 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		regStore = registry.NewStore(o.ObjStore)
 	}
 
-	// Create volume manager if object store is available.
-	var volMgr *volume.Manager
-	if o.ObjStore != nil {
-		volMgr = volume.NewManager(s, o.ObjStore, o.DataDir, logger)
-	}
+	// Create volume manager — works without object store (block-only mode).
+	volMgr := volume.NewManager(s, o.ObjStore, nil, logger, nil)
 
 	// Create backup manager if object store is available.
 	var backupMgr *database.BackupManager
 	if o.ObjStore != nil {
 		backupMgr = database.NewBackupManager(s, o.ObjStore, logger)
+		// Enable CP SQLite backup if using SQLite.
+		if o.DBDriver == "sqlite" && o.DBDSN != "" {
+			backupMgr.SetCPDatabasePath(o.DBDSN)
+		}
 	}
 
 	srv := &Server{
@@ -95,7 +114,7 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		serviceManager:   o.ServiceManager,
 		volumeManager:    volMgr,
 		backupManager:    backupMgr,
-		lockManager:      lock.NewManager(extractDB(s)),
+		lockManager:      lock.NewManager(extractDB(s), nil),
 		taskManager:      o.TaskManager,
 		workerRegistry:   reg,
 		providerRegistry: provReg,
@@ -110,6 +129,11 @@ func NewServer(sm *session.Manager, reg *worker.Registry, provReg *provider.Regi
 		retention:        o.Retention,
 		caCertPath:       o.CACertPath,
 		domainProxy:      o.DomainProxy,
+		metricsStore:     o.MetricsStore,
+		metricsScraper:   o.MetricsScraper,
+		alertRuleStore:   o.AlertRuleStore,
+		alertManager:     o.AlertManager,
+		logStore:         o.LogStore,
 	}
 	srv.routes()
 	srv.registerInternalRoutes()
@@ -166,6 +190,7 @@ func (s *Server) routes() {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
+	r.Use(contextLoggerMiddleware(s.logger))
 	r.Use(metricsMiddleware)
 	r.Use(apiKeyAuth(s.apiKey))
 
@@ -311,6 +336,28 @@ func (s *Server) routes() {
 
 		// Health
 		r.Get("/health", s.health)
+
+		// Gateway route sync + metrics (used by lokad --role=gw)
+		r.Get("/gateway/routes", s.gatewayRoutes)
+		r.Post("/gateway/metrics", s.gatewayMetrics)
+
+		// Built-in metrics query API (Prometheus-compatible).
+		if s.metricsStore != nil {
+			metricsAPI := &cpmetrics.MetricsAPI{Store: s.metricsStore, Scraper: s.metricsScraper}
+			r.Mount("/metrics", metricsAPI.Routes())
+		}
+
+		// Centralized logs API (Loki-compatible).
+		if s.logStore != nil {
+			logsAPI := &logapi.LogsAPI{Store: s.logStore}
+			r.Mount("/logs", logsAPI.Routes())
+		}
+
+		// Alerts API.
+		if s.alertRuleStore != nil {
+			alertsAPI := &cpmetrics.AlertsAPI{Store: s.alertRuleStore, Manager: s.alertManager}
+			r.Mount("/alerts", alertsAPI.Routes())
+		}
 	})
 
 	// Register domain proxy routes (expose/unexpose/list) if proxy is available.

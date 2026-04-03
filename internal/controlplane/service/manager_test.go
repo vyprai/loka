@@ -60,8 +60,8 @@ func createTestService(t *testing.T, s *sqlite.Store, name string, status loka.S
 func newManagerFromStore(t *testing.T, s *sqlite.Store) *Manager {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	reg := worker.NewRegistry(s, logger)
-	sched := scheduler.New(reg, "")
+	reg := worker.NewRegistry(s, logger, nil)
+	sched := scheduler.New(reg, "", nil)
 
 	dataDir := t.TempDir()
 	objStore, err := local.New(dataDir)
@@ -69,10 +69,10 @@ func newManagerFromStore(t *testing.T, s *sqlite.Store) *Manager {
 		t.Fatal(err)
 	}
 	imgMgr := image.NewManager(objStore, dataDir, logger)
-	volMgr := volume.NewManager(s, objStore, dataDir, logger)
+	volMgr := volume.NewManager(s, objStore, nil, logger, nil)
 
 	// NewManager calls recoverStuckDeploys in its constructor.
-	m := NewManager(s, reg, sched, imgMgr, objStore, volMgr, logger)
+	m := NewManager(s, reg, sched, imgMgr, objStore, volMgr, logger, nil)
 	t.Cleanup(func() { m.Close() })
 	return m
 }

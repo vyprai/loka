@@ -51,8 +51,8 @@ func setupTestServer(t *testing.T, opts ...ServerOpts) *testServer {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	reg := worker.NewRegistry(db, logger)
-	sched := scheduler.New(reg, scheduler.StrategySpread)
+	reg := worker.NewRegistry(db, logger, nil)
+	sched := scheduler.New(reg, scheduler.StrategySpread, nil)
 
 	tmpDir := t.TempDir()
 	objStore, err := local.New(tmpDir)
@@ -70,7 +70,7 @@ func setupTestServer(t *testing.T, opts ...ServerOpts) *testServer {
 		})
 	}
 
-	mgr := session.NewManager(db, reg, sched, imgMgr, objStore, logger)
+	mgr := session.NewManager(db, reg, sched, imgMgr, objStore, logger, nil)
 
 	provReg := provider.NewRegistry()
 

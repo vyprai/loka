@@ -1,5 +1,5 @@
-.PHONY: all build build-linux build-linux-amd64 build-linux-arm64 build-all proto clean test test-unit test-integration lint fmt help \
-       install uninstall install-vm-assets install-cloud-hypervisor e2e-test e2e-test-linux kernel initramfs kernel-all kernel-update release
+.PHONY: all build build-linux build-linux-amd64 build-linux-arm64 build-all proto clean test test-unit test-integration test-metrics test-logging lint fmt help \
+       install uninstall install-vm-assets install-cloud-hypervisor e2e-test e2e-test-linux e2e-test-section kernel initramfs kernel-all kernel-update release
 
 # Variables
 GO := go
@@ -109,6 +109,17 @@ test-unit:
 # Integration tests (Linux + KVM required)
 test-integration:
 	$(GO) test -v -race -count=1 -tags=integration ./...
+
+# Test metrics system (TSDB, parser, recorder, scraper, alerting, API)
+test-metrics:
+	$(GO) test -v -count=1 ./internal/metrics/ ./internal/controlplane/metrics/... ./internal/worker/metrics/ ./internal/loka/metrics/
+
+# Test logging system (LogQL, store, handler, audit, scraper, API)
+test-logging:
+	$(GO) test -v -count=1 ./internal/controlplane/logging/... ./internal/worker/logbuffer/ ./internal/loka/logs/
+
+# Test both metrics + logging
+test-observability: test-metrics test-logging
 
 # Install Cloud Hypervisor (Linux VMM backend)
 install-cloud-hypervisor:
@@ -279,6 +290,10 @@ kernel-update:
 e2e-test: build
 	bash scripts/e2e-test.sh
 
+# Run specific E2E test sections (e.g., make e2e-test-section SECTIONS=25,26)
+e2e-test-section: build
+	LOKA_E2E_SECTIONS=$(SECTIONS) bash scripts/e2e-test.sh
+
 # Run E2E test suite in a Linux VM (from macOS or CI — uses loka-build)
 e2e-test-linux: $(LOKA_BUILD) build-linux-arm64
 	$(LOKA_BUILD) e2e --arch=arm64
@@ -300,26 +315,41 @@ clean:
 help:
 	@echo "LOKA - Session-Based MicroVM Execution OS for AI Agents"
 	@echo ""
-	@echo "Targets:"
+	@echo "Build:"
 	@echo "  build                Build all binaries for current platform"
 	@echo "  build-linux          Cross-compile for Linux (amd64 + arm64)"
-	@echo "  build-linux-amd64    Cross-compile for Linux x86_64"
-	@echo "  build-linux-arm64    Cross-compile for Linux ARM64"
 	@echo "  build-all            Build for all platforms"
-	@echo "  install              Build + install locally"
-	@echo "  install-cloud-hypervisor  Install Cloud Hypervisor (Linux VMM)"
-	@echo "  install-vm-assets    Install kernel + initramfs to ~/.loka/vm/"
+	@echo "  install              Build + install locally (~/.loka/bin/)"
 	@echo "  uninstall            Remove LOKA and all data"
-	@echo "  e2e-test             Run E2E test suite (native)"
+	@echo "  release              Create release tar.gz"
+	@echo "  clean                Remove build artifacts"
+	@echo ""
+	@echo "Test:"
+	@echo "  test                 Run all unit tests"
+	@echo "  test-metrics         Run metrics system tests (TSDB, parser, alerting)"
+	@echo "  test-logging         Run logging system tests (LogQL, store, handler)"
+	@echo "  test-observability   Run both metrics + logging tests"
+	@echo "  e2e-test             Run full E2E test suite"
+	@echo "  e2e-test-section     Run specific E2E sections (SECTIONS=25,26)"
 	@echo "  e2e-test-linux       Run E2E in Linux VM (from macOS/CI)"
-	@echo "  kernel               Build Linux kernel (cross-compiled on host)"
-	@echo "  initramfs            Build initramfs (built on host)"
+	@echo ""
+	@echo "VM:"
+	@echo "  kernel               Build Linux kernel for lokavm"
+	@echo "  initramfs            Build initramfs for lokavm"
 	@echo "  kernel-all           Build both kernel + initramfs"
-	@echo "  kernel-update        Update pinned kernel version to latest stable"
-	@echo "  release              Create release tar.gz with binaries + kernel + initramfs"
+	@echo "  install-vm-assets    Install kernel + initramfs to ~/.loka/vm/"
+	@echo "  install-cloud-hypervisor  Install Cloud Hypervisor (Linux)"
+	@echo ""
+	@echo "Other:"
 	@echo "  proto                Generate protobuf code"
-	@echo "  test                 Run all tests (unit)"
 	@echo "  lint                 Run linter"
 	@echo "  fmt                  Format code"
-	@echo "  clean                Remove build artifacts"
 	@echo "  help                 Show this help"
+	@echo ""
+	@echo "Roles (lokad --role=<role>):"
+	@echo "  all (default)        Full node: CP + worker + metrics + logs"
+	@echo "  controlplane         CP only (no embedded worker)"
+	@echo "  metrics              Standalone metrics TSDB + query API"
+	@echo "  logs                 Standalone log store + query API"
+	@echo "  observability        Metrics + logs (no CP components)"
+	@echo "  gateway              Domain proxy only"

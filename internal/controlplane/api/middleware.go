@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -10,9 +12,35 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/vyprai/loka/internal/controlplane/metrics"
 	"github.com/vyprai/loka/internal/store"
 )
+
+type ctxKeyLogger struct{}
+
+// contextLoggerMiddleware creates a per-request logger with request ID and stores it in context.
+func contextLoggerMiddleware(baseLogger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reqID := middleware.GetReqID(r.Context())
+			logger := baseLogger
+			if reqID != "" {
+				logger = baseLogger.With("request_id", reqID)
+			}
+			ctx := context.WithValue(r.Context(), ctxKeyLogger{}, logger)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// LoggerFromContext extracts the per-request logger. Falls back to slog.Default().
+func LoggerFromContext(ctx context.Context) *slog.Logger {
+	if l, ok := ctx.Value(ctxKeyLogger{}).(*slog.Logger); ok {
+		return l
+	}
+	return slog.Default()
+}
 
 // metricsMiddleware records request count and latency per route.
 func metricsMiddleware(next http.Handler) http.Handler {
@@ -72,7 +100,27 @@ type authRateLimiter struct {
 	failures map[string][]time.Time
 }
 
-var globalAuthLimiter = &authRateLimiter{failures: make(map[string][]time.Time)}
+var globalAuthLimiter = newAuthRateLimiter()
+
+func newAuthRateLimiter() *authRateLimiter {
+	rl := &authRateLimiter{failures: make(map[string][]time.Time)}
+	// Periodic cleanup every 60s to prevent memory leak under DDoS.
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			rl.mu.Lock()
+			cutoff := time.Now().Add(-rateLimitBlockDuration)
+			for k, v := range rl.failures {
+				if len(v) == 0 || v[len(v)-1].Before(cutoff) {
+					delete(rl.failures, k)
+				}
+			}
+			rl.mu.Unlock()
+		}
+	}()
+	return rl
+}
 
 const (
 	rateLimitWindow  = 60 * time.Second

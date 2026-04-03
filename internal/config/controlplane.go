@@ -21,6 +21,34 @@ type ControlPlaneConfig struct {
 	TLS         TLSConfig         `yaml:"tls"`
 	Domain      DomainConfig      `yaml:"domain"`
 	Retention   RetentionConfig   `yaml:"retention"`
+	Metrics     MetricsConfig     `yaml:"metrics"`
+	LogStore    LogStoreConfig    `yaml:"log_store"`
+}
+
+// LogStoreConfig configures the centralized log store.
+type LogStoreConfig struct {
+	Enabled        bool   `yaml:"enabled"`         // Enable centralized log store (default true).
+	DataDir        string `yaml:"data_dir"`          // BadgerDB directory for logs.
+	Retention      string `yaml:"retention"`         // TTL for log entries (default "168h" / 7 days).
+	ScrapeInterval string `yaml:"scrape_interval"`   // How often to pull from workers (default "5s").
+	MaxDiskBytes   int64  `yaml:"max_disk_bytes"`    // Max disk usage for logs (default 10GB, 0=unlimited).
+}
+
+// MetricsConfig configures the built-in metrics TSDB.
+type MetricsConfig struct {
+	Enabled         bool             `yaml:"enabled"`          // Enable built-in metrics (default true).
+	DataDir         string           `yaml:"data_dir"`          // BadgerDB storage directory.
+	ScrapeInterval  string           `yaml:"scrape_interval"`   // Target scrape interval (default "15s").
+	CollectInterval string           `yaml:"collect_interval"`  // CP-level collection interval (default "15s").
+	Retention       MetricsRetention `yaml:"retention"`
+	MaxDiskBytes    int64            `yaml:"max_disk_bytes"`    // Max disk usage for metrics (default 10GB, 0=unlimited).
+}
+
+// MetricsRetention configures retention tiers for metrics data.
+type MetricsRetention struct {
+	Raw         string `yaml:"raw"`          // Full-resolution retention (default "48h").
+	Downsampled string `yaml:"downsampled"`  // 1-minute aggregate retention (default "168h").
+	Meta        string `yaml:"meta"`         // Index-only retention (default "720h").
 }
 
 // RetentionConfig controls garbage collection TTLs.
@@ -166,6 +194,50 @@ func (c *ControlPlaneConfig) Defaults() {
 	}
 	if c.Retention.CleanupInterval == "" {
 		c.Retention.CleanupInterval = "1h"
+	}
+
+	// Metrics defaults.
+	if !c.Metrics.Enabled && c.Metrics.DataDir == "" && c.Metrics.ScrapeInterval == "" {
+		// Not explicitly configured — enable by default.
+		c.Metrics.Enabled = true
+	}
+	if c.Metrics.DataDir == "" {
+		c.Metrics.DataDir = c.DataDir + "/metrics"
+	}
+	if c.Metrics.ScrapeInterval == "" {
+		c.Metrics.ScrapeInterval = "15s"
+	}
+	if c.Metrics.CollectInterval == "" {
+		c.Metrics.CollectInterval = "15s"
+	}
+	if c.Metrics.Retention.Raw == "" {
+		c.Metrics.Retention.Raw = "48h"
+	}
+	if c.Metrics.Retention.Downsampled == "" {
+		c.Metrics.Retention.Downsampled = "168h"
+	}
+	if c.Metrics.Retention.Meta == "" {
+		c.Metrics.Retention.Meta = "720h"
+	}
+	if c.Metrics.MaxDiskBytes == 0 {
+		c.Metrics.MaxDiskBytes = 10 * 1024 * 1024 * 1024 // 10GB
+	}
+
+	// Log store defaults.
+	if !c.LogStore.Enabled && c.LogStore.DataDir == "" && c.LogStore.ScrapeInterval == "" {
+		c.LogStore.Enabled = true
+	}
+	if c.LogStore.DataDir == "" {
+		c.LogStore.DataDir = c.DataDir + "/logs"
+	}
+	if c.LogStore.Retention == "" {
+		c.LogStore.Retention = "168h"
+	}
+	if c.LogStore.ScrapeInterval == "" {
+		c.LogStore.ScrapeInterval = "5s"
+	}
+	if c.LogStore.MaxDiskBytes == 0 {
+		c.LogStore.MaxDiskBytes = 10 * 1024 * 1024 * 1024 // 10GB
 	}
 
 	// Domain proxy defaults — enable by default for local (all-in-one) setups.

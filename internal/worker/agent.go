@@ -257,6 +257,23 @@ func (a *Agent) Provider() string { return a.provider }
 func (a *Agent) Labels() map[string]string { return a.labels }
 
 
+// metricsProbe describes an HTTP endpoint for supervisor auto-discovery.
+type metricsProbe struct {
+	Port int    `json:"port"`
+	Path string `json:"path,omitempty"`
+}
+
+// sendMetricsConfig sends the set_metrics_config RPC to the supervisor.
+func (a *Agent) sendMetricsConfig(vsock *vm.VsockClient, probes []metricsProbe) {
+	cfg := struct {
+		HTTPProbes []metricsProbe `json:"http_probes"`
+	}{HTTPProbes: probes}
+	data, _ := json.Marshal(cfg)
+	if err := vsock.SetMetricsConfig(data); err != nil {
+		a.logger.Debug("failed to send metrics config to supervisor", "error", err)
+	}
+}
+
 // LaunchOpts holds options for launching a session.
 type LaunchOpts struct {
 	Mode                loka.ExecMode
@@ -416,6 +433,11 @@ func (a *Agent) LaunchSession(ctx context.Context, sessionID string, opts Launch
 
 	vsockClient.SetPolicy(opts.Policy)
 	vsockClient.SetMode(opts.Mode)
+
+	// Send metrics config to supervisor for auto-discovery of HTTP endpoints.
+	// Sessions typically don't have ports, but if Ports are mapped later
+	// via StartPortForward, the metrics config can be updated.
+	a.sendMetricsConfig(vsockClient, nil)
 
 	a.sessions[sessionID] = &SessionState{
 		ID:       sessionID,
@@ -702,10 +724,26 @@ func (a *Agent) AddToWhitelist(sessionID, command string) error {
 }
 
 // CancelExec cancels a running command via vsock.
-func (a *Agent) CancelExec(sessionID, cmdID string) error { return nil }
+func (a *Agent) CancelExec(sessionID, cmdID string) error {
+	a.mu.RLock()
+	sess, ok := a.sessions[sessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("instance %s not found", sessionID)
+	}
+	return sess.Vsock.CancelCommand(cmdID)
+}
 
 // CancelAllExec cancels all running commands.
-func (a *Agent) CancelAllExec(sessionID string) error { return nil }
+func (a *Agent) CancelAllExec(sessionID string) error {
+	a.mu.RLock()
+	sess, ok := a.sessions[sessionID]
+	a.mu.RUnlock()
+	if !ok {
+		return fmt.Errorf("instance %s not found", sessionID)
+	}
+	return sess.Vsock.CancelAllCommands()
+}
 
 // Heartbeat returns the current heartbeat data.
 func (a *Agent) Heartbeat() *loka.Heartbeat {
@@ -949,6 +987,11 @@ func (a *Agent) LaunchService(ctx context.Context, serviceID string, opts Servic
 	if _, err := vsockClient.ServiceStart(opts.Command, opts.Args, opts.Env, opts.Workdir, restartPolicy); err != nil {
 		a.stopVM(serviceID)
 		return fmt.Errorf("start service: %w", err)
+	}
+
+	// Send metrics config for auto-discovery of HTTP endpoints.
+	if opts.Port > 0 {
+		a.sendMetricsConfig(vsockClient, []metricsProbe{{Port: opts.Port, Path: opts.HealthPath}})
 	}
 
 	// Store the session/VM reference so other service methods can find it.

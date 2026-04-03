@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/vyprai/loka/internal/controlplane/metrics/recorder"
 	"github.com/vyprai/loka/internal/loka"
+	"github.com/vyprai/loka/internal/metrics"
 	"github.com/vyprai/loka/internal/store"
 )
 
@@ -119,20 +121,29 @@ type ShellStartData struct {
 	Relay     *ShellRelay
 }
 
+// OnWorkerJoinFunc is called when a new worker registers (e.g., to heal degraded volumes).
+type OnWorkerJoinFunc func(ctx context.Context)
+
 // Registry manages connected workers.
 type Registry struct {
-	mu      sync.RWMutex
-	workers map[string]*WorkerConn
-	store   store.Store
-	logger  *slog.Logger
+	mu            sync.RWMutex
+	workers       map[string]*WorkerConn
+	store         store.Store
+	logger        *slog.Logger
+	recorder      recorder.Recorder
+	onWorkerJoin  OnWorkerJoinFunc
 }
 
 // NewRegistry creates a new worker registry.
-func NewRegistry(s store.Store, logger *slog.Logger) *Registry {
+func NewRegistry(s store.Store, logger *slog.Logger, rec recorder.Recorder) *Registry {
+	if rec == nil {
+		rec = recorder.NopRecorder{}
+	}
 	return &Registry{
-		workers: make(map[string]*WorkerConn),
-		store:   s,
-		logger:  logger,
+		workers:  make(map[string]*WorkerConn),
+		store:    s,
+		logger:   logger,
+		recorder: rec,
 	}
 }
 
@@ -167,8 +178,20 @@ func (r *Registry) Register(ctx context.Context, hostname, ipAddr, provider, reg
 	}
 	r.mu.Unlock()
 
+	r.recorder.Inc("worker_registrations_total", metrics.Label{Name: "worker_id", Value: w.ID}, metrics.Label{Name: "hostname", Value: hostname}, metrics.Label{Name: "provider", Value: provider})
 	r.logger.Info("worker registered", "id", w.ID, "hostname", hostname, "provider", provider)
+
+	// Notify listeners (e.g., volume manager can heal degraded volumes).
+	if r.onWorkerJoin != nil {
+		go r.onWorkerJoin(ctx)
+	}
+
 	return w, nil
+}
+
+// SetOnWorkerJoin sets a callback invoked when a new worker registers.
+func (r *Registry) SetOnWorkerJoin(fn OnWorkerJoinFunc) {
+	r.onWorkerJoin = fn
 }
 
 // Unregister removes a worker from the registry.
@@ -180,6 +203,26 @@ func (r *Registry) Unregister(id string) {
 	}
 	r.mu.Unlock()
 	r.logger.Info("worker unregistered", "id", id)
+}
+
+// CleanupDead removes workers in dead status from the in-memory registry.
+// Should be called periodically to prevent stale entries from accumulating.
+func (r *Registry) CleanupDead() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	count := 0
+	for id, conn := range r.workers {
+		if conn.Worker.Status == loka.WorkerStatusDead {
+			close(conn.CmdChan)
+			delete(r.workers, id)
+			count++
+		}
+	}
+	if count > 0 {
+		r.logger.Info("cleaned up dead workers from registry", "count", count)
+	}
+	return count
 }
 
 // Get returns a connected worker by ID.
@@ -199,6 +242,19 @@ func (r *Registry) List() []*WorkerConn {
 		conns = append(conns, c)
 	}
 	return conns
+}
+
+// ListHealthy returns IDs of all healthy (ready or busy) workers.
+func (r *Registry) ListHealthy(_ context.Context) ([]string, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var ids []string
+	for _, c := range r.workers {
+		if c.Worker.Status == loka.WorkerStatusReady || c.Worker.Status == loka.WorkerStatusBusy {
+			ids = append(ids, c.Worker.ID)
+		}
+	}
+	return ids, nil
 }
 
 // SendCommand sends a command to a specific worker.

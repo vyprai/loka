@@ -41,9 +41,9 @@ func setupTestEnv(t *testing.T) *testEnv {
 	}
 
 	logger := slog.Default()
-	registry := worker.NewRegistry(db, logger)
-	sched := scheduler.New(registry, scheduler.StrategySpread)
-	sm := session.NewManager(db, registry, sched, nil, nil, logger)
+	registry := worker.NewRegistry(db, logger, nil)
+	sched := scheduler.New(registry, scheduler.StrategySpread, nil)
+	sm := session.NewManager(db, registry, sched, nil, nil, logger, nil)
 
 	// Start gRPC server on a random port.
 	lis, err := net.Listen("tcp", ":0")

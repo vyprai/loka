@@ -36,7 +36,7 @@ func setupGCTest(t *testing.T, ret config.RetentionConfig) (*GarbageCollector, *
 		t.Fatalf("create local objstore: %v", err)
 	}
 	imgMgr := image.NewManager(objStore, tmpDir, logger)
-	reg := worker.NewRegistry(db, logger)
+	reg := worker.NewRegistry(db, logger, nil)
 
 	gc := New(db, objStore, reg, imgMgr, ret, logger)
 	return gc, db

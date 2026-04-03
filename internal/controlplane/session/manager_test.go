@@ -43,7 +43,7 @@ func setupTestManager(t *testing.T) *testEnv {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	reg := worker.NewRegistry(st, logger)
+	reg := worker.NewRegistry(st, logger, nil)
 
 	// Register a mock worker so the scheduler can pick it.
 	w, err := reg.Register(ctx,
@@ -61,14 +61,14 @@ func setupTestManager(t *testing.T) *testEnv {
 		t.Fatalf("register worker: %v", err)
 	}
 
-	sched := scheduler.New(reg, scheduler.StrategySpread)
+	sched := scheduler.New(reg, scheduler.StrategySpread, nil)
 
 	objStore, err := local.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("create local objstore: %v", err)
 	}
 
-	mgr := NewManager(st, reg, sched, nil, objStore, logger)
+	mgr := NewManager(st, reg, sched, nil, objStore, logger, nil)
 
 	return &testEnv{
 		store:    st,
@@ -1595,7 +1595,7 @@ func TestProvisioningSession_WithImageManager(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 
-	reg := worker.NewRegistry(st, logger)
+	reg := worker.NewRegistry(st, logger, nil)
 	_, err = reg.Register(ctx,
 		"test-host", "127.0.0.1", "local", "us-east-1", "us-east-1a", "1.0.0",
 		loka.ResourceCapacity{CPUCores: 4, MemoryMB: 8192, DiskMB: 50000},
@@ -1605,7 +1605,7 @@ func TestProvisioningSession_WithImageManager(t *testing.T) {
 		t.Fatalf("register worker: %v", err)
 	}
 
-	sched := scheduler.New(reg, scheduler.StrategySpread)
+	sched := scheduler.New(reg, scheduler.StrategySpread, nil)
 
 	// Create a real image manager and register an image.
 	tmpDir := t.TempDir()
@@ -1620,7 +1620,7 @@ func TestProvisioningSession_WithImageManager(t *testing.T) {
 		Status:    loka.ImageStatusReady,
 	})
 
-	mgr := NewManager(st, reg, sched, imgMgr, objStore, logger)
+	mgr := NewManager(st, reg, sched, imgMgr, objStore, logger, nil)
 
 	s, err := mgr.Create(ctx, CreateOpts{
 		Name:     "with-imgmgr",

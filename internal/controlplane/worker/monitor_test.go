@@ -116,7 +116,7 @@ func (s *mockStoreWithSessions) Close() error                            { retur
 func TestMigrationRetry_AbandonedAfter3Failures(t *testing.T) {
 	logger := slog.Default()
 	st := newMockStoreWithSessions()
-	registry := NewRegistry(st, logger)
+	registry := NewRegistry(st, logger, nil)
 
 	ctx := context.Background()
 
@@ -157,7 +157,7 @@ func TestMigrationRetry_AbandonedAfter3Failures(t *testing.T) {
 		SuspectAfter:  5 * time.Millisecond,
 		DeadAfter:     10 * time.Millisecond,
 		CheckInterval: 5 * time.Millisecond,
-	}, logger)
+	}, logger, nil)
 
 	// Run check() multiple times to trigger retries.
 	// After each check, the worker is marked dead and the session is set to "creating".
@@ -196,7 +196,7 @@ func TestMigrationRetry_AbandonedAfter3Failures(t *testing.T) {
 func TestMigrationRetry_SuccessResetsCount(t *testing.T) {
 	logger := slog.Default()
 	st := newMockStoreWithSessions()
-	registry := NewRegistry(st, logger)
+	registry := NewRegistry(st, logger, nil)
 
 	ctx := context.Background()
 
@@ -243,7 +243,7 @@ func TestMigrationRetry_SuccessResetsCount(t *testing.T) {
 		SuspectAfter:  5 * time.Millisecond,
 		DeadAfter:     10 * time.Millisecond,
 		CheckInterval: 5 * time.Millisecond,
-	}, logger)
+	}, logger, nil)
 
 	// First check: worker goes dead, migration fails (try 1).
 	mon.check(ctx)

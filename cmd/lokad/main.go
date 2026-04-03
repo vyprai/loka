@@ -25,7 +25,10 @@ import (
 
 	"github.com/vyprai/loka/internal/config"
 	"github.com/vyprai/loka/internal/controlplane"
+	gatewaypkg "github.com/vyprai/loka/internal/gateway"
 	"github.com/vyprai/loka/internal/loka"
+	"github.com/go-chi/chi/v5"
+	chimw "github.com/go-chi/chi/v5/middleware"
 	"github.com/vyprai/loka/internal/controlplane/api"
 	"github.com/vyprai/loka/internal/controlplane/gc"
 	"github.com/vyprai/loka/internal/controlplane/image"
@@ -43,6 +46,14 @@ import (
 	s3objstore "github.com/vyprai/loka/internal/objstore/s3"
 	lokatask "github.com/vyprai/loka/internal/controlplane/task"
 	lokadns "github.com/vyprai/loka/internal/dns"
+	metricscollector "github.com/vyprai/loka/internal/controlplane/metrics/collector"
+	"github.com/vyprai/loka/internal/controlplane/metrics/alerting"
+	logapi "github.com/vyprai/loka/internal/controlplane/logging/api"
+	logstore "github.com/vyprai/loka/internal/controlplane/logging/store"
+	cpmetrics "github.com/vyprai/loka/internal/controlplane/metrics"
+	metricsscraper "github.com/vyprai/loka/internal/controlplane/metrics/scraper"
+	metricsrecorder "github.com/vyprai/loka/internal/controlplane/metrics/recorder"
+	"github.com/vyprai/loka/internal/controlplane/metrics/tsdb"
 	"github.com/vyprai/loka/internal/provider"
 	"github.com/vyprai/loka/pkg/lokavm"
 	"github.com/vyprai/loka/pkg/tlsutil"
@@ -130,6 +141,32 @@ func main() {
 	slog.SetDefault(logger)
 
 	logger.Info("starting lokad", "version", version.Version, "commit", version.Commit, "role", cfg.Role)
+
+	// Gateway-only mode: no DB, no store, just proxy traffic.
+	if cfg.Role == "gw" || cfg.Role == "gateway" {
+		gwCtx, gwCancel := context.WithCancel(context.Background())
+		defer gwCancel()
+		runGateway(gwCtx, gwCancel, cfg, logger)
+		return
+	}
+
+	// Metrics-only mode: only TSDB + query API + scraper. No scheduler, sessions, etc.
+	if cfg.Role == "metrics" {
+		runMetricsNode(cfg, logger)
+		return
+	}
+
+	// Logs-only mode: only log store + query API + scraper.
+	if cfg.Role == "logs" {
+		runLogsNode(cfg, logger)
+		return
+	}
+
+	// Observability mode: both metrics + logs, no CP components.
+	if cfg.Role == "observability" {
+		runObservabilityNode(cfg, logger)
+		return
+	}
 
 	// Initialize store via factory.
 	db, err := store.Open(store.Config{
@@ -416,30 +453,95 @@ func main() {
 	providerRegistry := provider.NewRegistry()
 	providerRegistry.Register(provlocal.New())
 	providerRegistry.Register(provsm.New(db))
-	providerRegistry.Register(provaws.New(provaws.Config{}, logger))
-	providerRegistry.Register(provgcp.New(provgcp.Config{}, logger))
-	providerRegistry.Register(provazure.New(provazure.Config{}, logger))
-	providerRegistry.Register(provovh.New(provovh.Config{}, logger))
-	providerRegistry.Register(provdo.New(provdo.Config{}, logger))
+	// Cloud providers are registered best-effort — they require credentials
+	// which may not be available on the server side.
+	if p, err := provaws.New(provaws.Config{}, logger); err == nil {
+		providerRegistry.Register(p)
+	}
+	if p, err := provgcp.New(provgcp.Config{}, logger); err == nil {
+		providerRegistry.Register(p)
+	}
+	if p, err := provazure.New(provazure.Config{}, logger); err == nil {
+		providerRegistry.Register(p)
+	}
+	if p, err := provovh.New(provovh.Config{}, logger); err == nil {
+		providerRegistry.Register(p)
+	}
+	if p, err := provdo.New(provdo.Config{}, logger); err == nil {
+		providerRegistry.Register(p)
+	}
 	logger.Info("providers registered", "count", len(providerRegistry.List()))
 
 	// Initialize image manager (Docker images → lokavm rootfs).
 	imgMgr := image.NewManager(objStore, cfg.DataDir, logger)
 
+	// Initialize built-in metrics TSDB.
+	var rec metricsrecorder.Recorder = metricsrecorder.NopRecorder{}
+	var metricsStore tsdb.MetricsStore
+	if cfg.Metrics.Enabled {
+		rawRetention, _ := time.ParseDuration(cfg.Metrics.Retention.Raw)
+		if rawRetention == 0 {
+			rawRetention = 48 * time.Hour
+		}
+		var err error
+		metricsStore, err = tsdb.NewStore(tsdb.StoreConfig{
+			DataDir:   cfg.Metrics.DataDir,
+			Retention: rawRetention,
+			Logger:    logger,
+		})
+		if err != nil {
+			logger.Error("failed to open metrics TSDB", "error", err)
+		} else {
+			recCtx, recCancel := context.WithCancel(ctx)
+			rec, _ = metricsrecorder.New(recCtx, metricsStore)
+			defer recCancel()
+			defer metricsStore.Close()
+			logger.Info("metrics TSDB initialized", "dir", cfg.Metrics.DataDir)
+		}
+	}
+
+	// Initialize centralized log store.
+	var logStore logstore.LogStore
+	if cfg.LogStore.Enabled {
+		logRetention, _ := time.ParseDuration(cfg.LogStore.Retention)
+		if logRetention == 0 {
+			logRetention = 168 * time.Hour
+		}
+		var err error
+		logStore, err = logstore.NewStore(logstore.StoreConfig{
+			DataDir:   cfg.LogStore.DataDir,
+			Retention: logRetention,
+			Logger:    logger,
+		})
+		if err != nil {
+			logger.Error("failed to open log store", "error", err)
+		} else {
+			defer logStore.Close()
+			logger.Info("log store initialized", "dir", cfg.LogStore.DataDir)
+		}
+	}
+
 	// Initialize worker registry.
-	registry := worker.NewRegistry(db, logger)
+	registry := worker.NewRegistry(db, logger, rec)
 
 	// Initialize scheduler.
-	sched := scheduler.New(registry, scheduler.Strategy(cfg.Scheduler.Strategy))
+	sched := scheduler.New(registry, scheduler.Strategy(cfg.Scheduler.Strategy), rec)
 
-	// Initialize volume manager.
-	volMgr := volume.NewManager(db, objStore, cfg.DataDir, logger)
+	// Initialize volume manager (metadata-only, no data dir on CP).
+	volMgr := volume.NewManager(db, objStore, registry, logger, rec)
+
+	// Wire up volume healing on worker join.
+	registry.SetOnWorkerJoin(func(ctx context.Context) {
+		if err := volMgr.ReconcileDegradedVolumes(ctx); err != nil {
+			logger.Warn("failed to reconcile degraded volumes on worker join", "error", err)
+		}
+	})
 
 	// Initialize session manager.
-	sm := session.NewManager(db, registry, sched, imgMgr, objStore, logger)
+	sm := session.NewManager(db, registry, sched, imgMgr, objStore, logger, rec)
 
 	// Initialize service manager.
-	svcMgr := service.NewManager(db, registry, sched, imgMgr, objStore, volMgr, logger)
+	svcMgr := service.NewManager(db, registry, sched, imgMgr, objStore, volMgr, logger, rec)
 
 	// Mark stale services as stopped — VMs don't survive lokad restart,
 	// so any service in "deploying" or "running" state is orphaned.
@@ -482,7 +584,29 @@ func main() {
 	collector := gc.New(db, objStore, registry, imgMgr, cfg.Retention, logger)
 
 	// Start worker health monitor and GC (only on leader in HA mode).
-	monitor := worker.NewMonitor(registry, db, sm.MigrateSession, worker.DefaultMonitorConfig(), logger)
+	monitor := worker.NewMonitor(registry, db, sm.MigrateSession, worker.DefaultMonitorConfig(), logger, rec)
+	monitor.SetVolumeFailoverFunc(func(ctx context.Context, deadWorkerID string) error {
+		return volMgr.HandleWorkerDeath(ctx, deadWorkerID)
+	})
+	monitor.SetServiceCleanupFunc(func(ctx context.Context, deadWorkerID string) (int, error) {
+		svcs, err := db.Services().ListByWorker(ctx, deadWorkerID)
+		if err != nil {
+			return 0, err
+		}
+		count := 0
+		for _, svc := range svcs {
+			if svc.Status == loka.ServiceStatusRunning || svc.Status == loka.ServiceStatusDeploying {
+				svc.Status = loka.ServiceStatusStopped
+				svc.Ready = false
+				svc.ForwardPort = 0
+				svc.StatusMessage = "worker died"
+				svc.UpdatedAt = time.Now()
+				db.Services().Update(ctx, svc)
+				count++
+			}
+		}
+		return count, nil
+	})
 
 	if cfg.Mode == "ha" {
 		// In HA mode, only the leader runs the monitor and GC.
@@ -495,6 +619,14 @@ func main() {
 		// Single mode — always run the monitor and GC.
 		go monitor.Start(ctx)
 		go collector.Run(ctx)
+	}
+
+	// Start metrics CP-level collector (entity counts → TSDB).
+	if metricsStore != nil {
+		collectInterval, _ := time.ParseDuration(cfg.Metrics.CollectInterval)
+		mc := metricscollector.New(db, metricsStore, collectInterval, logger)
+		mc.Start()
+		defer mc.Stop()
 	}
 
 	// Start embedded local worker unless running as control plane only.
@@ -559,6 +691,7 @@ func main() {
 			api.DomainProxyOpts{ServiceManager: svcMgr},
 		)
 		svcMgr.SetDomainProxy(domainProxy)
+		svcMgr.SetAutoscaleMetrics(domainProxy)
 		domainProxy.StartRouteReaper()
 
 		// When a domain route is added, regenerate the TLS cert to include it.
@@ -607,14 +740,23 @@ func main() {
 		CACertPath:     caCertPath,
 		ObjStore:       objStore,
 		DataDir:        cfg.DataDir,
+		DBDriver:       cfg.Database.Driver,
+		DBDSN:          cfg.Database.DSN,
 		ServiceManager: svcMgr,
 		TaskManager:    taskMgr,
 		DomainProxy:    domainProxy,
+		MetricsStore:   metricsStore,
+		AlertRuleStore: alerting.NewMemStore(),
+		LogStore:       logStore,
 	})
 
 	httpServer := &http.Server{
-		Addr:    cfg.ListenAddr,
-		Handler: srv.Handler(),
+		Addr:           cfg.ListenAddr,
+		Handler:        srv.Handler(),
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   60 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20, // 1 MB
 	}
 
 	// ── Start domain proxy listener ─────────────────────────
@@ -624,8 +766,12 @@ func main() {
 	var domainServer *http.Server
 	if domainProxy != nil {
 		domainServer = &http.Server{
-			Addr:    cfg.Domain.ListenAddr,
-			Handler: domainProxy.Handler(),
+			Addr:           cfg.Domain.ListenAddr,
+			Handler:        domainProxy.Handler(),
+			ReadTimeout:    30 * time.Second,
+			WriteTimeout:   120 * time.Second, // Longer for proxied requests.
+			IdleTimeout:    120 * time.Second,
+			MaxHeaderBytes: 1 << 20,
 		}
 		go func() {
 			logger.Info("domain proxy listening", "addr", cfg.Domain.ListenAddr)
@@ -728,17 +874,15 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info("shutting down...")
-		cancel()
 
 		// Use a bounded context so stuck connections don't hang shutdown.
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer shutdownCancel()
 
-		if localWorker != nil {
-			localWorker.Stop()
+		// Phase 1: Stop accepting new requests (drain in-flight).
+		if err := httpServer.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("http server shutdown timeout", "error", err)
 		}
-		sm.Close()
-		svcMgr.Close()
 		if domainServer != nil {
 			if err := domainServer.Shutdown(shutdownCtx); err != nil {
 				logger.Warn("domain server shutdown timeout", "error", err)
@@ -750,8 +894,15 @@ func main() {
 			}
 		}
 		grpcSrv.GracefulStop()
-		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			logger.Warn("http server shutdown timeout", "error", err)
+
+		// Phase 2: Cancel background work (monitor, GC, etc.).
+		cancel()
+
+		// Phase 3: Close managers (flushes state, stops goroutines).
+		sm.Close()
+		svcMgr.Close()
+		if localWorker != nil {
+			localWorker.Stop()
 		}
 	}()
 
@@ -809,5 +960,237 @@ func (d *dnsToggleAdapter) Stop() {
 		(*d.server).Stop()
 		*d.server = nil
 		d.logger.Info("DNS server stopped via admin API")
+	}
+}
+
+// runGateway starts the gateway-only mode. The gateway connects to the CP
+// via HTTP polling for route updates and proxies traffic to workers.
+// It runs independently so that active connections survive CP restarts.
+func runGateway(ctx context.Context, cancel context.CancelFunc, cfg config.ControlPlaneConfig, logger *slog.Logger) {
+	gw := gatewaypkg.New(logger)
+
+	// Determine CP address for route sync.
+	cpAddr := cfg.GRPCAddr // Reuse gRPC addr config field for CP connection.
+	if cpAddr == "" || cpAddr == ":6841" {
+		cpAddr = "http://localhost:6840" // Default: CP on same host.
+	}
+	// If it looks like a gRPC address (just port), convert to HTTP.
+	if strings.HasPrefix(cpAddr, ":") {
+		cpAddr = "http://localhost" + strings.Replace(cpAddr, ":6841", ":6840", 1)
+	}
+
+	watcher := gatewaypkg.NewRouteWatcher(cpAddr, gw, logger)
+	go watcher.Start(ctx)
+	go watcher.StartMetricsReporter(ctx)
+
+	listenAddr := cfg.Domain.ListenAddr
+	if listenAddr == "" {
+		listenAddr = ":6843"
+	}
+
+	gwServer := &http.Server{
+		Addr:           listenAddr,
+		Handler:        gw.Handler(),
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   120 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
+	}
+
+	logger.Info("gateway listening", "addr", listenAddr, "cp", cpAddr)
+
+	// Graceful shutdown.
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		logger.Info("gateway shutting down...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer shutdownCancel()
+		gwServer.Shutdown(shutdownCtx)
+		cancel()
+	}()
+
+	if err := gwServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Error("gateway server error", "error", err)
+		os.Exit(1)
+	}
+}
+
+// runMetricsNode starts a standalone metrics-only node: TSDB + query API + scraper.
+// No scheduler, sessions, services, workers, etc.
+func runMetricsNode(cfg config.ControlPlaneConfig, logger *slog.Logger) {
+	logger.Info("starting lokad in metrics-only mode", "listen", cfg.ListenAddr)
+
+	rawRetention, _ := time.ParseDuration(cfg.Metrics.Retention.Raw)
+	if rawRetention == 0 {
+		rawRetention = 48 * time.Hour
+	}
+	metricsStore, err := tsdb.NewStore(tsdb.StoreConfig{
+		DataDir:   cfg.Metrics.DataDir,
+		Retention: rawRetention,
+		Logger:    logger,
+	})
+	if err != nil {
+		logger.Error("failed to open metrics TSDB", "error", err)
+		os.Exit(1)
+	}
+	defer metricsStore.Close()
+
+	// Start scraper (discovers targets via CP API if configured).
+	scrapeInterval, _ := time.ParseDuration(cfg.Metrics.ScrapeInterval)
+	scraper := metricsscraper.New(metricsStore, nil, scrapeInterval, logger) // nil discovery = no auto-discovery
+	scraper.Start()
+	defer scraper.Stop()
+
+	// Start collector for self-monitoring.
+	// (No SQL store in metrics-only mode, so skip entity counts.)
+
+	r := chi.NewRouter()
+	r.Use(chimw.Recoverer)
+	r.Use(chimw.Logger)
+
+	metricsAPI := &cpmetrics.MetricsAPI{Store: metricsStore, Scraper: scraper}
+	r.Mount("/api/v1/metrics", metricsAPI.Routes())
+	r.Get("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","role":"metrics"}`))
+	})
+
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: r}
+	logger.Info("metrics node listening", "addr", cfg.ListenAddr)
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		logger.Info("shutting down metrics node")
+		server.Shutdown(context.Background())
+	}()
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Error("metrics node error", "error", err)
+		os.Exit(1)
+	}
+}
+
+// runLogsNode starts a standalone logs-only node: LogStore + query API + scraper.
+func runLogsNode(cfg config.ControlPlaneConfig, logger *slog.Logger) {
+	logger.Info("starting lokad in logs-only mode", "listen", cfg.ListenAddr)
+
+	logRetention, _ := time.ParseDuration(cfg.LogStore.Retention)
+	if logRetention == 0 {
+		logRetention = 168 * time.Hour
+	}
+	ls, err := logstore.NewStore(logstore.StoreConfig{
+		DataDir:   cfg.LogStore.DataDir,
+		Retention: logRetention,
+		Logger:    logger,
+	})
+	if err != nil {
+		logger.Error("failed to open log store", "error", err)
+		os.Exit(1)
+	}
+	defer ls.Close()
+
+	r := chi.NewRouter()
+	r.Use(chimw.Recoverer)
+	r.Use(chimw.Logger)
+
+	logsAPI := &logapi.LogsAPI{Store: ls}
+	r.Mount("/api/v1/logs", logsAPI.Routes())
+	r.Get("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","role":"logs"}`))
+	})
+
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: r}
+	logger.Info("logs node listening", "addr", cfg.ListenAddr)
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		logger.Info("shutting down logs node")
+		server.Shutdown(context.Background())
+	}()
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Error("logs node error", "error", err)
+		os.Exit(1)
+	}
+}
+
+// runObservabilityNode starts a standalone node with both metrics + logs (no CP components).
+func runObservabilityNode(cfg config.ControlPlaneConfig, logger *slog.Logger) {
+	logger.Info("starting lokad in observability mode", "listen", cfg.ListenAddr)
+
+	// Metrics TSDB.
+	rawRetention, _ := time.ParseDuration(cfg.Metrics.Retention.Raw)
+	if rawRetention == 0 {
+		rawRetention = 48 * time.Hour
+	}
+	metricsStore, err := tsdb.NewStore(tsdb.StoreConfig{
+		DataDir:   cfg.Metrics.DataDir,
+		Retention: rawRetention,
+		Logger:    logger,
+	})
+	if err != nil {
+		logger.Error("failed to open metrics TSDB", "error", err)
+		os.Exit(1)
+	}
+	defer metricsStore.Close()
+
+	// Log store.
+	logRetention, _ := time.ParseDuration(cfg.LogStore.Retention)
+	if logRetention == 0 {
+		logRetention = 168 * time.Hour
+	}
+	ls, err := logstore.NewStore(logstore.StoreConfig{
+		DataDir:   cfg.LogStore.DataDir,
+		Retention: logRetention,
+		Logger:    logger,
+	})
+	if err != nil {
+		logger.Error("failed to open log store", "error", err)
+		os.Exit(1)
+	}
+	defer ls.Close()
+
+	// Scraper.
+	scrapeInterval, _ := time.ParseDuration(cfg.Metrics.ScrapeInterval)
+	scraper := metricsscraper.New(metricsStore, nil, scrapeInterval, logger)
+	scraper.Start()
+	defer scraper.Stop()
+
+	r := chi.NewRouter()
+	r.Use(chimw.Recoverer)
+	r.Use(chimw.Logger)
+
+	metricsAPI := &cpmetrics.MetricsAPI{Store: metricsStore, Scraper: scraper}
+	r.Mount("/api/v1/metrics", metricsAPI.Routes())
+
+	logsAPI := &logapi.LogsAPI{Store: ls}
+	r.Mount("/api/v1/logs", logsAPI.Routes())
+
+	r.Get("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","role":"observability"}`))
+	})
+
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: r}
+	logger.Info("observability node listening", "addr", cfg.ListenAddr)
+
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		logger.Info("shutting down observability node")
+		server.Shutdown(context.Background())
+	}()
+
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		logger.Error("observability node error", "error", err)
+		os.Exit(1)
 	}
 }
