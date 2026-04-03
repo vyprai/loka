@@ -43,13 +43,19 @@ jobs:
         run: |
           PLATFORM="${GOOS}-${GOARCH}"
           LDFLAGS="-s -w -X github.com/vyprai/loka/pkg/version.Version=${REF_NAME}"
-
           mkdir -p dist
 
-          go build -trimpath -ldflags "$LDFLAGS" -o "dist/lokad" ./cmd/lokad
-          go build -trimpath -ldflags "$LDFLAGS" -o "dist/loka-worker" ./cmd/loka-worker
-          go build -trimpath -ldflags "$LDFLAGS" -o "dist/loka-supervisor" ./cmd/loka-supervisor
-          go build -trimpath -ldflags "$LDFLAGS" -o "dist/loka" ./cmd/loka
+          # lokad: CGO_ENABLED=1 on macOS (Apple VZ), CGO_ENABLED=0 on Linux (KVM pure Go).
+          # Code-Hex/vz/v3 stringer file lacks build tags — fails with CGO on Linux.
+          if [ "${GOOS}" = "linux" ]; then
+            CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/lokad" ./cmd/lokad
+          else
+            CGO_ENABLED=1 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/lokad" ./cmd/lokad
+          fi
+
+          CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/loka-worker" ./cmd/loka-worker
+          CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/loka-supervisor" ./cmd/loka-supervisor
+          CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/loka" ./cmd/loka
 
           tar -czf "dist/loka-${PLATFORM}.tar.gz" -C dist lokad loka-worker loka-supervisor loka
 
