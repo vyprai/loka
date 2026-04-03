@@ -97,6 +97,18 @@ var migrations = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_file_locks_volume ON file_locks(volume)`,
 	`CREATE INDEX IF NOT EXISTS idx_file_locks_expires ON file_locks(expires_at)`,
+	// Volume revamp: block/object modes, worker placement, size limits.
+	`ALTER TABLE volumes ADD COLUMN type TEXT NOT NULL DEFAULT 'block'`,
+	`ALTER TABLE volumes ADD COLUMN status TEXT NOT NULL DEFAULT 'healthy'`,
+	`ALTER TABLE volumes ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE volumes ADD COLUMN max_size_bytes INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE volumes ADD COLUMN primary_worker_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE volumes ADD COLUMN replica_worker_ids TEXT NOT NULL DEFAULT '[]'`,
+	`ALTER TABLE volumes ADD COLUMN desired_replicas INTEGER NOT NULL DEFAULT 2`,
+	`ALTER TABLE volumes ADD COLUMN bucket TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE volumes ADD COLUMN prefix TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE volumes ADD COLUMN region TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE volumes ADD COLUMN credentials TEXT NOT NULL DEFAULT ''`,
 }
 
 // DB returns the underlying sql.DB for operations that need direct access
@@ -266,11 +278,22 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
 );
 
 CREATE TABLE IF NOT EXISTS volumes (
-	name        TEXT PRIMARY KEY,
-	provider    TEXT NOT NULL DEFAULT 'volume',
-	mount_count INTEGER NOT NULL DEFAULT 0,
-	created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-	updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+	name              TEXT PRIMARY KEY,
+	type              TEXT NOT NULL DEFAULT 'block',
+	status            TEXT NOT NULL DEFAULT 'healthy',
+	provider          TEXT NOT NULL DEFAULT 'volume',
+	size_bytes        INTEGER NOT NULL DEFAULT 0,
+	max_size_bytes    INTEGER NOT NULL DEFAULT 0,
+	primary_worker_id TEXT NOT NULL DEFAULT '',
+	replica_worker_ids TEXT NOT NULL DEFAULT '[]',
+	desired_replicas  INTEGER NOT NULL DEFAULT 2,
+	mount_count       INTEGER NOT NULL DEFAULT 0,
+	bucket            TEXT NOT NULL DEFAULT '',
+	prefix            TEXT NOT NULL DEFAULT '',
+	region            TEXT NOT NULL DEFAULT '',
+	credentials       TEXT NOT NULL DEFAULT '',
+	created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+	updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS tasks (

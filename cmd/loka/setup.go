@@ -1,18 +1,25 @@
 package main
 
 import (
+	"context"
 	crypto_tls "crypto/tls"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
-
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/vyprai/loka/internal/provider"
+	awspkg "github.com/vyprai/loka/internal/provider/aws"
+	azurepkg "github.com/vyprai/loka/internal/provider/azure"
+	dopkg "github.com/vyprai/loka/internal/provider/digitalocean"
+	gcppkg "github.com/vyprai/loka/internal/provider/gcp"
+	ovhpkg "github.com/vyprai/loka/internal/provider/ovh"
 	"github.com/vyprai/loka/pkg/lokaapi"
 )
 
@@ -343,11 +350,114 @@ func newDeployDestroyCmd() *cobra.Command {
 	return cmd
 }
 
-func deployAWS(o deployOpts) error { r:=o.Region; if r=="" {r="us-east-1"}; fmt.Printf("Deploying %q to AWS (%s, %d workers)...\n", o.Name, r, o.Workers); return nil }
-func deployGCP(o deployOpts) error { z:=o.Zone; if z=="" {z="us-central1-a"}; fmt.Printf("Deploying %q to GCP (%s, %d workers)...\n", o.Name, z, o.Workers); return nil }
-func deployAzure(o deployOpts) error { fmt.Printf("Deploying %q to Azure (%d workers)...\n", o.Name, o.Workers); return nil }
-func deployDigitalOcean(o deployOpts) error { fmt.Printf("Deploying %q to DigitalOcean (%d workers)...\n", o.Name, o.Workers); return nil }
-func deployOVH(o deployOpts) error { fmt.Printf("Deploying %q to OVH (%d workers)...\n", o.Name, o.Workers); return nil }
+func deployAWS(o deployOpts) error {
+	if o.Region == "" { o.Region = "us-east-1" }
+	fmt.Printf("Deploying %q to AWS (%s, %d workers)...\n", o.Name, o.Region, o.Workers)
+
+	p, err := awspkg.New(awspkg.Config{
+		Region:    o.Region,
+		AccessKey: os.Getenv("AWS_ACCESS_KEY_ID"),
+		SecretKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
+		KeyName:   o.SSHKey,
+	}, slog.Default())
+	if err != nil { return fmt.Errorf("AWS provider: %w", err) }
+
+	workers, err := p.Provision(context.Background(), provider.ProvisionOpts{
+		InstanceType: o.InstanceType, Region: o.Region, Count: o.Workers,
+		SSHKeyName: o.SSHKey, Labels: map[string]string{"deployment": o.Name},
+	})
+	if err != nil { return err }
+	for _, w := range workers {
+		fmt.Printf("  Worker %s: %s (%s)\n", w.ID, w.ExternalIP, w.Status)
+	}
+	return nil
+}
+
+func deployGCP(o deployOpts) error {
+	if o.Zone == "" { o.Zone = "us-central1-a" }
+	fmt.Printf("Deploying %q to GCP (%s, %d workers)...\n", o.Name, o.Zone, o.Workers)
+
+	p, err := gcppkg.New(gcppkg.Config{
+		ProjectID: o.Project, Zone: o.Zone,
+	}, slog.Default())
+	if err != nil { return fmt.Errorf("GCP provider: %w", err) }
+
+	workers, err := p.Provision(context.Background(), provider.ProvisionOpts{
+		InstanceType: o.InstanceType, Zone: o.Zone, Count: o.Workers,
+		Labels: map[string]string{"deployment": o.Name},
+	})
+	if err != nil { return err }
+	for _, w := range workers {
+		fmt.Printf("  Worker %s: %s (%s)\n", w.ID, w.ExternalIP, w.Status)
+	}
+	return nil
+}
+
+func deployAzure(o deployOpts) error {
+	fmt.Printf("Deploying %q to Azure (%d workers)...\n", o.Name, o.Workers)
+
+	p, err := azurepkg.New(azurepkg.Config{
+		SubscriptionID: os.Getenv("AZURE_SUBSCRIPTION_ID"),
+		ResourceGroup:  os.Getenv("AZURE_RESOURCE_GROUP"),
+		Location:        o.Region,
+	}, slog.Default())
+	if err != nil { return fmt.Errorf("Azure provider: %w", err) }
+
+	workers, err := p.Provision(context.Background(), provider.ProvisionOpts{
+		InstanceType: o.InstanceType, Count: o.Workers,
+		Labels: map[string]string{"deployment": o.Name},
+	})
+	if err != nil { return err }
+	for _, w := range workers {
+		fmt.Printf("  Worker %s (%s)\n", w.ID, w.Status)
+	}
+	return nil
+}
+
+func deployDigitalOcean(o deployOpts) error {
+	if o.Region == "" { o.Region = "nyc1" }
+	fmt.Printf("Deploying %q to DigitalOcean (%s, %d workers)...\n", o.Name, o.Region, o.Workers)
+
+	token := os.Getenv("DIGITALOCEAN_TOKEN")
+	if token == "" { return fmt.Errorf("DIGITALOCEAN_TOKEN environment variable is required") }
+
+	p, err := dopkg.New(dopkg.Config{Token: token, Region: o.Region}, slog.Default())
+	if err != nil { return fmt.Errorf("DigitalOcean provider: %w", err) }
+
+	workers, err := p.Provision(context.Background(), provider.ProvisionOpts{
+		InstanceType: o.InstanceType, Region: o.Region, Count: o.Workers,
+		Labels: map[string]string{"deployment": o.Name},
+	})
+	if err != nil { return err }
+	for _, w := range workers {
+		fmt.Printf("  Droplet %s: %s (%s)\n", w.ID, w.ExternalIP, w.Status)
+	}
+	return nil
+}
+
+func deployOVH(o deployOpts) error {
+	if o.Region == "" { o.Region = "GRA11" }
+	fmt.Printf("Deploying %q to OVH (%s, %d workers)...\n", o.Name, o.Region, o.Workers)
+
+	p, err := ovhpkg.New(ovhpkg.Config{
+		ApplicationKey:    os.Getenv("OVH_APPLICATION_KEY"),
+		ApplicationSecret: os.Getenv("OVH_APPLICATION_SECRET"),
+		ConsumerKey:       os.Getenv("OVH_CONSUMER_KEY"),
+		ProjectID:         os.Getenv("OVH_PROJECT_ID"),
+		Region:            o.Region,
+	}, slog.Default())
+	if err != nil { return fmt.Errorf("OVH provider: %w", err) }
+
+	workers, err := p.Provision(context.Background(), provider.ProvisionOpts{
+		InstanceType: o.InstanceType, Region: o.Region, Count: o.Workers,
+		Labels: map[string]string{"deployment": o.Name},
+	})
+	if err != nil { return err }
+	for _, w := range workers {
+		fmt.Printf("  Instance %s: %s (%s)\n", w.ID, w.ExternalIP, w.Status)
+	}
+	return nil
+}
 
 func findBinary(name string) (string, error) {
 	if p, err := exec.LookPath(name); err == nil { return p, nil }

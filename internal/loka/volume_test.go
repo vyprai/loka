@@ -9,6 +9,7 @@ func TestVolumeEffectiveMode(t *testing.T) {
 		want string
 	}{
 		{"hostpath returns virtiofs", Volume{HostPath: "/data"}, "virtiofs"},
+		{"block type returns virtiofs", Volume{Type: "block"}, "virtiofs"},
 		{"network type returns virtiofs", Volume{Type: "network"}, "virtiofs"},
 		{"object type returns virtiofs", Volume{Type: "object"}, "virtiofs"},
 		{"store type returns virtiofs", Volume{Type: "store"}, "virtiofs"},
@@ -17,8 +18,6 @@ func TestVolumeEffectiveMode(t *testing.T) {
 		{"provider store returns virtiofs", Volume{Provider: "store", Name: "mystore"}, "virtiofs"},
 		{"github returns virtiofs", Volume{Provider: "github", GitRepo: "owner/repo"}, "virtiofs"},
 		{"git returns virtiofs", Volume{Provider: "git", GitRepo: "owner/repo"}, "virtiofs"},
-		{"readonly legacy returns block", Volume{Access: "readonly", Provider: "s3", Bucket: "b"}, "block"},
-		{"readwrite legacy returns fuse", Volume{Provider: "s3", Bucket: "b"}, "fuse"},
 	}
 
 	for _, tt := range tests {
@@ -37,20 +36,19 @@ func TestVolumeEffectiveType(t *testing.T) {
 		vol  Volume
 		want string
 	}{
-		{"explicit network", Volume{Type: "network"}, "network"},
+		{"explicit block", Volume{Type: "block"}, "block"},
 		{"explicit object", Volume{Type: "object"}, "object"},
-		{"explicit store", Volume{Type: "store"}, "store"},
-		{"hostpath auto-detect", Volume{HostPath: "/data"}, "network"},
-		{"provider local auto-detect", Volume{Provider: "local"}, "network"},
-		{"provider volume auto-detect", Volume{Provider: "volume", Name: "mydata"}, "network"},
-		{"provider store auto-detect", Volume{Provider: "store", Name: "mystore"}, "store"},
+		{"hostpath auto-detect", Volume{HostPath: "/data"}, "block"},
+		{"provider local auto-detect", Volume{Provider: "local"}, "block"},
+		{"provider volume auto-detect", Volume{Provider: "volume", Name: "mydata"}, "block"},
+		{"provider store auto-detect", Volume{Provider: "store", Name: "mystore"}, "block"},
 		{"s3 bucket auto-detect", Volume{Bucket: "my-bucket"}, "object"},
 		{"provider s3 auto-detect", Volume{Provider: "s3"}, "object"},
 		{"provider gcs auto-detect", Volume{Provider: "gcs"}, "object"},
 		{"provider azure auto-detect", Volume{Provider: "azure"}, "object"},
 		{"github auto-detect", Volume{Provider: "github", GitRepo: "owner/repo"}, "network"},
 		{"git auto-detect", Volume{Provider: "git", GitRepo: "owner/repo"}, "network"},
-		{"empty defaults to network", Volume{}, "network"},
+		{"empty defaults to block", Volume{}, "block"},
 	}
 
 	for _, tt := range tests {
@@ -72,5 +70,44 @@ func TestVolumeIsReadOnly(t *testing.T) {
 	}
 	if (Volume{}).IsReadOnly() {
 		t.Error("default should not be readonly")
+	}
+}
+
+func TestVolumeRecordIsDirectObject(t *testing.T) {
+	tests := []struct {
+		name string
+		vol  VolumeRecord
+		want bool
+	}{
+		{"block volume", VolumeRecord{Type: VolumeTypeBlock}, false},
+		{"object without bucket", VolumeRecord{Type: VolumeTypeObject}, false},
+		{"object with bucket", VolumeRecord{Type: VolumeTypeObject, Bucket: "my-bucket"}, true},
+		{"block with bucket (invalid)", VolumeRecord{Type: VolumeTypeBlock, Bucket: "b"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.vol.IsDirectObject(); got != tt.want {
+				t.Errorf("IsDirectObject() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestVolumeRecordIsLokaManaged(t *testing.T) {
+	tests := []struct {
+		name string
+		vol  VolumeRecord
+		want bool
+	}{
+		{"block volume", VolumeRecord{Type: VolumeTypeBlock}, true},
+		{"object without bucket", VolumeRecord{Type: VolumeTypeObject}, true},
+		{"object with bucket", VolumeRecord{Type: VolumeTypeObject, Bucket: "my-bucket"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.vol.IsLokaManaged(); got != tt.want {
+				t.Errorf("IsLokaManaged() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

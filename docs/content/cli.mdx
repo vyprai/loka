@@ -207,8 +207,12 @@ loka domain rm my-app
 
 ```bash
 loka volume list                           # List all volumes
-loka volume create my-data --size 10G      # Create a volume
-loka volume inspect my-data                # Volume details
+loka volume create my-data                 # Create a block volume
+loka volume create my-data --max-size 10G  # Block volume with size limit
+loka volume create assets --type object \
+  --bucket my-bucket --region us-east-1    # Object volume (direct connection)
+loka volume create cache --type object     # Object volume (Loka-managed)
+loka volume inspect my-data                # Volume details + placement
 loka volume delete my-data                 # Delete a volume
 ```
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"time"
 )
@@ -46,8 +47,10 @@ type vsockConn struct {
 	readMu   sync.Mutex
 	readCond *sync.Cond
 
-	closed bool
-	mu     sync.Mutex
+	closed        bool
+	readDeadline  time.Time
+	writeDeadline time.Time
+	mu            sync.Mutex
 
 	vsock *Vsock // Back-reference for sending.
 }
@@ -311,11 +314,31 @@ func (c *vsockNetConn) Read(b []byte) (int, error) {
 	for len(c.conn.readBuf) == 0 {
 		c.conn.mu.Lock()
 		closed := c.conn.closed
+		deadline := c.conn.readDeadline
 		c.conn.mu.Unlock()
 		if closed {
 			return 0, io.EOF
 		}
-		c.conn.readCond.Wait()
+
+		// Check if deadline has passed.
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			return 0, os.ErrDeadlineExceeded
+		}
+
+		if !deadline.IsZero() {
+			// Timed wait: use a goroutine + timer to wake readCond.
+			timeout := time.Until(deadline)
+			if timeout <= 0 {
+				return 0, os.ErrDeadlineExceeded
+			}
+			timer := time.AfterFunc(timeout, func() {
+				c.conn.readCond.Broadcast()
+			})
+			c.conn.readCond.Wait()
+			timer.Stop()
+		} else {
+			c.conn.readCond.Wait()
+		}
 	}
 
 	n := copy(b, c.conn.readBuf)
@@ -358,9 +381,30 @@ func (c *vsockNetConn) RemoteAddr() net.Addr {
 	return &vsockAddr{cid: c.conn.dstCID, port: c.conn.dstPort}
 }
 
-func (c *vsockNetConn) SetDeadline(t time.Time) error      { return nil }
-func (c *vsockNetConn) SetReadDeadline(t time.Time) error   { return nil }
-func (c *vsockNetConn) SetWriteDeadline(t time.Time) error  { return nil }
+func (c *vsockNetConn) SetDeadline(t time.Time) error {
+	c.conn.mu.Lock()
+	c.conn.readDeadline = t
+	c.conn.writeDeadline = t
+	c.conn.mu.Unlock()
+	// Wake any blocked readers so they recheck the deadline.
+	c.conn.readCond.Broadcast()
+	return nil
+}
+
+func (c *vsockNetConn) SetReadDeadline(t time.Time) error {
+	c.conn.mu.Lock()
+	c.conn.readDeadline = t
+	c.conn.mu.Unlock()
+	c.conn.readCond.Broadcast()
+	return nil
+}
+
+func (c *vsockNetConn) SetWriteDeadline(t time.Time) error {
+	c.conn.mu.Lock()
+	c.conn.writeDeadline = t
+	c.conn.mu.Unlock()
+	return nil
+}
 
 type vsockAddr struct {
 	cid  uint64

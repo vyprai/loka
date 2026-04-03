@@ -231,9 +231,17 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Readiness: DB responding AND at least 1 worker available.
+	dbOK := resp["database"] == "ok"
+	canSchedule := ready > 0 && dbOK
+	resp["ready"] = canSchedule
+	resp["can_schedule"] = canSchedule
+
 	resp["status"] = overall
 	status := http.StatusOK
-	if overall != "ok" {
+	if !dbOK {
+		overall = "degraded"
+		resp["status"] = overall
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(w, status, resp)

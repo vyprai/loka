@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,11 @@ type BackupManager struct {
 	// Per-database mutex to prevent concurrent catalog writes.
 	catalogMu sync.Map // map[string]*sync.Mutex
 
+	// CP SQLite backup (optional — only if SQLite + objstore configured).
+	cpDBPath     string        // Path to lokad's own SQLite database.
+	cpBackupLast time.Time     // Last CP backup time.
+	cpBackupInt  time.Duration // CP backup interval (default 1 hour).
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -72,6 +78,14 @@ func NewBackupManager(s store.Store, obj objstore.ObjectStore, logger *slog.Logg
 	m.wg.Add(1)
 	go m.scheduler()
 	return m
+}
+
+// SetCPDatabasePath enables periodic backup of the lokad control plane SQLite database.
+// Only effective when objstore is configured.
+func (m *BackupManager) SetCPDatabasePath(dbPath string) {
+	m.cpDBPath = dbPath
+	m.cpBackupInt = 1 * time.Hour
+	m.logger.Info("CP database backup enabled", "path", dbPath, "interval", m.cpBackupInt)
 }
 
 // Close stops the backup scheduler.
@@ -98,7 +112,66 @@ func (m *BackupManager) scheduler() {
 			return
 		case <-ticker.C:
 			m.checkAndRunBackups()
+			m.checkCPBackup()
 		}
+	}
+}
+
+// checkCPBackup backs up the CP SQLite database if due.
+func (m *BackupManager) checkCPBackup() {
+	if m.cpDBPath == "" || m.objStore == nil {
+		return
+	}
+	if time.Since(m.cpBackupLast) < m.cpBackupInt {
+		return
+	}
+
+	if err := m.backupCPDatabase(); err != nil {
+		m.logger.Error("CP database backup failed", "error", err)
+		return
+	}
+	m.cpBackupLast = time.Now()
+}
+
+// backupCPDatabase copies the SQLite DB file to objstore.
+func (m *BackupManager) backupCPDatabase() error {
+	// Checkpoint WAL to flush all data to the main DB file.
+	if db, ok := m.store.(interface{ DB() interface{ ExecContext(ctx context.Context, query string, args ...any) (interface{}, error) } }); ok {
+		db.DB().ExecContext(m.ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	}
+
+	f, err := os.Open(m.cpDBPath)
+	if err != nil {
+		return fmt.Errorf("open CP database: %w", err)
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return fmt.Errorf("stat CP database: %w", err)
+	}
+
+	key := fmt.Sprintf("controlplane/loka-%s.db", time.Now().UTC().Format("20060102-150405"))
+	if err := m.objStore.Put(m.ctx, backupBucket, key, f, info.Size()); err != nil {
+		return fmt.Errorf("upload CP backup: %w", err)
+	}
+
+	m.logger.Info("CP database backed up", "key", key, "size", info.Size())
+
+	// Rotate: keep last 5 backups.
+	m.rotateCPBackups()
+	return nil
+}
+
+// rotateCPBackups keeps only the most recent 5 CP backups.
+func (m *BackupManager) rotateCPBackups() {
+	objects, err := m.objStore.List(m.ctx, backupBucket, "controlplane/")
+	if err != nil || len(objects) <= 5 {
+		return
+	}
+	// Objects are sorted by key (timestamp-based), oldest first.
+	for i := 0; i < len(objects)-5; i++ {
+		m.objStore.Delete(m.ctx, backupBucket, objects[i].Key)
 	}
 }
 

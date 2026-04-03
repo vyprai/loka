@@ -140,6 +140,16 @@ type VolumeRepository interface {
 	Update(ctx context.Context, vol *loka.VolumeRecord) error
 	Delete(ctx context.Context, name string) error
 	List(ctx context.Context) ([]*loka.VolumeRecord, error)
+	// ListByWorker returns volumes where the given worker is primary or a replica.
+	ListByWorker(ctx context.Context, workerID string) ([]*loka.VolumeRecord, error)
+	// UpdatePlacement sets the primary and replica worker assignments.
+	UpdatePlacement(ctx context.Context, name, primaryWorkerID string, replicaWorkerIDs []string) error
+	// UpdateStatus sets the replication status of a volume.
+	UpdateStatus(ctx context.Context, name string, status loka.VolumeStatus) error
+	// IncrementMountCount atomically increments mount_count by 1.
+	IncrementMountCount(ctx context.Context, name string) error
+	// DecrementMountCount atomically decrements mount_count by 1 (clamped at 0).
+	DecrementMountCount(ctx context.Context, name string) error
 }
 
 // TaskFilter controls task list queries.

@@ -4,6 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
+	"strings"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
@@ -33,6 +36,13 @@ func New(dsn string) (*Store, error) {
 	}
 	db.SetMaxOpenConns(25)
 	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(1 * time.Hour)
+
+	// Warn if SSL is not configured.
+	if !strings.Contains(dsn, "sslmode=") || strings.Contains(dsn, "sslmode=disable") {
+		slog.Warn("PostgreSQL connection does not enforce SSL — consider adding sslmode=require to DSN")
+	}
+
 	return &Store{db: db}, nil
 }
 
@@ -68,6 +78,18 @@ var migrations = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_file_locks_volume ON file_locks(volume)`,
 	`CREATE INDEX IF NOT EXISTS idx_file_locks_expires ON file_locks(expires_at)`,
+	// Volume revamp: block/object modes, worker placement, size limits.
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS type TEXT NOT NULL DEFAULT 'block'`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'healthy'`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS size_bytes BIGINT NOT NULL DEFAULT 0`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS max_size_bytes BIGINT NOT NULL DEFAULT 0`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS primary_worker_id TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS replica_worker_ids TEXT NOT NULL DEFAULT '[]'`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS desired_replicas INTEGER NOT NULL DEFAULT 2`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS bucket TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS prefix TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS region TEXT NOT NULL DEFAULT ''`,
+	`ALTER TABLE volumes ADD COLUMN IF NOT EXISTS credentials TEXT NOT NULL DEFAULT ''`,
 }
 
 // DB returns the underlying *sql.DB for components that need raw access.
@@ -163,10 +185,21 @@ CREATE TABLE IF NOT EXISTS worker_tokens (
 );
 
 CREATE TABLE IF NOT EXISTS volumes (
-	name        TEXT PRIMARY KEY,
-	provider    TEXT NOT NULL DEFAULT 'volume',
-	mount_count INTEGER NOT NULL DEFAULT 0,
-	created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-	updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	name              TEXT PRIMARY KEY,
+	type              TEXT NOT NULL DEFAULT 'block',
+	status            TEXT NOT NULL DEFAULT 'healthy',
+	provider          TEXT NOT NULL DEFAULT 'volume',
+	size_bytes        BIGINT NOT NULL DEFAULT 0,
+	max_size_bytes    BIGINT NOT NULL DEFAULT 0,
+	primary_worker_id TEXT NOT NULL DEFAULT '',
+	replica_worker_ids TEXT NOT NULL DEFAULT '[]',
+	desired_replicas  INTEGER NOT NULL DEFAULT 2,
+	mount_count       INTEGER NOT NULL DEFAULT 0,
+	bucket            TEXT NOT NULL DEFAULT '',
+	prefix            TEXT NOT NULL DEFAULT '',
+	region            TEXT NOT NULL DEFAULT '',
+	credentials       TEXT NOT NULL DEFAULT '',
+	created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `

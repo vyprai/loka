@@ -53,6 +53,9 @@ type DomainProxy struct {
 	instanceCache   sync.Map // string → *instanceCacheEntry
 	instanceCacheTTL time.Duration
 
+	// Per-service request metrics for autoscaling.
+	serviceMetrics sync.Map // serviceID → *ServiceMetrics
+
 	// httpClient is a shared, reusable HTTP client for proxying requests.
 	// Avoids creating a new client (and transport) per request, enabling
 	// connection reuse and reducing GC pressure.
@@ -264,6 +267,24 @@ type instanceCacheEntry struct {
 	fetchedAt time.Time
 }
 
+// ServiceMetrics holds per-service request metrics for autoscaling.
+type ServiceMetrics struct {
+	ActiveConnections atomic.Int64
+	TotalRequests     atomic.Int64
+}
+
+// GetServiceMetrics returns the metrics for a service (creates if not exists).
+func (p *DomainProxy) GetServiceMetrics(serviceID string) *ServiceMetrics {
+	v, _ := p.serviceMetrics.LoadOrStore(serviceID, &ServiceMetrics{})
+	return v.(*ServiceMetrics)
+}
+
+// GetActiveConnections returns the current active connection count for a service.
+// Implements the service.AutoscaleMetrics interface.
+func (p *DomainProxy) GetActiveConnections(serviceID string) int64 {
+	return p.GetServiceMetrics(serviceID).ActiveConnections.Load()
+}
+
 // findRunningInstances returns all running instances of a service (primary + replicas).
 // Results are cached for instanceCacheTTL to avoid per-request DB queries.
 func (p *DomainProxy) findRunningInstances(ctx context.Context, svc *loka.Service) []*loka.Service {
@@ -414,6 +435,12 @@ func (p *DomainProxy) handleServiceRoute(w http.ResponseWriter, r *http.Request,
 	if err := p.svcMgr.Touch(ctx, route.ServiceID); err != nil {
 		p.logger.Warn("failed to touch service", "service", route.ServiceID, "error", err)
 	}
+
+	// Track active connections for autoscaling.
+	metrics := p.GetServiceMetrics(route.ServiceID)
+	metrics.ActiveConnections.Add(1)
+	metrics.TotalRequests.Add(1)
+	defer metrics.ActiveConnections.Add(-1)
 
 	// Route to the service: prefer direct VM guest IP (TAP networking),
 	// fall back to vsock-tunnelled forward port, then to worker IP.

@@ -9,7 +9,13 @@ import (
 )
 
 type createVolumeReq struct {
-	Name string `json:"name"`
+	Name         string `json:"name"`
+	Type         string `json:"type"`                    // "block" or "object" (default: "block")
+	Bucket       string `json:"bucket,omitempty"`        // Object volume: user's own bucket (direct mode)
+	Prefix       string `json:"prefix,omitempty"`
+	Region       string `json:"region,omitempty"`
+	Credentials  string `json:"credentials,omitempty"`
+	MaxSizeBytes int64  `json:"max_size_bytes,omitempty"` // Optional max size (0 = unlimited)
 }
 
 // createVolume creates a new named volume.
@@ -25,7 +31,16 @@ func (s *Server) createVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vol, err := s.volumeManager.Create(r.Context(), req.Name)
+	var vol *loka.VolumeRecord
+	var err error
+
+	switch req.Type {
+	case "object":
+		vol, err = s.volumeManager.CreateObject(r.Context(), req.Name, req.Bucket, req.Prefix, req.Region, req.Credentials, req.MaxSizeBytes)
+	default:
+		vol, err = s.volumeManager.CreateBlock(r.Context(), req.Name, req.MaxSizeBytes)
+	}
+
 	if err != nil {
 		writeError(w, http.StatusConflict, err.Error())
 		return
@@ -60,22 +75,33 @@ func (s *Server) getVolume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Also fetch file list from objstore for inspect.
-	files, _ := s.volumeManager.ListFiles(r.Context(), name)
-	var totalSize int64
-	fileCount := 0
-	if files != nil {
-		fileCount = len(files)
-		for _, f := range files {
-			totalSize += f.Size
-		}
+	resp := map[string]any{
+		"volume": vol,
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"volume":     vol,
-		"file_count": fileCount,
-		"total_size": totalSize,
-	})
+	// For object volumes with objstore, include file listing.
+	if vol.Type == loka.VolumeTypeObject && vol.Bucket != "" {
+		files, _ := s.volumeManager.ListFiles(r.Context(), name)
+		var totalSize int64
+		fileCount := 0
+		if files != nil {
+			fileCount = len(files)
+			for _, f := range files {
+				totalSize += f.Size
+			}
+		}
+		resp["file_count"] = fileCount
+		resp["total_size"] = totalSize
+	}
+
+	// For block/loka-managed volumes, include placement info.
+	if vol.IsLokaManaged() {
+		resp["primary_worker_id"] = vol.PrimaryWorkerID
+		resp["replica_worker_ids"] = vol.ReplicaWorkerIDs
+		resp["status"] = vol.Status
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // deleteVolume deletes a named volume.

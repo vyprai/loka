@@ -1,6 +1,11 @@
 package secret
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +15,10 @@ import (
 
 	"gopkg.in/yaml.v3"
 )
+
+// EncryptionKey is the key used to encrypt secret values at rest.
+// Set from application config at startup. If empty, secrets are stored in plaintext.
+var EncryptionKey string
 
 // Store manages credentials in ~/.loka/credentials.yaml
 type Store struct {
@@ -21,7 +30,7 @@ type Store struct {
 type Secret struct {
 	Name  string `yaml:"name"`
 	Type  string `yaml:"type"`  // "env", "aws", "gcs"
-	Value string `yaml:"value"` // plain value (encryption TODO)
+	Value string `yaml:"value"` // encrypted at rest if EncryptionKey is set
 	// AWS-specific
 	AccessKey string `yaml:"access_key,omitempty"`
 	SecretKey string `yaml:"secret_key,omitempty"`
@@ -44,6 +53,7 @@ func NewStore() *Store {
 }
 
 // Set adds or updates a secret in the store.
+// Sensitive fields are encrypted before writing to disk.
 func (s *Store) Set(secret Secret) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -53,23 +63,28 @@ func (s *Store) Set(secret Secret) error {
 		creds = &credentialsFile{}
 	}
 
+	// Encrypt sensitive fields before storing.
+	stored := secret
+	stored.Value = encryptValue(secret.Value)
+	stored.SecretKey = encryptValue(secret.SecretKey)
+
 	// Update existing or append.
 	found := false
 	for i, sec := range creds.Secrets {
-		if sec.Name == secret.Name {
-			creds.Secrets[i] = secret
+		if sec.Name == stored.Name {
+			creds.Secrets[i] = stored
 			found = true
 			break
 		}
 	}
 	if !found {
-		creds.Secrets = append(creds.Secrets, secret)
+		creds.Secrets = append(creds.Secrets, stored)
 	}
 
 	return s.save(creds)
 }
 
-// Get retrieves a secret by name.
+// Get retrieves a secret by name. Sensitive fields are decrypted.
 func (s *Store) Get(name string) (*Secret, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -81,6 +96,9 @@ func (s *Store) Get(name string) (*Secret, error) {
 
 	for _, sec := range creds.Secrets {
 		if sec.Name == name {
+			// Decrypt sensitive fields.
+			sec.Value = decryptValue(sec.Value)
+			sec.SecretKey = decryptValue(sec.SecretKey)
 			return &sec, nil
 		}
 	}
@@ -153,9 +171,11 @@ func (s *Store) Resolve(value string) (string, error) {
 		return value, err
 	}
 
-	// Build lookup map.
+	// Build lookup map with decrypted values.
 	lookup := make(map[string]Secret)
 	for _, sec := range creds.Secrets {
+		sec.Value = decryptValue(sec.Value)
+		sec.SecretKey = decryptValue(sec.SecretKey)
 		lookup[sec.Name] = sec
 	}
 
@@ -217,7 +237,6 @@ func (s *Store) load() (*credentialsFile, error) {
 }
 
 func (s *Store) save(creds *credentialsFile) error {
-	// Ensure directory exists.
 	dir := filepath.Dir(s.path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create credentials directory: %w", err)
@@ -228,7 +247,6 @@ func (s *Store) save(creds *credentialsFile) error {
 		return fmt.Errorf("marshal credentials: %w", err)
 	}
 
-	// Write with restrictive permissions.
 	if err := os.WriteFile(s.path, data, 0600); err != nil {
 		return fmt.Errorf("write credentials file: %w", err)
 	}
@@ -241,4 +259,60 @@ func maskValue(v string) string {
 		return "****"
 	}
 	return v[:4] + "****"
+}
+
+// ── Encryption helpers (AES-256-GCM, same pattern as database.go) ──
+
+func deriveKey(key string) []byte {
+	h := sha256.Sum256([]byte(key))
+	return h[:]
+}
+
+func encryptValue(plaintext string) string {
+	if EncryptionKey == "" || plaintext == "" {
+		return plaintext
+	}
+	key := deriveKey(EncryptionKey)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return plaintext
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return plaintext
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return plaintext
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return "enc:" + base64.StdEncoding.EncodeToString(ciphertext)
+}
+
+func decryptValue(encrypted string) string {
+	if EncryptionKey == "" || !strings.HasPrefix(encrypted, "enc:") {
+		return encrypted
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(encrypted, "enc:"))
+	if err != nil {
+		return encrypted
+	}
+	key := deriveKey(EncryptionKey)
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return encrypted
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return encrypted
+	}
+	if len(data) < gcm.NonceSize() {
+		return encrypted
+	}
+	nonce, ciphertext := data[:gcm.NonceSize()], data[gcm.NonceSize():]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "[encrypted — key mismatch]"
+	}
+	return string(plaintext)
 }

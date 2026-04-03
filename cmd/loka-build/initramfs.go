@@ -140,7 +140,7 @@ mount -t proc proc /proc
 mount -t sysfs sysfs /sys
 mount -t devtmpfs devtmpfs /dev
 mkdir -p /dev/pts /dev/shm
-mount -t devpts -o newinstance,ptmxmode=0666 devpts /dev/pts
+mount -t devpts -o newinstance,ptmxmode=0620 devpts /dev/pts
 ln -sf pts/ptmx /dev/ptmx
 mount -t tmpfs tmpfs /dev/shm
 mount -t tmpfs tmpfs /tmp
@@ -177,7 +177,7 @@ for param in $(cat /proc/cmdline); do
             mount -t sysfs sysfs /merged/sys
             mount -t devtmpfs devtmpfs /merged/dev
             mkdir -p /merged/dev/pts /merged/dev/shm
-            mount -t devpts -o newinstance,ptmxmode=0666 devpts /merged/dev/pts
+            mount -t devpts -o newinstance,ptmxmode=0620 devpts /merged/dev/pts
             mount -t tmpfs tmpfs /merged/dev/shm
             mount -t tmpfs tmpfs /merged/tmp
             mount -t tmpfs tmpfs /merged/run

@@ -2,6 +2,8 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -36,6 +38,7 @@ type CheckpointResult struct {
 	SessionID    string
 	LayerName    string
 	OverlayKey   string // Object store key for the overlay tar.
+	SHA256       string // SHA256 hash of the overlay tar for integrity verification.
 	Success      bool
 	Error        string
 }
@@ -65,15 +68,28 @@ func (m *CheckpointManager) Create(ctx context.Context, sessionID, checkpointID 
 	tmpPath := tmpFile.Name()
 	defer os.Remove(tmpPath)
 
-	if err := m.overlay.TarLayer(sessionID, layerName, tmpFile); err != nil {
+	// Write tar through a SHA256 hasher for integrity verification.
+	hasher := sha256.New()
+	tarWriter := io.MultiWriter(tmpFile, hasher)
+	if err := m.overlay.TarLayer(sessionID, layerName, tarWriter); err != nil {
 		tmpFile.Close()
 		result.Error = fmt.Sprintf("tar layer: %v", err)
 		return result
 	}
+	result.SHA256 = hex.EncodeToString(hasher.Sum(nil))
 
 	// Get size and rewind for upload.
-	size, _ := tmpFile.Seek(0, io.SeekEnd)
-	tmpFile.Seek(0, io.SeekStart)
+	size, seekErr := tmpFile.Seek(0, io.SeekEnd)
+	if seekErr != nil {
+		tmpFile.Close()
+		result.Error = fmt.Sprintf("seek temp file: %v", seekErr)
+		return result
+	}
+	if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+		tmpFile.Close()
+		result.Error = fmt.Sprintf("rewind temp file: %v", err)
+		return result
+	}
 
 	// 3. Upload to object store from file (streaming, no heap spike).
 	overlayKey := fmt.Sprintf("sessions/%s/checkpoints/%s/overlay.tar.gz", sessionID, checkpointID)
@@ -91,6 +107,7 @@ func (m *CheckpointManager) Create(ctx context.Context, sessionID, checkpointID 
 		"type", cpType,
 		"layer", layerName,
 		"size", size,
+		"sha256", result.SHA256,
 	)
 
 	result.Success = true

@@ -29,6 +29,15 @@ const (
 	manifestKey  = ".lokavol/manifest.json"
 )
 
+// SyncTarget abstracts where synced data goes (objstore or peer worker).
+type SyncTarget interface {
+	UploadFile(ctx context.Context, volName, relPath string, r io.Reader, size int64) error
+	DeleteFile(ctx context.Context, volName, relPath string) error
+	SaveManifest(ctx context.Context, volName string, manifest *Manifest) error
+	FetchManifest(ctx context.Context, volName string) (*Manifest, error)
+	DownloadFile(ctx context.Context, volName, relPath, localPath string) error
+}
+
 // Agent watches local volume directories and syncs changes to objstore.
 type Agent struct {
 	dataDir  string // Root data directory (volumes at {dataDir}/volumes/).
@@ -37,6 +46,9 @@ type Agent struct {
 
 	mu      sync.Mutex
 	watches map[string]*volumeWatch // volume name → watch state
+	// targets holds additional sync targets per volume (e.g., peer workers).
+	// The objStore target is always used implicitly when objStore != nil.
+	targets map[string][]SyncTarget // volume name → extra targets
 	ctx     context.Context
 	cancel  context.CancelFunc
 }
@@ -55,11 +67,12 @@ type FileEntry struct {
 }
 
 type volumeWatch struct {
-	name     string
-	localDir string
-	watcher  *fsnotify.Watcher
-	manifest *Manifest
-	cancel   context.CancelFunc
+	name       string
+	localDir   string
+	watcher    *fsnotify.Watcher
+	manifest   *Manifest
+	manifestMu sync.RWMutex // Protects manifest reads and writes.
+	cancel     context.CancelFunc
 }
 
 // NewAgent creates a volume sync agent.
@@ -70,9 +83,34 @@ func NewAgent(dataDir string, objStore objstore.ObjectStore, logger *slog.Logger
 		objStore: objStore,
 		logger:   logger,
 		watches:  make(map[string]*volumeWatch),
+		targets:  make(map[string][]SyncTarget),
 		ctx:      ctx,
 		cancel:   cancel,
 	}
+}
+
+// AddTarget registers an additional sync target for a volume (e.g., peer worker).
+func (a *Agent) AddTarget(volName string, target SyncTarget) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.targets[volName] = append(a.targets[volName], target)
+}
+
+// RemoveTargets removes all extra sync targets for a volume.
+func (a *Agent) RemoveTargets(volName string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	delete(a.targets, volName)
+}
+
+// BuildLocalManifest scans a local directory and builds a manifest.
+func BuildLocalManifest(volDir string) *Manifest {
+	return buildLocalManifest(volDir)
+}
+
+// HashFile computes the SHA256 hash of a file.
+func HashFile(path string) (string, error) {
+	return hashFile(path)
 }
 
 // Stop shuts down all watchers.
@@ -284,7 +322,9 @@ func (a *Agent) watchLoop(ctx context.Context, w *volumeWatch) {
 				if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 					// File deleted — remove from objstore.
 					a.deleteRemoteFile(w.name, rel)
+					w.manifestMu.Lock()
 					delete(w.manifest.Files, rel)
+					w.manifestMu.Unlock()
 				} else {
 					// File created/modified — upload.
 					if err := a.uploadFile(w.name, w.localDir, rel); err != nil {
@@ -325,12 +365,14 @@ func (a *Agent) reconcileVolume(w *volumeWatch) {
 		currentFiles[rel] = true
 
 		// Check if file has changed since last manifest entry.
+		w.manifestMu.RLock()
 		existing, ok := w.manifest.Files[rel]
+		w.manifestMu.RUnlock()
 		if ok && existing.Size == info.Size() && existing.MTime == info.ModTime().UTC().Format(time.RFC3339) {
 			return nil // Unchanged.
 		}
 
-		// Upload changed file.
+		// Upload changed file (uploadFile acquires manifestMu internally).
 		if err := a.uploadFile(w.name, w.localDir, rel); err != nil {
 			a.logger.Warn("reconcile upload failed", "volume", w.name, "file", rel, "error", err)
 		}
@@ -339,6 +381,7 @@ func (a *Agent) reconcileVolume(w *volumeWatch) {
 
 	// Remove manifest entries for deleted files.
 	changed := false
+	w.manifestMu.Lock()
 	for rel := range w.manifest.Files {
 		if !currentFiles[rel] {
 			a.deleteRemoteFile(w.name, rel)
@@ -346,17 +389,14 @@ func (a *Agent) reconcileVolume(w *volumeWatch) {
 			changed = true
 		}
 	}
+	w.manifestMu.Unlock()
 	if changed {
 		a.saveManifest(w)
 	}
 }
 
-// uploadFile uploads a single file to objstore and updates the manifest.
+// uploadFile uploads a single file to objstore and extra targets, updates the manifest.
 func (a *Agent) uploadFile(volName, volDir, relPath string) error {
-	if a.objStore == nil {
-		return nil
-	}
-
 	fullPath := filepath.Join(volDir, relPath)
 	info, err := os.Stat(fullPath)
 	if err != nil {
@@ -366,28 +406,49 @@ func (a *Agent) uploadFile(volName, volDir, relPath string) error {
 		return nil
 	}
 
-	f, err := os.Open(fullPath)
-	if err != nil {
-		return err
+	// Upload to objstore if available.
+	if a.objStore != nil {
+		f, err := os.Open(fullPath)
+		if err != nil {
+			return err
+		}
+		objKey := volName + "/" + relPath
+		err = a.objStore.Put(a.ctx, volumeBucket, objKey, f, info.Size())
+		f.Close()
+		if err != nil {
+			return fmt.Errorf("upload %s: %w", relPath, err)
+		}
 	}
-	defer f.Close()
 
-	objKey := volName + "/" + relPath
-	if err := a.objStore.Put(a.ctx, volumeBucket, objKey, f, info.Size()); err != nil {
-		return fmt.Errorf("upload %s: %w", relPath, err)
+	// Push to extra sync targets (peer workers) — async, best-effort.
+	a.mu.Lock()
+	targets := a.targets[volName]
+	a.mu.Unlock()
+	for _, t := range targets {
+		f, err := os.Open(fullPath)
+		if err != nil {
+			continue
+		}
+		if err := t.UploadFile(a.ctx, volName, relPath, f, info.Size()); err != nil {
+			a.logger.Warn("target upload failed", "volume", volName, "file", relPath, "error", err)
+		}
+		f.Close()
 	}
 
 	// Update manifest entry.
 	hash, _ := hashFile(fullPath)
 	a.mu.Lock()
-	if w, ok := a.watches[volName]; ok {
+	w := a.watches[volName]
+	a.mu.Unlock()
+	if w != nil {
+		w.manifestMu.Lock()
 		w.manifest.Files[relPath] = FileEntry{
 			Size:   info.Size(),
 			SHA256: hash,
 			MTime:  info.ModTime().UTC().Format(time.RFC3339),
 		}
+		w.manifestMu.Unlock()
 	}
-	a.mu.Unlock()
 
 	return nil
 }
@@ -424,27 +485,39 @@ func (a *Agent) downloadFile(volName, volDir, relPath string) error {
 	return os.Rename(tmpPath, fullPath)
 }
 
-// deleteRemoteFile removes a file from objstore.
+// deleteRemoteFile removes a file from objstore and extra targets.
 func (a *Agent) deleteRemoteFile(volName, relPath string) {
-	if a.objStore == nil {
-		return
+	if a.objStore != nil {
+		objKey := volName + "/" + relPath
+		a.objStore.Delete(a.ctx, volumeBucket, objKey)
 	}
-	objKey := volName + "/" + relPath
-	a.objStore.Delete(a.ctx, volumeBucket, objKey)
+	a.mu.Lock()
+	targets := a.targets[volName]
+	a.mu.Unlock()
+	for _, t := range targets {
+		t.DeleteFile(a.ctx, volName, relPath)
+	}
 }
 
-// saveManifest writes the volume manifest to objstore.
+// saveManifest writes the volume manifest to objstore and extra targets.
 func (a *Agent) saveManifest(w *volumeWatch) {
-	if a.objStore == nil {
-		return
-	}
+	w.manifestMu.RLock()
 	data, err := json.MarshalIndent(w.manifest, "", "  ")
+	w.manifestMu.RUnlock()
 	if err != nil {
 		return
 	}
-	reader := strings.NewReader(string(data))
-	objKey := w.name + "/" + manifestKey
-	a.objStore.Put(a.ctx, volumeBucket, objKey, reader, int64(len(data)))
+	if a.objStore != nil {
+		reader := strings.NewReader(string(data))
+		objKey := w.name + "/" + manifestKey
+		a.objStore.Put(a.ctx, volumeBucket, objKey, reader, int64(len(data)))
+	}
+	a.mu.Lock()
+	targets := a.targets[w.name]
+	a.mu.Unlock()
+	for _, t := range targets {
+		t.SaveManifest(a.ctx, w.name, w.manifest)
+	}
 }
 
 // loadManifest loads the manifest from objstore into the watch state.
@@ -458,7 +531,9 @@ func (a *Agent) loadManifest(ctx context.Context, w *volumeWatch) {
 		return // No manifest yet.
 	}
 	defer reader.Close()
+	w.manifestMu.Lock()
 	json.NewDecoder(reader).Decode(w.manifest)
+	w.manifestMu.Unlock()
 }
 
 // fetchRemoteManifest downloads and parses the remote manifest.

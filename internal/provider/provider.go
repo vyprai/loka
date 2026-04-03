@@ -19,6 +19,23 @@ const (
 	WorkerInfraError
 )
 
+func (s WorkerInfraStatus) String() string {
+	switch s {
+	case WorkerInfraProvisioning:
+		return "provisioning"
+	case WorkerInfraRunning:
+		return "running"
+	case WorkerInfraTerminating:
+		return "terminating"
+	case WorkerInfraTerminated:
+		return "terminated"
+	case WorkerInfraError:
+		return "error"
+	default:
+		return "unknown"
+	}
+}
+
 // ProvisionOpts configures the provisioning of a new worker.
 type ProvisionOpts struct {
 	InstanceType string

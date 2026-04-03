@@ -58,35 +58,72 @@ func NewCPClient(baseURL, token string, tlsOpts *CPClientTLS, logger *slog.Logge
 }
 
 func (c *CPClient) post(ctx context.Context, path string, body any, result any) error {
-	var bodyReader io.Reader
+	var data []byte
 	if body != nil {
-		data, _ := json.Marshal(body)
-		bodyReader = bytes.NewReader(data)
+		var err error
+		data, err = json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("marshal request: %w", err)
+		}
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+path, bodyReader)
-	if err != nil {
-		return err
+
+	const maxRetries = 3
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			// Exponential backoff: 1s, 2s, 4s.
+			backoff := time.Duration(1<<(attempt-1)) * time.Second
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		var bodyReader io.Reader
+		if data != nil {
+			bodyReader = bytes.NewReader(data)
+		}
+		req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+path, bodyReader)
+		if err != nil {
+			return err
+		}
+		if data != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if c.token != "" {
+			req.Header.Set("Authorization", "Bearer "+c.token)
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil {
+				return err // Context cancelled, don't retry.
+			}
+			c.logger.Warn("CP request failed, retrying", "path", path, "attempt", attempt+1, "error", err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		// 5xx errors are retryable; 4xx are not.
+		if resp.StatusCode >= 500 {
+			var errResp map[string]string
+			json.NewDecoder(resp.Body).Decode(&errResp)
+			lastErr = fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp["error"])
+			c.logger.Warn("CP server error, retrying", "path", path, "status", resp.StatusCode, "attempt", attempt+1)
+			continue
+		}
+		if resp.StatusCode >= 400 {
+			var errResp map[string]string
+			json.NewDecoder(resp.Body).Decode(&errResp)
+			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp["error"])
+		}
+		if result != nil {
+			return json.NewDecoder(resp.Body).Decode(result)
+		}
+		return nil
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		var errResp map[string]string
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, errResp["error"])
-	}
-	if result != nil {
-		return json.NewDecoder(resp.Body).Decode(result)
-	}
-	return nil
+	return lastErr
 }
 
 // Register registers this worker with the control plane.

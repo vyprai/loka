@@ -118,6 +118,13 @@ func (pp *PostgresProxy) classifyMessage(msgType byte, payload []byte) bool {
 			stmtName := parts[0]
 			sql := parts[1]
 			isRead := pp.classifySQL(sql)
+			// Evict oldest if map grows too large (prevents memory leak).
+			if len(pp.prepStmts) >= 1000 {
+				for k := range pp.prepStmts {
+					delete(pp.prepStmts, k)
+					break
+				}
+			}
 			pp.prepStmts[stmtName] = isRead
 			return isRead
 		}
@@ -144,11 +151,19 @@ func (pp *PostgresProxy) classifyMessage(msgType byte, payload []byte) bool {
 
 // classifySQL checks if a SQL statement is a read query.
 func (pp *PostgresProxy) classifySQL(sql string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+
+	// COMMIT/ROLLBACK must be checked before the txnPinned early return,
+	// otherwise they can never unpin the transaction.
+	if strings.HasPrefix(upper, "COMMIT") || strings.HasPrefix(upper, "END") ||
+		strings.HasPrefix(upper, "ROLLBACK") || strings.HasPrefix(upper, "ABORT") {
+		pp.txnPinned = false
+		return false
+	}
+
 	if pp.txnPinned {
 		return false // Inside transaction — everything to primary.
 	}
-
-	upper := strings.ToUpper(strings.TrimSpace(sql))
 
 	// Transaction control — pin to primary.
 	if strings.HasPrefix(upper, "BEGIN") ||

@@ -1,37 +1,93 @@
 ---
 title: Volumes
-description: Persistent storage with cross-worker sync
+description: Persistent storage with worker-first replication
 ---
 
 # Volumes
 
 Volumes provide persistent storage for sessions and services. Data in a volume survives session restarts, redeployments, and can be shared across components.
 
-## Create a volume
+LOKA supports two volume types:
+
+| Type | Description | Replication | Use case |
+|------|-------------|-------------|----------|
+| **Block** | Folder on worker host, mounted via virtiofs | 2 replicas across workers | Application data, databases, uploads |
+| **Object** | Backed by object storage (S3/GCS/Azure) | Object store is source of truth | Assets, media, shared files |
+
+## Block volumes
+
+Block volumes are the default. Data lives directly on the worker host as a regular directory, mounted into VMs via virtiofs for native filesystem performance. Each block volume is replicated to a second worker for durability.
+
+### Create a block volume
 
 ```bash
-loka volume create my-data --size 10G
+loka volume create my-data
 ```
 
-## List volumes
+With a size limit:
 
 ```bash
-loka volume list
+loka volume create my-data --max-size 10G
 ```
 
-## Inspect a volume
+### Replication
+
+Every block volume maintains 2 copies across different workers:
+
+- **Primary**: the worker running the service that mounts the volume
+- **Replica**: a second worker holding a copy for failover
+
+Replication is fully async -- writes are never blocked. Changes are detected via filesystem notifications and pushed to the replica worker in the background (typically within 200ms).
+
+```
+Write path:  VM → virtiofs → host filesystem → done (full disk speed)
+Replication: fsnotify → 200ms debounce → async push to replica
+```
+
+If the primary worker dies, the replica is automatically promoted to primary and a new replica is assigned.
+
+In single-worker mode, block volumes run in **degraded** mode (1 copy only). When a second worker joins, replication starts automatically.
+
+### Shared access
+
+Multiple service instances can mount the same block volume. Use the lock API to coordinate access:
 
 ```bash
-loka volume inspect my-data
+# Acquire a shared (read) lock
+curl -X POST http://localhost:8080/api/v1/volumes/my-data/lock \
+  -d '{"path": "/", "worker_id": "w1", "exclusive": false, "ttl": 30}'
+
+# Acquire an exclusive (write) lock
+curl -X POST http://localhost:8080/api/v1/volumes/my-data/lock \
+  -d '{"path": "/", "worker_id": "w1", "exclusive": true, "ttl": 30}'
 ```
 
-Shows volume details including size, usage, attached services, and sync status.
+Multiple workers can hold shared locks simultaneously. An exclusive lock blocks all other holders.
 
-## Delete a volume
+## Object volumes
+
+Object volumes are backed by object storage. Two sub-modes:
+
+### Loka-managed
+
+When no bucket is specified, LOKA uses its configured object store as the backend. If no object store is configured, the volume falls back to block mode.
 
 ```bash
-loka volume delete my-data
+loka volume create my-assets --type object
 ```
+
+### Direct connection
+
+Connect directly to your own S3/GCS/Azure bucket:
+
+```bash
+loka volume create my-assets --type object \
+  --bucket my-s3-bucket \
+  --prefix assets/ \
+  --region us-east-1
+```
+
+Workers cache object volume data locally for performance and sync changes back to the bucket. The object store is the source of truth -- no worker-to-worker replication is needed.
 
 ## Mount a volume in a service
 
@@ -60,21 +116,9 @@ Volumes are created automatically if they do not already exist.
 loka session create --image python:3.12-slim --volume my-data:/data
 ```
 
-## Cross-worker sync
+## Mount cloud storage directly
 
-When a service is rescheduled to a different worker, its volumes are automatically synced to the new host. LOKA uses an internal volume sync mechanism to ensure data availability across the cluster.
-
-The sync process:
-
-1. When a workload is scheduled on a worker, the scheduler checks if the required volumes are present.
-2. If a volume is on a different worker, the volume sync copies the data to the target worker.
-3. The workload starts once the volume is available locally.
-
-For large volumes, this may take time. The scheduler prefers workers that already have the required volumes to minimize sync overhead.
-
-## Storage mounts (cloud)
-
-For sessions, you can also mount cloud storage (S3, GCS) directly:
+For sessions, you can mount cloud storage directly without creating a volume:
 
 ```bash
 loka session create --image python:3.12-slim \
@@ -88,8 +132,44 @@ loka session sync <id> /data --direction push   # VM --> cloud
 loka session sync <id> /data --direction pull   # cloud --> VM
 ```
 
+## List volumes
+
+```bash
+loka volume list
+```
+
+## Inspect a volume
+
+```bash
+loka volume inspect my-data
+```
+
+Shows volume details including type, status, size, worker placement, and mount count.
+
+## Delete a volume
+
+```bash
+loka volume delete my-data
+```
+
+Volumes that are currently mounted cannot be deleted.
+
+## Volume status
+
+| Status | Meaning |
+|--------|---------|
+| `healthy` | All replicas present, fully redundant |
+| `degraded` | Fewer replicas than desired (e.g., single-worker mode) |
+| `syncing` | Replica catch-up in progress |
+| `error` | Data loss -- all copies lost |
+
+## Scheduling affinity
+
+The scheduler prefers workers that already hold a volume's primary copy. This avoids unnecessary data transfers when redeploying a service.
+
 ## Next steps
 
 - [loka.yaml Reference](/loka-yaml) -- configuring volume mounts
 - [Services](/services) -- managing services with volumes
 - [Sessions](/sessions) -- session storage mounts
+- [Architecture](/architecture) -- volume internals

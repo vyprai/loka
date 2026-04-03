@@ -67,10 +67,10 @@ func DecryptPassword(encrypted string) string {
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		// Decryption failed — key may have changed since this password was encrypted.
-		// Return the encrypted blob as-is. The credential endpoint will show it.
+		// Return a redacted placeholder instead of leaking ciphertext.
 		slog.Warn("failed to decrypt database password — encryption key may have changed",
 			"error", err)
-		return encrypted
+		return "[encrypted — key mismatch]"
 	}
 	return string(plaintext)
 }
@@ -415,8 +415,9 @@ func ExpireLoginRoleSQL(cfg *DatabaseConfig, oldLogin string, deadline time.Time
 }
 
 // GenerateLoginRole creates a unique login role name using crypto/rand.
+// Uses 8 bytes (64 bits) of randomness for the suffix.
 func GenerateLoginRole(dbName string) string {
-	b := make([]byte, 4)
+	b := make([]byte, 8)
 	rand.Read(b)
 	return fmt.Sprintf("%s_login_%s", SanitizeIdentifier(dbName), hex.EncodeToString(b))
 }

@@ -77,15 +77,17 @@ Built-in DNS server that resolves `.loka` domains to the control plane. Enabled 
 
 ### Volume Manager
 
-Manages persistent volumes that can be attached to sessions and services. Supports cross-worker volume sync so data follows workloads across the cluster.
+Manages persistent volume metadata in the control plane. The control plane stores no volume data -- actual data lives on workers (block volumes) or object storage (object volumes). The volume manager handles worker placement, replication assignment, failover on worker death, and degraded volume healing.
+
+Block volumes are replicated across 2 workers. The scheduler prefers workers already holding a volume's primary copy (volume affinity).
 
 ### Lock Manager
 
-Coordinates distributed locking for operations that require mutual exclusion, such as volume writes and snapshot creation.
+Coordinates distributed file locking for shared block volumes. Supports both exclusive and shared (multi-holder) locks with per-holder TTLs. Workers acquire locks via the control plane API before writing to shared volumes.
 
 ### Scheduler
 
-Assigns sessions and services to worker nodes based on available capacity. Supports affinity hints (e.g., place a session on the same worker as its parent checkpoint).
+Assigns sessions and services to worker nodes based on available capacity. Supports affinity hints including volume affinity (prefer workers holding volume primaries) and region/provider preferences.
 
 ### Worker
 
@@ -103,9 +105,9 @@ Each session or service instance runs in a dedicated microVM with its own kernel
 
 Stores base images, warm snapshots (memory + disk), and checkpoint overlays. Can be backed by local disk or shared storage (NFS, S3).
 
-### Volume Sync
+### Volume Replication
 
-Synchronizes volume data between workers, ensuring persistent data is available wherever a workload is scheduled.
+Handles worker-to-worker data replication for block volumes. The primary worker pushes changes to replica workers via HTTP using manifest-based diffing (SHA256 per file). Replication is fully async -- writes are never blocked. Each worker also serves volume data to peers via an HTTP API for initial sync and periodic reconciliation.
 
 ## Data flow
 
@@ -127,11 +129,12 @@ Synchronizes volume data between workers, ensuring persistent data is available 
 | `internal/controlplane/` | CP business logic (sessions, services, scheduling) |
 | `internal/controlplane/api/` | HTTP/gRPC API server, domain proxy, volume endpoints |
 | `internal/controlplane/service/` | Service manager |
-| `internal/controlplane/volume/` | Volume manager |
-| `internal/controlplane/lock/` | Distributed lock manager |
+| `internal/controlplane/volume/` | Volume manager (metadata-only, no data on CP) |
+| `internal/controlplane/lock/` | Distributed file lock manager (shared + exclusive) |
 | `internal/supervisor/` | VM-side command execution, policy enforcement |
 | `internal/worker/` | Worker agent, VM lifecycle |
-| `internal/worker/volsync/` | Volume sync between workers |
+| `internal/worker/volsync/` | Volume sync agent (fsnotify, manifest-based diffing) |
+| `internal/worker/volrepl/` | Worker-to-worker volume replication (HTTP) |
 | `proto/` | gRPC service definitions |
 | `sdk/python/` | Python SDK source |
 | `sdk/typescript/` | TypeScript SDK source |

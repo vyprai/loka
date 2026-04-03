@@ -122,10 +122,30 @@ health:
 
 ```yaml
 mounts:
+  # Block volume (default) -- data on worker, replicated
   - volume: my-data            # Volume name (created automatically if needed)
     path: /data                # Mount path inside the VM
     read_only: false           # Default: false
+
+  # Object volume -- backed by S3/GCS/Azure
+  - volume: assets
+    path: /assets
+    type: object               # "block" (default) or "object"
+    bucket: my-s3-bucket       # Direct connection to your bucket
+    prefix: assets/
+    region: us-east-1
 ```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `volume` | string | required | Volume name |
+| `path` | string | required | Mount path inside the VM |
+| `read_only` | bool | `false` | Mount as read-only |
+| `type` | string | `block` | Volume type: `block` or `object` |
+| `bucket` | string | - | Object storage bucket (direct connection) |
+| `prefix` | string | - | Object key prefix |
+| `region` | string | - | Cloud region |
+| `max_size` | string | - | Maximum volume size (e.g., `10G`) |
 
 See [Volumes](/volumes) for more on persistent storage.
 

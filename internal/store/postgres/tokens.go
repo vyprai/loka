@@ -64,7 +64,7 @@ func (r *tokenRepo) Delete(ctx context.Context, id string) error {
 
 func (r *tokenRepo) List(ctx context.Context) ([]*loka.WorkerToken, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, name, token, expires_at, used, worker_id, created_at FROM worker_tokens ORDER BY created_at DESC`)
+		`SELECT id, name, token, expires_at, used, worker_id, created_at FROM worker_tokens ORDER BY created_at DESC LIMIT 10000`)
 	if err != nil {
 		return nil, err
 	}

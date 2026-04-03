@@ -2,6 +2,7 @@ package dbproxy
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -187,8 +188,22 @@ func readRESPCommand(r *bufio.Reader) (string, []byte, error) {
 	return cmdName, raw, nil
 }
 
+const (
+	maxRESPArrayCount = 65536  // Max elements in a RESP array.
+	maxRESPBulkLen    = 512 << 20 // 512 MB max bulk string.
+	maxRESPDepth      = 10     // Max nesting depth for arrays.
+)
+
 // readRESPResponse reads a full RESP response (may be multi-line for arrays).
 func readRESPResponse(r *bufio.Reader) ([]byte, error) {
+	return readRESPResponseDepth(r, 0)
+}
+
+func readRESPResponseDepth(r *bufio.Reader, depth int) ([]byte, error) {
+	if depth > maxRESPDepth {
+		return nil, fmt.Errorf("RESP nesting depth exceeded (%d)", maxRESPDepth)
+	}
+
 	line, err := r.ReadBytes('\n')
 	if err != nil {
 		return nil, err
@@ -206,11 +221,19 @@ func readRESPResponse(r *bufio.Reader) ([]byte, error) {
 		result := make([]byte, len(line))
 		copy(result, line)
 		bulkLen := 0
+		neg := false
 		for _, b := range line[1 : len(line)-2] {
 			if b == '-' {
-				return result, nil // $-1 = null bulk string.
+				neg = true
+				continue
 			}
 			bulkLen = bulkLen*10 + int(b-'0')
+		}
+		if neg {
+			return result, nil // $-1 = null bulk string.
+		}
+		if bulkLen > maxRESPBulkLen {
+			return nil, fmt.Errorf("RESP bulk string too large: %d", bulkLen)
 		}
 		data := make([]byte, bulkLen+2) // +2 for trailing \r\n
 		if _, err := io.ReadFull(r, data); err != nil {
@@ -218,18 +241,26 @@ func readRESPResponse(r *bufio.Reader) ([]byte, error) {
 		}
 		return append(result, data...), nil
 
-	case '*': // Array — read count, then read that many elements recursively.
+	case '*': // Array — read count, then read that many elements.
 		result := make([]byte, len(line))
 		copy(result, line)
 		count := 0
+		neg := false
 		for _, b := range line[1 : len(line)-2] {
 			if b == '-' {
-				return result, nil // *-1 = null array.
+				neg = true
+				continue
 			}
 			count = count*10 + int(b-'0')
 		}
+		if neg {
+			return result, nil // *-1 = null array.
+		}
+		if count > maxRESPArrayCount {
+			return nil, fmt.Errorf("RESP array too large: %d (max %d)", count, maxRESPArrayCount)
+		}
 		for i := 0; i < count; i++ {
-			elem, err := readRESPResponse(r)
+			elem, err := readRESPResponseDepth(r, depth+1)
 			if err != nil {
 				return nil, err
 			}

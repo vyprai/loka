@@ -605,12 +605,15 @@ func TestDecryptPassword_WrongKey(t *testing.T) {
 	EncryptionKey = "key-two"
 	decrypted := DecryptPassword(encrypted)
 
-	// Wrong key can't decrypt — returns encrypted blob as-is.
+	// Wrong key can't decrypt — returns redacted placeholder, not plaintext or ciphertext.
 	if decrypted == "my-secret-password" {
 		t.Error("decrypted with wrong key should NOT return plaintext")
 	}
-	if decrypted != encrypted {
-		t.Error("expected encrypted blob returned as-is on wrong key")
+	if decrypted == encrypted {
+		t.Error("decrypted with wrong key should NOT return ciphertext")
+	}
+	if decrypted != "[encrypted — key mismatch]" {
+		t.Errorf("expected redacted placeholder, got %q", decrypted)
 	}
 }
 
