@@ -7,13 +7,31 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  test-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
-      - run: go build ./...
-      - run: go vet ./...
-      - run: go test ./... -count=1 -timeout 120s
+      # Exclude pkg/lokavm from Linux builds — it imports Code-Hex/vz which
+      # requires macOS CGO (Apple Virtualization Framework). The vz module's
+      # generated stringer file lacks build tags and fails on Linux.
+      - name: Build
+        run: go build $(go list ./... | grep -v pkg/lokavm)
+      - name: Vet
+        run: go vet $(go list ./... | grep -v pkg/lokavm)
+      - name: Test
+        run: go test $(go list ./... | grep -v pkg/lokavm) -count=1 -timeout 180s
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: Build
+        run: CGO_ENABLED=1 go build ./...
+      - name: Test
+        run: go test ./... -count=1 -timeout 180s
