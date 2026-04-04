@@ -31,7 +31,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24'
+      # Exclude pkg/lokavm — Code-Hex/vz requires Apple Virtualization
+      # Framework entitlement which CI runners don't have.
       - name: Build
-        run: CGO_ENABLED=1 go build ./...
+        run: go build $(go list ./... | grep -v pkg/lokavm)
       - name: Test
-        run: go test ./... -count=1 -timeout 180s
+        run: go test $(go list ./... | grep -v pkg/lokavm) -count=1 -timeout 180s
