@@ -18,7 +18,9 @@ jobs:
           - os: ubuntu-latest
             goos: linux
             goarch: arm64
-          - os: macos-latest
+          # macOS: use native runners to avoid CGO cross-compilation issues.
+          # macos-13 = Intel (amd64), macos-latest = Apple Silicon (arm64).
+          - os: macos-13
             goos: darwin
             goarch: amd64
           - os: macos-latest
@@ -45,17 +47,30 @@ jobs:
           LDFLAGS="-s -w -X github.com/vyprai/loka/pkg/version.Version=${REF_NAME}"
           mkdir -p dist
 
-          # lokad: CGO_ENABLED=1 on macOS (Apple VZ), CGO_ENABLED=0 on Linux (KVM pure Go).
-          # Code-Hex/vz/v3 stringer file lacks build tags — fails with CGO on Linux.
-          if [ "${GOOS}" = "linux" ]; then
-            CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/lokad" ./cmd/lokad
-          else
+          if [ "${GOOS}" = "darwin" ]; then
+            # macOS: build with CGO for Apple Virtualization Framework.
+            # Must build natively (no cross-compile) due to CGO + framework deps.
             CGO_ENABLED=1 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/lokad" ./cmd/lokad
+          else
+            # Linux: pure Go KVM — no CGO needed.
+            # Code-Hex/vz stringer files lack build tags, so CGO must be off.
+            CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/lokad" ./cmd/lokad
           fi
 
           CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/loka-worker" ./cmd/loka-worker
           CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/loka-supervisor" ./cmd/loka-supervisor
           CGO_ENABLED=0 go build -trimpath -ldflags "${LDFLAGS}" -o "dist/loka" ./cmd/loka
+
+          # Sign lokad on macOS with Virtualization entitlement.
+          if [ "${GOOS}" = "darwin" ]; then
+            cat > /tmp/vz.entitlements << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>
+          PLIST
+            codesign --entitlements /tmp/vz.entitlements --force -s - "dist/lokad" || true
+            rm -f /tmp/vz.entitlements
+          fi
 
           tar -czf "dist/loka-${PLATFORM}.tar.gz" -C dist lokad loka-worker loka-supervisor loka
 
